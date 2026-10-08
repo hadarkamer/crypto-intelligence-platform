@@ -415,7 +415,8 @@ class ProviderTests(unittest.TestCase):
         with patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_CAPACITY_UNTIL_DUE')):
             context=self.provider.collect(self.state,entries_enabled=True)
         self.assertEqual(context['entry_retry_after_ms'][cid],retry)
-        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.assertEqual(self.raw.calls,[])
+        self.assertEqual(context['inventory_accounts'],[])
         self.assertEqual(context['capacity'],{})
 
     def test_insufficient_whole_preflight_budget_stops_before_optional_reads(self):
@@ -427,10 +428,63 @@ class ProviderTests(unittest.TestCase):
                         ceiling=800,retry_after_ms=9000)
         self.provider.budget=SimpleNamespace(capacity=capacity)
         context=self.provider.collect(self.state,entries_enabled=True)
-        self.assertEqual(requested,[(183,'background')])
-        self.assertEqual([c[0] for c in self.raw.calls],
-                         ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs'])
+        self.assertEqual(requested,[(225,'background')])
+        self.assertEqual(self.raw.calls,[])
+        self.assertEqual(context['inventory_accounts'],[])
+        self.assertEqual(context['account_inventory_at_ms'],{})
         self.assertEqual(context['entry_retry_after_ms'][msg['occurrence_id']],self.exchange.t+9000)
+
+    def test_source_budget_wait_does_not_skip_existing_fill_protection(self):
+        from types import SimpleNamespace
+        self.active(steps=1)
+        msg=self.approved();self.provider.safety=object()
+        self.provider.budget=SimpleNamespace(capacity=lambda **kw:dict(
+            eligible=False,used_weight=658,requested_weight=kw['requested_weight'],
+            ceiling=800,retry_after_ms=9000))
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][msg['occurrence_id']],
+                         'TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        self.assertTrue(context['snapshots'])
+        self.assertIn(self.state['routes']['short_account'],context['inventory_accounts'])
+        self.assertIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.assertNotIn('userAbstraction',[c[0] for c in self.raw.calls])
+
+    def test_static_protected_trade_skips_mark_but_new_missing_exit_restores_it(self):
+        from types import SimpleNamespace
+        from .test_experimental_live_safety import LiveSafetyTests
+        from .test_simplified_execution_replay import sol_alert
+        h=LiveSafetyTests(methodName='runTest');h.setUp();self.addCleanup(h.doCleanups)
+        h.supervisor._thread=SimpleNamespace(is_alive=lambda:True,join=lambda **kwargs:None)
+        h.ready_feed();h.supervisor.pass_once(force_collect=True);fx=h.fx
+        msg=sol_alert((fx.oracle.now()//60000)*60000)
+        account=fx.release['routes']['long_account']
+        fx.oracle.mark[runtime._lane(account,msg['symbol'])]=msg['entry']
+        fx.worker.receive([msg]);fx.worker.run_once(entries_enabled=True)
+        trade=fx.store.load()['trades'][msg['occurrence_id']]
+        fx.oracle.fill(fx.oracle.oid('ENTRY'),trade['quantity'])
+        for _ in range(3):fx.worker.run_once(entries_enabled=False)
+        fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=False)
+        self.assertEqual(context['marks'],{})
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in fx.raw.calls])
+        # A second same-symbol alert must stop at the unchanged local gate.
+        peer=sol_alert((fx.oracle.now()//60000)*60000,cycle='peer')
+        fx.worker.receive([peer]);fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][peer['occurrence_id']],runtime.shared_market.ENTRY_BLOCK)
+        self.assertEqual(context['capacity'],{})
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in fx.raw.calls])
+        self.assertNotIn('userAbstraction',[c[0] for c in fx.raw.calls])
+        stop=fx.oracle.orders[fx.oracle.oid('STOP')]['view']
+        stop['status']='CANCELED';stop['at_ms']=fx.oracle.now()
+        fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=False)
+        self.assertIn(runtime._lane(account,msg['symbol']),context['marks'])
+        self.assertEqual([c[0] for c in fx.raw.calls].count('metaAndAssetCtxs'),1)
+        repaired=fx.worker.run_once(entries_enabled=False)
+        self.assertEqual(repaired.get('operation'),'CREATE_EXIT',repaired)
+        self.assertEqual(sum(r['proposal']['leg']=='STOP' and r['proposal']['operation']=='CREATE_EXIT'
+            for r in fx.store.load()['requests'].values()),2)
 
     def test_nested_preflight_keeps_budget_delay_and_stops_remaining_reads(self):
         from .request_budget import BudgetError

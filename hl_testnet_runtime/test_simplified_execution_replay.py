@@ -224,7 +224,52 @@ class ReductionReplay(unittest.TestCase):
         fx.provider.collect(fx.store.load(),entries_enabled=True)
         entry=dict(reads=len(fx.raw.calls)-before,weight=ledger.used()-weight,
                    by_kind=dict(Counter(row[0] for row in fx.raw.calls[before:])))
-        return dict(empty_inventory=empty,entry_collection=entry)
+        result=dict(empty_inventory=empty,entry_collection=entry)
+        # Measure complete, unchanged HTTP boundaries. Setup calls are excluded
+        # from each named scenario, but the real weighted limiter stays active.
+        for waiting in (False,True):
+            idle,charged=self.fixture(); idle_fx=idle.fx
+            idle.supervisor.pass_once(force_collect=True)
+            began=idle_fx.oracle.now()
+            if waiting:
+                deferred=sol_alert((began//60000)*60000,cycle='waiting')
+                idle_fx.worker.receive([deferred])
+                idle_fx.store.mutate(lambda state:state.setdefault('entry_decisions',{}).update({
+                    deferred['occurrence_id']:dict(reason='TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                                                   retry_after_ms=began+45000)}))
+            first=len(idle_fx.raw.calls); used=charged.used(); states=[]
+            for offset in range(5000,30001,5000):
+                idle_fx.oracle.t=began+offset
+                states.append(idle_fx.service.tick()['status'])
+                idle.supervisor.pass_once()
+            result['budget_wait_30_seconds' if waiting else 'idle_30_seconds']=dict(
+                reads=len(idle_fx.raw.calls)-first,weight=charged.used()-used,
+                by_kind=dict(Counter(row[0] for row in idle_fx.raw.calls[first:])),states=states,
+                synthetic_actions=len(idle_fx.http))
+        stable,charged=self.fixture(); stable_fx=stable.fx
+        stable.supervisor.pass_once(force_collect=True)
+        message=sol_alert((stable_fx.oracle.now()//60000)*60000,cycle='protected')
+        account=stable_fx.release['routes']['long_account']
+        stable_fx.oracle.mark[core._lane(account,message['symbol'])]=message['entry']
+        stable_fx.worker.receive([message])
+        entered=stable_fx.worker.run_once(entries_enabled=True)
+        self.assertEqual(entered.get('operation'),'ENTRY',entered)
+        trade=stable_fx.store.load()['trades'][message['occurrence_id']]
+        stable_fx.oracle.fill(stable_fx.oracle.oid('ENTRY'),trade['quantity'])
+        for _ in range(3):stable_fx.worker.run_once(entries_enabled=False)
+        trade=stable_fx.store.load()['trades'][message['occurrence_id']]
+        self.assertEqual(trade['phase'],'OPEN',trade)
+        for blocked in (False,True):
+            if blocked:
+                peer=sol_alert((stable_fx.oracle.now()//60000)*60000,cycle='blocked-peer')
+                stable_fx.worker.receive([peer])
+            first=len(stable_fx.raw.calls); used=charged.used()
+            collected=stable_fx.provider.collect(stable_fx.store.load(),entries_enabled=True)
+            result['blocked_peer_collection' if blocked else 'stable_protected_collection']=dict(
+                reads=len(stable_fx.raw.calls)-first,weight=charged.used()-used,
+                by_kind=dict(Counter(row[0] for row in stable_fx.raw.calls[first:])),
+                entry_capacity_count=len(collected['capacity']),entry_blocked=collected['entry_blocked'])
+        return result
 
     def replay(self, *, latency_ms=0, warm_weight=616, cadence_ms=5000,
                burst=False, side='LONG', lifecycle=False, partial=False,

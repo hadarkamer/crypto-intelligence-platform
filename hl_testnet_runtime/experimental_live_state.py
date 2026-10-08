@@ -140,8 +140,9 @@ class TestnetExecutionState(HistoryMixin):
             if any(value.get(k) != v for k, v in immutable.items()):
                 raise StateError('TESTNET_STATE_IDENTITY_CHANGED')
             value['revision'] += 1
-            checked(value, life.digest(value))
-            conn.execute(f'UPDATE {PG_SCHEMA}.state SET value=%s::jsonb,checksum=%s WHERE singleton', (encode(value), life.digest(value)))
+            checksum = life.digest(value)
+            checked(value, checksum)
+            conn.execute(f'UPDATE {PG_SCHEMA}.state SET value=%s::jsonb,checksum=%s WHERE singleton', (encode(value), checksum))
         return deepcopy(result)
 
     def request(self, request_id):

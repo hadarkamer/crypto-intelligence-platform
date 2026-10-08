@@ -143,16 +143,16 @@ class ConnectionService:
             raise BoundaryError('EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING')
         self._next_entry_retry_ms = None
         try:
-            release = self.release_loader()
-            startup_allowed = self.startup_entries_allowed
-            if self.startup_entry_gate is not None:
-                startup_allowed = self.startup_entry_gate() is True
             # Idle ticks reuse the committed observation until its next scan.
             # Feed changes revoke reuse immediately.
             receipt = self.supervisor.idle_receipt() if self.supervisor is not None else None
             if receipt is not None:
                 result = dict(status='OBSERVED_IDLE_REUSED', safety_checkpoint_id=receipt)
             else:
+                release = self.release_loader()
+                startup_allowed = self.startup_entries_allowed
+                if self.startup_entry_gate is not None:
+                    startup_allowed = self.startup_entry_gate() is True
                 result = self.runtime.run_once(entries_enabled=startup_allowed and
                     releases.entry_enabled(release, self.runtime.venue.now()))
             self.cycles += 1

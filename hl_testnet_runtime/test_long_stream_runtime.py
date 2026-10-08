@@ -65,15 +65,13 @@ class ConfigurationTests(NoExternal):
              patch.object(stream.threading,'Thread') as thread, \
              patch.object(stream,'_thread',None),patch.object(stream,'_app_thread',None), \
              patch.object(stream,'_fill_wakeups',None),patch.object(stream,'_health',{}), \
-             patch.object(stream,'_stop',Mock()),patch.object(stream,'_wake',Mock()), \
-             patch.object(stream,'_short_account_readiness') as diagnostic:
+             patch.object(stream,'_stop',Mock()),patch.object(stream,'_wake',Mock()):
             self.assertTrue(stream.start())
             thread.assert_called_once()
             self.assertIs(thread.call_args.kwargs['target'],stream._loop)
             self.assertEqual(len(thread.call_args.kwargs['args'][1]),2)
             feeds.return_value.start.assert_called_once()
             emergency.assert_called_once()
-            diagnostic.assert_not_called()
 
     def test_current_account_reconciliation_retains_only_fresh_fully_protected_members(self):
         good=state_from_case(q='100',stop='100',take='100')
@@ -211,124 +209,6 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(result['status'],'ENTRIES_DISABLED')
         controller.cycle.assert_called_once_with('saved-short',send=True,allow_new_entries=False)
         controller.venue.send.assert_not_called()
-
-    def test_short_pending_diagnostic_reads_public_state_without_order_or_identifiers(self):
-        controller=Mock()
-        controller.store.for_account.return_value=[dict(symbol='DOGE',pending='private-request-id')]
-        controller.store.request.return_value=dict(phase='OUTCOME_UNKNOWN',
-            reply=dict(state='OUTCOME_UNKNOWN',code=None),attempt_at_ms=T,
-            proposal=dict(leg='STOP',action=dict(type='order',orders=[dict(c='private-cloid')])))
-        controller.venue.now.return_value=T+1000
-        controller.venue.lookup.return_value=dict(status='unknownOid',
-                                                  secret='private-venue-field')
-        reader=Mock()
-        reader.read.side_effect=[[],dict(assetPositions=[]),[]]
-        output=io.StringIO()
-        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
-             redirect_stdout(output):
-            stream._short_pending_readiness(controller,{'account':B})
-        report=json.loads(output.getvalue())['testnet_short_pending_readiness']
-        self.assertEqual(report['status'],'PENDING_PUBLIC_EVIDENCE_OBSERVED')
-        self.assertEqual(report['pending'],[dict(symbol='DOGE',phase='OUTCOME_UNKNOWN',
-            reply_state='OUTCOME_UNKNOWN',leg='STOP',reply_code=None,lookup_status='unknownOid',
-            symbol_open_orders_present=False,symbol_position_present=False,
-            fill_window_complete=True,symbol_fills_since_attempt=False)])
-        self.assertEqual(report['order_requests_sent'],0)
-        self.assertNotIn('private-',output.getvalue())
-        controller.venue.send.assert_not_called()
-        controller.store.request.return_value['phase']='REJECTED'
-        controller.store.request.return_value['reply']=dict(state='REJECTED',
-            code='OTHER_REJECTION',venue_reason='Order price too far from oracle',
-            rejection_subject='AGENT')
-        reader.read.side_effect=[[],dict(assetPositions=[]),[]]
-        output=io.StringIO()
-        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
-             redirect_stdout(output):
-            stream._short_pending_readiness(controller,{'account':B})
-        rejected=json.loads(output.getvalue())['testnet_short_pending_readiness']['pending'][0]
-        self.assertEqual(rejected['rejection_reason'],'Order price too far from oracle')
-        self.assertEqual(rejected['rejection_subject'],'AGENT')
-        reader.read.side_effect=[[dict(other='malformed')],dict(assetPositions=[])]
-        output=io.StringIO()
-        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
-             redirect_stdout(output):
-            stream._short_pending_readiness(controller,{'account':B})
-        invalid=json.loads(output.getvalue())['testnet_short_pending_readiness']
-        self.assertEqual(invalid['status'],'READ_ONLY_REVIEW_UNAVAILABLE')
-        self.assertEqual(invalid['pending'],[])
-
-    def test_recent_short_cards_check_current_budget_without_dispatch(self):
-        controller=Mock()
-        controller.venue.env={}
-        controller.store.for_account.return_value=[dict(symbol='BTC',originals={'c':{}},
-                                                         bindings=[],pending=None,
-                                                         evidence=dict(snapshot=dict(at_ms=1234,fills=[])))]
-        conn=Mock()
-        conn.execute.return_value.fetchall.return_value=[('c',)]
-        controller.store.journal._transaction.return_value=nullcontext(conn)
-        card=dict(prepared=dict(source=dict(at='2026-09-26T17:05:00+00:00'),
-                                execution=dict(symbol='BTC',side='SHORT',entry='100',
-                                               stop='102',take_profit='98')))
-        output=io.StringIO()
-        with patch.object(stream,'CardStore') as store, \
-             patch.object(stream.roles,'budget_for_role',
-                side_effect=stream.roles.checks.Blocked('ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')), \
-             redirect_stdout(output):
-            store.return_value.load.return_value=card
-            stream._short_card_readiness(controller,{'account':B,'agent':AGENT})
-        report=json.loads(output.getvalue())['testnet_short_card_readiness']
-        self.assertEqual(report['buckets'][0]['registered_cards'],1)
-        self.assertEqual(report['buckets'][0]['evidence_at_ms'],1234)
-        self.assertEqual(report['buckets'][0]['evidence_fill_count'],0)
-        self.assertEqual(report['cards'][0]['current_budget_status'],
-                         'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')
-        self.assertEqual(report['order_requests_sent'],0)
-        controller.venue.send.assert_not_called()
-
-    def test_second_account_readiness_is_read_only_and_redacted(self):
-        for failure, status in (
-                (stream.roles.checks.Blocked('AGENT_ACCOUNT_MISMATCH'), 'AGENT_ACCOUNT_MISMATCH'),
-                (ValueError('private credential'), 'READ_ONLY_REVIEW_UNAVAILABLE')):
-            output=io.StringIO()
-            with patch.object(stream.roles.checks,'InfoReader') as reader, \
-                 patch.object(stream.roles,'default_native_snapshot',side_effect=failure),redirect_stdout(output):
-                reader.return_value.read.return_value='default'
-                stream._short_account_readiness({'account':B,'agent':AGENT})
-            report=json.loads(output.getvalue())['testnet_short_account_readiness']
-            self.assertEqual(report['status'],status)
-            self.assertEqual(report['order_requests_sent'],0)
-            self.assertNotIn('credential',output.getvalue())
-        output=io.StringIO()
-        observation=dict(status='NATIVE_CAPACITY_OBSERVED_NO_ORDER_CHECKED',
-                         account_mode='default',balance_usd='100',
-                         exchange_reported_available_usd='100',account_mapping_verified=True,
-                         unrelated_private_field='must not log')
-        with patch.object(stream.roles.checks,'InfoReader') as reader, \
-             patch.object(stream.roles,'default_native_snapshot',return_value=observation),redirect_stdout(output):
-            reader.return_value.read.return_value='default'
-            stream._short_account_readiness({'account':B,'agent':AGENT})
-        report=json.loads(output.getvalue())['testnet_short_account_readiness']
-        self.assertEqual(report['balance_usd'],'100')
-        self.assertNotIn('unrelated_private_field',output.getvalue())
-
-    def test_unified_short_readiness_uses_mode_aware_public_check(self):
-        output=io.StringIO()
-        observation=dict(status='ACCOUNT_CHECKED_WAITING_FOR_TEST_PLAN',
-                         account_mapping_verified=True, positive_usdc_observed=True,
-                         unheld_balance_observed=True, exchange_capacity_observed=True,
-                         private_field='must not log')
-        with patch.object(stream.roles.checks,'InfoReader') as reader, \
-             patch.object(stream.roles.checks,'run_check',return_value=observation) as check, \
-             patch.object(stream.roles,'default_native_snapshot',side_effect=AssertionError('default only')), \
-             redirect_stdout(output):
-            reader.return_value.read.return_value='unifiedAccount'
-            stream._short_account_readiness({'account':B,'agent':AGENT})
-        report=json.loads(output.getvalue())['testnet_short_account_readiness']
-        self.assertEqual(report['account_mode'],'unifiedAccount')
-        self.assertEqual(report['status'],'ACCOUNT_CHECKED_WAITING_FOR_TEST_PLAN')
-        self.assertEqual(report['order_requests_sent'],0)
-        self.assertNotIn('private_field',output.getvalue())
-        check.assert_called_once()
 
     def test_stream_failure_reports_safe_code_without_exception_details(self):
         controller=Mock()

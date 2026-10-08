@@ -1,55 +1,524 @@
 {
-  "scope": "Isolated simplification of Testnet execution; no deployment or live exchange access",
+  "scope": "Deep cleanup of existing isolated Testnet execution branch; no new files or operation types; no live deployment",
   "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
   "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
+  "deep_cleanup_local_base": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+  "receiver_feature_parent": "f1129b9151a2c1a663743369eae13d0e9cf29a20",
   "tests": {
-    "passed": 2825,
-    "skipped": 603,
+    "passed": 2782,
+    "skipped": 571,
     "failures": 0,
     "errors": 0,
+    "tests_run": 3353,
     "network_attempts_blocked": 0
   },
   "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
   "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-  "measured_reads": {
-    "idle_before": 8,
-    "idle_after": 4,
-    "pre_entry_before": 17,
-    "pre_entry_after": 8,
-    "pre_entry_weight_before": 330,
-    "pre_entry_weight_after": 222
+  "deep_cleanup": {
+    "deleted_files": [
+      "receiver/hl_testnet_runtime/card_app_copy.py",
+      "receiver/hl_testnet_runtime/exclusive_exit_protocol.py",
+      "receiver/hl_testnet_runtime/experimental_local_controller.py",
+      "receiver/hl_testnet_runtime/test_card_app_copy.py",
+      "receiver/hl_testnet_runtime/test_exclusive_exit_protocol.py",
+      "receiver/hl_testnet_runtime/test_exclusive_raw_flow.py",
+      "receiver/hl_testnet_runtime/test_experimental_local_controller.py"
+    ],
+    "deleted_file_count": 7,
+    "deleted_production_files": 3,
+    "deleted_test_files": 4,
+    "production_function_definitions_removed": 50,
+    "production_function_definitions_added": 0,
+    "production_classes_removed": 3,
+    "removed_production_functions": {
+      "receiver/hl_testnet_runtime/card_app_copy.py": [
+        "_observed",
+        "lifecycle",
+        "received"
+      ],
+      "receiver/hl_testnet_runtime/exclusive_exit_protocol.py": [
+        "Rehearsal.__init__",
+        "Rehearsal.abort_unsent",
+        "Rehearsal.abort_unsent.update",
+        "Rehearsal.begin",
+        "Rehearsal.begin.update",
+        "Rehearsal.confirm",
+        "Rehearsal.confirm.update",
+        "Rehearsal.observe",
+        "Rehearsal.observe.update",
+        "Rehearsal.prepare",
+        "Rehearsal.prepare.update",
+        "Rehearsal.read_snapshot",
+        "_candidate",
+        "_contracts",
+        "_frozen_request",
+        "_lookup",
+        "_read",
+        "plan"
+      ],
+      "receiver/hl_testnet_runtime/experimental_local_controller.py": [
+        "LocalController.__init__",
+        "LocalController._change",
+        "LocalController._load",
+        "LocalController._source_view",
+        "LocalController._synchronize",
+        "LocalController._validate",
+        "LocalController.advance_stop",
+        "LocalController.advance_stop.transition",
+        "LocalController.attach_simulated_protection",
+        "LocalController.attach_simulated_protection.transition",
+        "LocalController.begin_entry",
+        "LocalController.begin_entry.transition",
+        "LocalController.begin_stop",
+        "LocalController.begin_stop.transition",
+        "LocalController.initialize",
+        "LocalController.load",
+        "LocalController.observe_stop",
+        "LocalController.observe_stop.transition",
+        "LocalController.prepare_entry",
+        "LocalController.prepare_entry.transition",
+        "LocalController.reserve_stop",
+        "LocalController.reserve_stop.transition",
+        "LocalController.stop_reply",
+        "LocalController.stop_reply.transition",
+        "readiness"
+      ],
+      "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": [
+        "Controller._observation_guard"
+      ],
+      "receiver/hl_testnet_runtime/long_stream_runtime.py": [
+        "_short_account_readiness",
+        "_short_card_readiness",
+        "_short_pending_readiness"
+      ]
+    },
+    "obsolete_test_methods_removed": 79,
+    "focused_test_methods_added_in_existing_files": 4,
+    "production_files_modified": 6,
+    "test_files_modified": 4,
+    "new_files": 0,
+    "production_line_diff": {
+      "added": 125,
+      "removed": 862,
+      "net_removed": 737
+    },
+    "lines_in_seven_deleted_files": 1572,
+    "formula_alert_price_risk_contract_files_changed": 0,
+    "producer_files_changed": 0,
+    "removal_basis": [
+      "Three disconnected prototype modules with no live, CLI, HTTP, startup or dynamic import callers",
+      "Four test files exclusively covering deleted prototypes",
+      "Three unused short-account diagnostics and one unused observation-lock property"
+    ]
   },
-  "changes": [
-    "One routine inventory and reconciliation pass",
-    "Collect participating accounts only while work exists",
-    "Reuse same-collection account mode and balance",
-    "Reuse known order identity and verified terminal facts",
-    "One shared collection owner; supervisor fallback",
-    "Skip partial entry preflight while insufficient budget; retain existing quota and 90-second source expiry",
-    "Reuse unchanged fully protected static observations for at most 10 seconds",
-    "Remove duplicate intake validation and unnecessary archive transactions"
+  "work_reductions": [
+    "Apply unchanged local admission gates before candidate-only exchange reads",
+    "Move existing allowance check before candidate-only inventory and market reads",
+    "Skip market read after current reconciliation confirms fully protected fixed exits",
+    "Empty account periodic fallback changed from ten to sixty seconds; source/feed/retry forces fresh work",
+    "Skip admission configuration reload on already idle cycles",
+    "Skip ownership validation for observations too old to establish health",
+    "Reuse already computed state checksum; one fewer serialization/digest per mutation"
   ],
+  "measured_counts_before_this_cleanup": {
+    "empty_inventory": {
+      "reads": 4,
+      "weight": 44,
+      "by_kind": {
+        "frontendOpenOrders": 2,
+        "clearinghouseState": 2
+      }
+    },
+    "entry_collection": {
+      "reads": 8,
+      "weight": 222,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "userAbstraction": 1,
+        "userRole": 2,
+        "activeAssetData": 1,
+        "userRateLimit": 1
+      }
+    },
+    "idle_30_seconds": {
+      "reads": 12,
+      "weight": 132,
+      "by_kind": {
+        "frontendOpenOrders": 6,
+        "clearinghouseState": 6
+      },
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION"
+      ],
+      "synthetic_actions": 0
+    },
+    "budget_wait_30_seconds": {
+      "reads": 12,
+      "weight": 132,
+      "by_kind": {
+        "frontendOpenOrders": 6,
+        "clearinghouseState": 6
+      },
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_NO_ACTION"
+      ],
+      "synthetic_actions": 0
+    },
+    "stable_protected_collection": {
+      "reads": 6,
+      "weight": 67,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "orderStatus": 2,
+        "userFillsByTime": 1
+      },
+      "entry_capacity_count": 0,
+      "entry_blocked": {}
+    },
+    "blocked_peer_collection": {
+      "reads": 11,
+      "weight": 247,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "orderStatus": 2,
+        "userFillsByTime": 1,
+        "userAbstraction": 1,
+        "userRole": 2,
+        "activeAssetData": 1,
+        "userRateLimit": 1
+      },
+      "entry_capacity_count": 1,
+      "entry_blocked": {}
+    }
+  },
+  "measured_counts_after_this_cleanup": {
+    "empty_inventory": {
+      "reads": 4,
+      "weight": 44,
+      "by_kind": {
+        "frontendOpenOrders": 2,
+        "clearinghouseState": 2
+      }
+    },
+    "entry_collection": {
+      "reads": 8,
+      "weight": 222,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "userAbstraction": 1,
+        "userRole": 2,
+        "activeAssetData": 1,
+        "userRateLimit": 1
+      }
+    },
+    "idle_30_seconds": {
+      "reads": 0,
+      "weight": 0,
+      "by_kind": {},
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED"
+      ],
+      "synthetic_actions": 0
+    },
+    "budget_wait_30_seconds": {
+      "reads": 0,
+      "weight": 0,
+      "by_kind": {},
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED"
+      ],
+      "synthetic_actions": 0
+    },
+    "stable_protected_collection": {
+      "reads": 5,
+      "weight": 47,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "orderStatus": 2,
+        "userFillsByTime": 1
+      },
+      "entry_capacity_count": 0,
+      "entry_blocked": {}
+    },
+    "blocked_peer_collection": {
+      "reads": 5,
+      "weight": 47,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "orderStatus": 2,
+        "userFillsByTime": 1
+      },
+      "entry_capacity_count": 0,
+      "entry_blocked": {
+        "bf1845754975c7c948ef20eed09870943fdd9cb8700dbb4e40831a23493b2538": "SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED"
+      }
+    }
+  },
+  "empty_60_second_measurement": {
+    "before_calls": 24,
+    "after_calls": 4,
+    "calls_removed": 20,
+    "note": "Excludes initial scan; two empty accounts; existing tick and supervisor schedule"
+  },
+  "measurement_scope": "Same offline real collectors and finite weighted quota; exchange/network/SQL are deterministic test doubles. Thirty-second idle/wait samples exclude initial inventory. Entries measured per collection.",
+  "lifecycle_results": {
+    "concurrent": {
+      "entries": [
+        {
+          "side": "long_account",
+          "at_ms": 750
+        },
+        {
+          "side": "short_account",
+          "at_ms": 6401
+        }
+      ],
+      "closed_ms": 87105,
+      "phases": {
+        "long_account": "CLOSED",
+        "short_account": "CLOSED"
+      },
+      "wire_actions": [
+        "long_account:ENTRY:ENTRY",
+        "short_account:ENTRY:ENTRY",
+        "long_account:CREATE_EXIT:STOP",
+        "long_account:CREATE_EXIT:TAKE_PROFIT",
+        "short_account:EMERGENCY_CLOSE:STOP",
+        "long_account:CANCEL:STOP"
+      ],
+      "synthetic_actions": 6
+    },
+    "concurrent_transient_immediate": {
+      "entries": [
+        {
+          "side": "long_account",
+          "at_ms": 4550
+        },
+        {
+          "side": "short_account",
+          "at_ms": 73650
+        }
+      ],
+      "closed_ms": 100701,
+      "phases": {
+        "long_account": "CLOSED",
+        "short_account": "CLOSED"
+      },
+      "wire_actions": [
+        "long_account:ENTRY:ENTRY",
+        "long_account:CREATE_EXIT:STOP",
+        "long_account:CREATE_EXIT:TAKE_PROFIT",
+        "long_account:CANCEL:STOP",
+        "short_account:ENTRY:ENTRY",
+        "short_account:CREATE_EXIT:STOP",
+        "short_account:CREATE_EXIT:TAKE_PROFIT",
+        "short_account:CANCEL:STOP"
+      ],
+      "synthetic_actions": 8
+    },
+    "concurrent_steady_unfilled": {
+      "entries": [
+        {
+          "side": "long_account",
+          "at_ms": 750
+        }
+      ],
+      "closed_ms": null,
+      "phases": {
+        "long_account": "OUTCOME_UNKNOWN"
+      },
+      "wire_actions": [
+        "long_account:ENTRY:ENTRY"
+      ],
+      "synthetic_actions": 1
+    },
+    "long": {
+      "submitted_ms": 4001,
+      "synthetic_actions": 1,
+      "lifecycle": {
+        "protected_ms": 10003,
+        "closed_ms": 20005,
+        "wire_actions": [
+          "ENTRY:ENTRY",
+          "CREATE_EXIT:STOP",
+          "CREATE_EXIT:TAKE_PROFIT",
+          "CANCEL:STOP"
+        ],
+        "wire_exit_times_ms": {
+          "STOP": 1,
+          "TAKE_PROFIT": 5002
+        }
+      }
+    },
+    "short": {
+      "submitted_ms": 5201,
+      "synthetic_actions": 1,
+      "lifecycle": {
+        "protected_ms": 12853,
+        "closed_ms": 24955,
+        "wire_actions": [
+          "ENTRY:ENTRY",
+          "CREATE_EXIT:STOP",
+          "CREATE_EXIT:TAKE_PROFIT",
+          "CANCEL:STOP"
+        ],
+        "wire_exit_times_ms": {
+          "STOP": 901,
+          "TAKE_PROFIT": 6802
+        }
+      }
+    },
+    "burst": {
+      "submitted_ms": 4001,
+      "synthetic_actions": 1
+    },
+    "unknown_partial_stop": {
+      "submitted_ms": 4401,
+      "synthetic_actions": 1,
+      "lifecycle": {
+        "protected_ms": 11053,
+        "closed_ms": 27106,
+        "wire_actions": [
+          "ENTRY:ENTRY",
+          "CREATE_EXIT:STOP",
+          "CREATE_EXIT:TAKE_PROFIT",
+          "CANCEL:ENTRY",
+          "CANCEL:TAKE_PROFIT"
+        ],
+        "wire_exit_times_ms": {
+          "STOP": 301,
+          "TAKE_PROFIT": 5652
+        }
+      }
+    }
+  },
   "limitations": [
-    "Synthetic exchange evidence does not establish live Testnet behavior",
-    "603 PostgreSQL-dependent checks skipped; no database schema changes",
-    "Under historical 616-weight load, a second simultaneous alert still expired before entry",
-    "Two-account cold replay closed both positions; one used existing emergency close"
+    "Offline deterministic exchange replay only; not proof of live Testnet latency or behavior",
+    "571 PostgreSQL-dependent checks skipped; no schema changes",
+    "Empty-account observations still expire for health/entry authorization after fifteen seconds; missed feed changes may wait up to sixty seconds for periodic detection",
+    "Cold simultaneous-account replay closed both positions but one used existing emergency close",
+    "Steady-load unfilled-entry scenario still left first entry OUTCOME_UNKNOWN and second source expired before entry",
+    "Historical 616-weight scenario with immediate fills now completed both accounts, second entry at 73.65 seconds; this does not establish all concurrency cases"
   ],
+  "snapshot_unchanged_after_tests": true,
+  "workspace_unchanged_since_snapshot": true,
+  "tested_candidate_hashes": {
+    "producer": {
+      "file_count": 352,
+      "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+      "sha256": "5696746d465227f766b4b55f5f40705c5fcf5193a58b0bacddb575f588835e88"
+    },
+    "receiver": {
+      "file_count": 529,
+      "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+      "sha256": "1dcc0a6b7b7942dc967077e2477ff68a96b3fd4caf4b6430e5931f68e78b5836"
+    }
+  },
   "tested_file_sha256": {
     "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
     "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
     "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
-    "receiver/hl_testnet_runtime/experimental_live_provider.py": "3bd9dccc1e5aad18af5966a53ace46131057ff1b595c9c39df558d0cd03dd815",
+    "receiver/hl_testnet_runtime/experimental_live_provider.py": "fdd9d9571ce538919e9909f3e72b434478f61ef43d88a1d9b3a5f79cd685ea60",
     "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
-    "receiver/hl_testnet_runtime/experimental_live_safety.py": "38f7ad7835fa010f0f54c340e17885c998e3b189f80b451eb62344f4c9dfdda1",
-    "receiver/hl_testnet_runtime/experimental_live_service.py": "8a7626de284975b31b3033601a5d87d45470a099a69ad04c9abe3d0d8eac3a6b",
+    "receiver/hl_testnet_runtime/experimental_live_safety.py": "3ef26917a9d4cba27e7cccffc1cb49c6971014b470bc38f0382cfb0cb2ead8bf",
+    "receiver/hl_testnet_runtime/experimental_live_service.py": "e753b93c8fe6573ad651894b64c4b0457e179e73e14157be1e629cc0cd9d76d7",
+    "receiver/hl_testnet_runtime/experimental_live_state.py": "afe6ad110f03fc885e540f30184a898e0e2bcc7a2f4dd32c98a1dcabc3086ee1",
+    "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": "59cdd4c3bd6ecf2b0d21a04d020edab7c415119e33c458c64d779200a1254f85",
+    "receiver/hl_testnet_runtime/long_stream_runtime.py": "a206436dca5497ecf9cd2103db3f1785696e9b731434ad8d9113ae2c00555d07",
     "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
     "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
     "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
-    "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "3ab1f8f4b4051c8a7c391270d6a612ab4e0624af6d4914b77c018a888078ec6c",
-    "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "77aae0f695601e58cff9026110638c055674dea9e12b9adb6b064e8e0da7b7ed",
+    "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "f4062a40d3661fb9df1d4a012d80b4d1c4537cc0448ebeae3b19aa4bbb55935a",
+    "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "ade36b39eb382956bac75cbd8845d6157769471bd4b091cf0f2b2b71ee66d31e",
     "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
-    "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "69421bdf41001e1c33c11e4d17090bfda3030c5bfa8797da0d87b294f0ec5dba"
+    "receiver/hl_testnet_runtime/test_long_stream_runtime.py": "ed9d579332138854f348780c8c4bd839ddecc6e56a901a13d7e525a7fcf1c5d3",
+    "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "d528d1f555de80d0b5804aa96576f1e2e07befb54dac8925c3d364c1877d4409"
   },
-  "deployment": "Requires explicit approval of this tested change per repository AGENTS.md"
+  "deployed": false,
+  "deployment": "Live deployment requires approval of this tested change per repository AGENTS.md",
+  "first_reduction_historical": {
+    "scope": "Isolated simplification of Testnet execution; no deployment or live exchange access",
+    "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
+    "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
+    "tests": {
+      "passed": 2825,
+      "skipped": 603,
+      "failures": 0,
+      "errors": 0,
+      "network_attempts_blocked": 0
+    },
+    "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
+    "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+    "measured_reads": {
+      "idle_before": 8,
+      "idle_after": 4,
+      "pre_entry_before": 17,
+      "pre_entry_after": 8,
+      "pre_entry_weight_before": 330,
+      "pre_entry_weight_after": 222
+    },
+    "changes": [
+      "One routine inventory and reconciliation pass",
+      "Collect participating accounts only while work exists",
+      "Reuse same-collection account mode and balance",
+      "Reuse known order identity and verified terminal facts",
+      "One shared collection owner; supervisor fallback",
+      "Skip partial entry preflight while insufficient budget; retain existing quota and 90-second source expiry",
+      "Reuse unchanged fully protected static observations for at most 10 seconds",
+      "Remove duplicate intake validation and unnecessary archive transactions"
+    ],
+    "limitations": [
+      "Synthetic exchange evidence does not establish live Testnet behavior",
+      "603 PostgreSQL-dependent checks skipped; no database schema changes",
+      "Under historical 616-weight load, a second simultaneous alert still expired before entry",
+      "Two-account cold replay closed both positions; one used existing emergency close"
+    ],
+    "tested_file_sha256": {
+      "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
+      "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
+      "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
+      "receiver/hl_testnet_runtime/experimental_live_provider.py": "3bd9dccc1e5aad18af5966a53ace46131057ff1b595c9c39df558d0cd03dd815",
+      "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
+      "receiver/hl_testnet_runtime/experimental_live_safety.py": "38f7ad7835fa010f0f54c340e17885c998e3b189f80b451eb62344f4c9dfdda1",
+      "receiver/hl_testnet_runtime/experimental_live_service.py": "8a7626de284975b31b3033601a5d87d45470a099a69ad04c9abe3d0d8eac3a6b",
+      "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
+      "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
+      "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
+      "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "3ab1f8f4b4051c8a7c391270d6a612ab4e0624af6d4914b77c018a888078ec6c",
+      "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "77aae0f695601e58cff9026110638c055674dea9e12b9adb6b064e8e0da7b7ed",
+      "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
+      "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "69421bdf41001e1c33c11e4d17090bfda3030c5bfa8797da0d87b294f0ec5dba"
+    },
+    "deployment": "Requires explicit approval of this tested change per repository AGENTS.md"
+  }
 }

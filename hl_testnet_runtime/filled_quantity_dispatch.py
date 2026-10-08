@@ -610,10 +610,6 @@ class Controller:
         self._observations=_ObservationCoordinator()
 
     @property
-    def _observation_guard(self):
-        return self._observations.guard
-
-    @property
     def _observation_flights(self):
         return self._observations.flights
 

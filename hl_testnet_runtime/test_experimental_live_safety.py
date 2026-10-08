@@ -229,14 +229,22 @@ class LiveSafetyTests(unittest.TestCase):
         self.assertFalse(self.supervisor.health()['healthy'])  # Manual pass is not a running capability.
         self.fx.oracle.t += 5000
         self.supervisor.pass_once()
+        self.assertEqual(len(self.fx.raw.calls), reads)
+        self.assertEqual(self.supervisor.health()['observed_at_ms'], original_at)
+        self.fx.oracle.t += 50000
+        self.supervisor.pass_once()
         self.assertGreater(len(self.fx.raw.calls), reads)
-        self.assertEqual(self.supervisor.health()['observed_at_ms'], original_at + 10000)
+        self.assertEqual(self.supervisor.health()['observed_at_ms'], original_at + 60000)
 
     def test_idle_service_reuses_only_current_observation_and_wakes_for_source(self):
         self.ready_feed(); self.start_supervisor()
         self.fx.service.supervisor = self.supervisor
         reads = len(self.fx.raw.calls)
-        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
+        with patch.object(self.fx.service, 'release_loader') as release, \
+                patch.object(self.fx.service, 'startup_entry_gate') as startup:
+            self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
+        release.assert_not_called()
+        startup.assert_not_called()
         self.assertEqual(len(self.fx.raw.calls), reads)
         self.fx.worker.receive([r2732_message(entry=2.3, decision_ms=T-60000)])
         self.assertEqual(self.fx.service.tick().get('operation'), 'ENTRY')
@@ -246,7 +254,7 @@ class LiveSafetyTests(unittest.TestCase):
         self.ready_feed(); self.start_supervisor()
         self.fx.service.supervisor = self.supervisor
         reads = len(self.fx.raw.calls)
-        self.fx.oracle.t += 10000
+        self.fx.oracle.t += 60000
         self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_NO_ACTION')
         after = len(self.fx.raw.calls)
         self.assertGreater(after, reads)
@@ -322,7 +330,7 @@ class LiveSafetyTests(unittest.TestCase):
         primary.last_cycle_at_ms = self.fx.oracle.now()
         primary.last_status = 'OBSERVED_NO_ACTION'
         reads = len(self.fx.raw.calls)
-        self.fx.oracle.t += 10000
+        self.fx.oracle.t += 60000
         self.supervisor.pass_once()
         self.assertGreater(len(self.fx.raw.calls), reads)
 
@@ -344,13 +352,59 @@ class LiveSafetyTests(unittest.TestCase):
         msg = r2732_message(entry=2.3, decision_ms=T-60000)
         self.fx.worker.receive([msg])
         self.assertIsNone(self.supervisor.idle_receipt())
-        retry_at = self.fx.oracle.now() + 1000
+        retry_at = self.fx.oracle.now() + 40000
         def defer(state):
             state.setdefault('entry_decisions', {})[msg['occurrence_id']] = dict(
                 reason='TESTNET_REQUEST_BUDGET_EXHAUSTED', retry_after_ms=retry_at)
         self.fx.store.mutate(defer)
         self.assertIsNotNone(self.supervisor.idle_receipt())
+        reads = len(self.fx.raw.calls)
+        original_at = self.fx.oracle.now()
+        self.fx.service.supervisor = self.supervisor
+        for elapsed in (10000, 20000, 30000):
+            self.fx.oracle.t = original_at + elapsed
+            self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
+            self.supervisor.pass_once()
+            self.assertEqual(len(self.fx.raw.calls), reads)
+        # Skipping a read is not evidence that an old account snapshot is fresh.
+        self.assertIsNone(self.capability._receipt(self.fx.store.load()))
+        self.assertFalse(self.supervisor.health()['healthy'])
         self.fx.oracle.t = retry_at
+        self.assertIsNone(self.supervisor.idle_receipt())
+
+    def test_empty_idle_reuse_revoked_by_feed_event_or_new_source(self):
+        self.ready_feed(); self.observed()
+        self.fx.service.supervisor = self.supervisor
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        original_at = self.fx.oracle.now()
+        self.fx.oracle.t = original_at + 20000
+        self.assertIsNotNone(self.supervisor.idle_receipt())
+        self.assertFalse(self.supervisor.health()['healthy'])
+        account = self.fx.release['routes']['short_account']
+        token = self.feed.begin_reconciliation(account)
+        self.feed._receive(account, token.generation, json.dumps(dict(channel='orderUpdates',
+            data=[dict(order=dict(coin='XRP', oid=5), status='canceled',
+                statusTimestamp=self.fx.oracle.now())])))
+        self.assertIsNone(self.supervisor.idle_receipt())
+        self.observed()
+        self.fx.oracle.t += 20000
+        self.fx.worker.receive([r2732_message(entry=2.3, decision_ms=T-60000)])
+        reads = len(self.fx.raw.calls)
+        self.assertIsNone(self.supervisor.idle_receipt())
+        self.assertEqual(self.fx.service.tick().get('operation'), 'ENTRY')
+        self.assertGreater(len(self.fx.raw.calls), reads)
+        self.assertTrue(self.supervisor.health(account=account)['healthy'])
+
+    def test_idle_fallback_cannot_reuse_missing_or_partial_inventory(self):
+        self.ready_feed()
+        self.assertIsNone(self.supervisor.idle_receipt())
+        self.observed()
+        state = self.fx.store.load()
+        receipt = self.capability._receipt(state)
+        account = state['routes']['short_account']
+        receipt['complete_accounts'].remove(account)
+        with self.capability._lock:
+            self.capability._committed[receipt['checkpoint_id']] = receipt
         self.assertIsNone(self.supervisor.idle_receipt())
 
     def test_worker_and_supervisor_share_nonblocking_cycle_lock(self):

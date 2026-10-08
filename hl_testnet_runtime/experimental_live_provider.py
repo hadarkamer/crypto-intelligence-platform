@@ -369,23 +369,6 @@ class LiveEvidenceProvider:
                 (inventory['at_ms'],deepcopy(inventory['account_state'])))
         reusable={'userRole','userAbstraction','clearinghouseState','spotClearinghouseState',
                   'activeAssetData','userRateLimit'}
-        # Do not start another partial preflight when the remaining reads and
-        # one entry send already exceed the unchanged background allowance.
-        available=getattr(self.budget,'capacity',None)
-        if callable(available):
-            planned=[('userAbstraction',account,None),('userRole',account,None),
-                ('userRole',route['agent'],None),('clearinghouseState',account,None),
-                ('activeAssetData',account,message['symbol']),('userRateLimit',account,None)]
-            mode_sample=sampled.get((account,'userAbstraction',account,None))
-            if mode_sample is None or mode_sample[1] in ('default','unifiedAccount'):
-                planned.append(('spotClearinghouseState',account,None))
-            weight=request_weight('/exchange',dict(action=dict(type='order',orders=[{}])))
-            weight+=sum(request_weight('/info',dict(type=kind)) for kind,user,coin in planned
-                        if (account,kind,user,coin) not in sampled)
-            capacity=available(requested_weight=weight,priority='background')
-            if not capacity['eligible']:
-                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
-                    **{key:capacity[key] for key in ('used_weight','requested_weight','ceiling','retry_after_ms')})
         read_failure=None
         class RecordingReader:
             parallel=False
@@ -520,16 +503,56 @@ class LiveEvidenceProvider:
         unresolved_accounts={r['proposal']['account'] for r in state['requests'].values()
                              if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
         protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)}
-        source_lanes={(state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account'],s['source']['symbol'])
-                for cid,s in state['sources'].items() if entries_enabled is True and cid not in retired
-                and cid not in deferred and (cid not in state['trades'] or entry_retry_ready(state,cid,now))
-                and runtime._source_active(s,now)
-                and state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account']
-                    not in unresolved_accounts|protection_accounts}
+        # Reject locally impossible admissions before reading their market or
+        # account capacity. These are the same unchanged gates as _admit.
+        candidates=set()
+        for cid,source in state['sources'].items():
+            msg=source['source'];role='long_account' if msg['side']=='LONG' else 'short_account'
+            account=state['routes'][role]
+            if (not entries_enabled or cid in retired or cid in deferred
+                    or cid in state['trades'] and not entry_retry_ready(state,cid,now)
+                    or not runtime._source_active(source,now)
+                    or account in unresolved_accounts|protection_accounts):
+                continue
+            peers=[t for k,t in state['trades'].items() if k!=cid
+                   and t['account']==account and t['phase'] not in runtime.FINAL]
+            if any(t['symbol']==msg['symbol'] for t in peers):
+                result['entry_blocked'][cid]=runtime.shared_market.ENTRY_BLOCK
+                continue
+            if (msg['family'] in ('r2732','hype_row71205','sol_g65')
+                    and any(t['source']['family']==msg['family'] for t in peers)):
+                continue
+            # Move the existing single allowance check ahead of source-only
+            # I/O. Include the inventory and market reads not yet performed;
+            # each transport still acquires its ordinary unchanged permit.
+            available=getattr(self.budget,'capacity',None)
+            if callable(available):
+                try:
+                    planned=('frontendOpenOrders','clearinghouseState','metaAndAssetCtxs',
+                        'userAbstraction','userRole','userRole','activeAssetData',
+                        'userRateLimit','spotClearinghouseState')
+                    weight=request_weight('/exchange',dict(action=dict(type='order',orders=[{}])))
+                    weight+=sum(request_weight('/info',dict(type=kind)) for kind in planned)
+                    capacity=available(requested_weight=weight,priority='background')
+                    if not capacity['eligible']:
+                        raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                            **{key:capacity[key] for key in ('used_weight','requested_weight','ceiling','retry_after_ms')})
+                except Exception as exc:
+                    result['entry_blocked'][cid]=_error(exc)
+                    remember_retry(exc,[account])
+                    if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
+                    continue
+            candidates.add(cid)
+        source_lanes={(state['routes']['long_account' if state['sources'][cid]['source']['side']=='LONG'
+                                    else 'short_account'],state['sources'][cid]['source']['symbol'])
+                      for cid in candidates}
         lanes|=source_lanes
-        market_lanes=source_lanes|{(t['account'],t['symbol']) for t in working['trades'].values()
-                                  if t['phase'] not in runtime.FINAL}
-        for account in sorted({account for account,_ in lanes} or set(state['routes'].values())):
+        # A known source-only allowance wait must not consume its own future
+        # budget through empty scans. It supplies no fresh account evidence.
+        waiting=bool(deferred or any(reason in ('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+            'TESTNET_REQUEST_BUDGET_BUSY','TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+            'TESTNET_OBSERVATION_BATCH_EXPIRED') for reason in result['entry_blocked'].values()))
+        for account in sorted({account for account,_ in lanes} or (set() if waiting else set(state['routes'].values()))):
             result['account_inventory_at_ms'][account]=now
             try:
                 inventories[account]=self._inventory(account,cache.pass_reader(0))
@@ -537,15 +560,6 @@ class LiveEvidenceProvider:
                 result['inventory_account_errors'][account]=_error(exc)
                 result['account_entry_blocked'][account]=_error(exc)
                 remember_retry(exc,[account])
-        market=None;market_error=None
-        if market_lanes:
-            market_at=self.now()
-            try:
-                market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
-                result['metadata']=market.metadata
-            except Exception as exc:
-                market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
-        metadata=result['metadata']
         for account,symbol in sorted(lanes):
             lane=runtime._lane(account,symbol)
             if account not in inventories:
@@ -582,14 +596,6 @@ class LiveEvidenceProvider:
                 result['account_entry_blocked'].setdefault(account,_error(exc))
                 remember_retry(exc,[account])
                 continue
-            if (account,symbol) not in market_lanes:continue
-            # Tradability is a market gate, distinct from complete account
-            # ownership. A missing candidate-only asset never poisons its peers.
-            try:
-                if market is None:raise ProviderError(market_error)
-                result['marks'][lane]=market.mark(account=account,symbol=symbol,now_ms=self.now())
-            except (ValueError,KeyError,TypeError) as exc:
-                result['blocked_lanes'][lane]=_error(exc)
         current_legacy=self._legacy(state)
         for role,account in state['routes'].items():
             if account not in inventories:continue
@@ -650,6 +656,44 @@ class LiveEvidenceProvider:
             if _original_stop_needed(price_state,trade):source_io_allowed[trade['account']]=False
         unresolved={r['proposal']['account'] for r in state['requests'].values()
                     if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+        # Stable fixed-exit trades consume no live mark: use the CURRENT
+        # reconciled fill/order facts, so newly missing or undersized exits
+        # still request a fresh market before the runtime repairs them.
+        market_lanes=set(source_lanes)
+        for trade in price_state['trades'].values():
+            if trade['phase'] in runtime.FINAL:continue
+            active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
+                    if order['status']=='OPEN']
+            remaining=runtime._remaining(trade)
+            stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
+                and not any(leg=='ENTRY' for leg,order in active)
+                and trade['account'] not in unresolved
+                and all(len([o for own_leg,o in active if own_leg==leg])==1
+                    and all(o['wire_order']['r'] is True
+                        and life.number(o['wire_order']['s'])-sum(
+                            (life.number(f['quantity']) for f in o['fills']),Decimal(0))==remaining
+                        and life.number(o['wire_order']['p'])==life.number(price)
+                        for own_leg,o in active if own_leg==leg)
+                    for leg,price in (('STOP',trade['prices']['stop']),
+                                      ('TAKE_PROFIT',trade['prices']['take_profit']))))
+            if not stable:market_lanes.add((trade['account'],trade['symbol']))
+        market=None;market_error=None
+        if market_lanes:
+            market_at=self.now()
+            try:
+                market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
+                result['metadata']=market.metadata
+            except Exception as exc:
+                market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
+        metadata=result['metadata']
+        for account,symbol in sorted(market_lanes):
+            lane=runtime._lane(account,symbol)
+            if account not in inventories or lane in result['blocked_lanes']:continue
+            try:
+                if market is None:raise ProviderError(market_error)
+                result['marks'][lane]=market.mark(account=account,symbol=symbol,now_ms=self.now())
+            except (ValueError,KeyError,TypeError) as exc:
+                result['blocked_lanes'][lane]=_error(exc)
         # Reuse only this collection; existing exposure is still collected
         # while a source-only entry waits for its recorded budget retry.
         entry_reads={}
@@ -666,6 +710,7 @@ class LiveEvidenceProvider:
             if candidate and (account in unresolved or not source_io_allowed[account]):
                 result['entry_blocked'][cid]='ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION'
                 candidate=False
+            candidate=candidate and cid in candidates
             # Keep formula stop updates and pending-order cancellation alive
             # during an entry halt. Entry ranges/capacity have no maintenance
             # authority and must never delay protection of an existing fill.
