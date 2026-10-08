@@ -58,6 +58,7 @@ import research_price_archive_worker
 import research_source_freshness
 import research_btc_wave_report_worker
 import research_formula_ordered_worker
+import research_no_horizon_worker
 import research_ordered_experimental_worker
 import research_snapshot_sync_worker
 import google_sheets_sync
@@ -1752,6 +1753,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
+        ("no-horizon-research", research_no_horizon_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
     ):
@@ -1777,6 +1779,7 @@ async def _stop_ordered_research_workers() -> None:
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
+        ("no-horizon-research", research_no_horizon_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("price-archive", research_price_archive_worker.WORKER),
     ):
@@ -6610,6 +6613,7 @@ async def health(request):
         "price_source_freshness": research_source_freshness.status(),
         "btc_wave_report": research_btc_wave_report_worker.WORKER.status(),
         "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
+        "no_horizon_research": research_no_horizon_worker.WORKER.status(),
         "ordered_experimental": research_ordered_experimental_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
         "google_sheets_delivery": google_sheets_sync.status(),

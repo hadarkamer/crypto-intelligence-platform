@@ -1,0 +1,939 @@
+"""Actual read-only source acquisition through durable admission and outcomes.
+
+Every test owns a disposable local/CI database. Source captures, causal parents
+and archived prices are genuine synthetic fixtures; none are market evidence.
+No production database, external price source, alert sender or trading API runs.
+"""
+from copy import deepcopy
+from datetime import timedelta
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+import research_no_horizon_acquisition_source as source
+import research_no_horizon_acquisition_store as acquisition
+import research_no_horizon_calendar as calendar
+import research_no_horizon_cohort as cohort
+import research_no_horizon_cohort_coverage as coverage
+import research_no_horizon_cohort_postgres_selftest as fixtures
+import research_no_horizon_cohort_store as local
+import research_no_horizon_contract as contracts
+import research_no_horizon_postgres_store as executor
+import research_no_horizon_publication as publication
+import research_no_horizon_selection as selection
+import research_no_horizon_validation as validation
+import research_no_horizon_validation_selftest as validation_fixtures
+import research_no_horizon_worker as worker
+import research_price_archive as prices
+import research_watch_scan_intake as intake
+from research_no_horizon_postgres_store_postgres_selftest import (
+    SEMANTIC_PLAN_FIELDS, SEMANTIC_SCOPE_FIELDS)
+from research_watch_score_capture_selftest import BASE
+
+
+TEST_DSN = os.environ.get('TEST_DATABASE_URL')
+PREFIX = 'research_no_horizon_acquisition_'
+
+
+@unittest.skipUnless(TEST_DSN, 'Explicit local/CI TEST_DATABASE_URL required')
+class AcquisitionPostgresTests(unittest.TestCase):
+    # Reuse real fixture setup by composition, never inherit another test suite.
+    connect = fixtures.CohortPostgresTests.connect
+    drop_database = fixtures.CohortPostgresTests.drop_database
+    persist_on = fixtures.CohortPostgresTests.persist_on
+    persist = fixtures.CohortPostgresTests.persist
+    consume_intake = fixtures.CohortPostgresTests.consume_intake
+    captured_bundle = fixtures.CohortPostgresTests.captured_bundle
+    admit = fixtures.CohortPostgresTests.admit
+    seed_causal_parent = fixtures.CohortPostgresTests.seed_causal_parent
+    prepared = fixtures.CohortPostgresTests.prepared
+    store_parents = fixtures.CohortPostgresTests.store_parents
+    advance_parent = fixtures.CohortPostgresTests.advance_parent
+    live_source = fixtures.CohortPostgresTests.live_source
+    read_only = fixtures.CohortPostgresTests.read_only
+
+    def setUp(self):
+        fixtures.CohortPostgresTests.setUp(self)
+        root = Path(__file__).resolve().parent / 'migrations'
+        with self.connect() as conn:
+            for name in ('056_no_horizon_runtime.sql', '057_no_horizon_acquisition.sql'):
+                conn.execute((root / name).read_text(), prepare=False)
+        self.reopen()
+
+    def reopen(self):
+        if getattr(self, 'conn', None) is not None:
+            self.conn.close()
+        self.conn = self.connect()
+        self.addCleanup(self.conn.close)
+        self.store = acquisition.AcquisitionStore(self.conn)
+
+    def seed_prices(self, *, omit=()):
+        bars = []
+        for minute in range(4):
+            if minute in omit:
+                continue
+            opened = BASE + timedelta(minutes=7 + minute)
+            bars.append(dict(open_time_utc=opened,
+                close_time_utc=opened + timedelta(minutes=1, milliseconds=-1),
+                open=100., high=100.2, low=98.4 if minute == 1 else 99.8,
+                close=100., volume=1.))
+        with self.connect() as conn:
+            prices.write_bars(conn, prices.BINANCE_SPOT, 'XRP', bars)
+
+    def declaration(self, *, single=False, both_directions=False):
+        value = fixtures.CohortPostgresTests.declaration(self)
+        if single:
+            value['parts'] = [{**value['parts'][0], 'source_end_utc': value['source_end_utc']}]
+        if both_directions:
+            value['scopes'].append({**value['scopes'][0], 'base_direction': 'LONG'})
+        return cohort.normalize_declaration(value)
+
+    def count(self, table):
+        with self.connect() as conn:
+            return conn.execute(self.sql.SQL('SELECT count(*) AS n FROM {}').format(
+                self.sql.Identifier(table))).fetchone()['n']
+
+    def anchored(self, declaration):
+        with self.connect() as conn:
+            proof = source.read_anchor(conn, declaration)
+        return proof, source.validate_anchor_proof(declaration, proof)
+
+    def fetched_parts(self, declaration, anchor):
+        grouped = [{'source': [], 'candles': []} for _ in declaration['parts']]
+        for task in source.leaf_tasks(declaration, anchor):
+            with self.connect() as conn:
+                if task['kind'] == 'source':
+                    proof = source.read_source_chunk(conn, declaration, anchor,
+                        task['part_ordinal'], task['ordinals'])
+                else:
+                    proof = source.read_candle_chunk(conn, declaration, anchor,
+                        task['part_ordinal'], task['ordinals'][0])
+            source.validate_chunk_proof(declaration, anchor, proof)
+            grouped[task['part_ordinal']][task['kind']].append(proof)
+        return [source.assemble_part(declaration, anchor, ordinal,
+            item['source'], item['candles']) for ordinal, item in enumerate(grouped)]
+
+    def finish_acquisition(self, request_id, *, reopen=False):
+        for _ in range(64):
+            report = self.store.report(request_id, include_proofs=True)
+            if report['status'] in ('ADMITTED', 'BLOCKED'):
+                return report
+            self.store.run_once('fixture-acquisition', request_id=request_id,
+                source_connection_factory=self.connect, leaf_budget=1)
+            if reopen:
+                self.reopen()
+        self.fail('finite acquisition fixture did not finish')
+
+    def acquired_parts(self, declaration, report):
+        anchor = report['anchor']
+        result = []
+        for ordinal in range(len(declaration['parts'])):
+            leaves = [leaf for leaf in report['leaves'] if leaf['task']['part_ordinal'] == ordinal]
+            result.append(source.assemble_part(declaration, anchor, ordinal,
+                [leaf['proof'] for leaf in leaves if leaf['task']['kind'] == 'source'],
+                [leaf['proof'] for leaf in leaves if leaf['task']['kind'] == 'candles']))
+        return result
+
+    def finish_executor(self, plan_id):
+        store = executor.PostgresCohortStore(self.conn)
+        for _ in range(32):
+            report = store.report(plan_id)
+            if report['all_scopes_processed']:
+                return report
+            store.run_once('fixture-executor', plan_id=plan_id,
+                candle_budget=1, entry_budget=1, batch_size=1)
+        self.fail('small admitted fixture did not finish')
+
+    def assert_local_parity(self, declaration, acquired, actual):
+        parts = self.acquired_parts(declaration, acquired)
+        with tempfile.TemporaryDirectory() as directory:
+            with local.LocalCohortStore(Path(directory) / 'reference.sqlite') as store:
+                plan = store.submit_cohort(declaration, acquired['anchor'], lambda ordinal: parts[ordinal])
+                expected = store.run_cohort(plan, 'reference', scope_budget=64, candle_budget=10000)
+        for field in SEMANTIC_PLAN_FIELDS:
+            self.assertEqual(actual[field], expected[field], field)
+        self.assertEqual(len(actual['scopes']), len(expected['scopes']))
+        for left, right in zip(actual['scopes'], expected['scopes']):
+            for field in SEMANTIC_SCOPE_FIELDS:
+                self.assertEqual(left.get(field), right.get(field), field)
+
+    def test_actual_read_only_anchor_and_raw_leaf_proofs_reproduce_frozen_parts(self):
+        ident = self.prepared()
+        declaration = self.declaration()
+        proof, anchor = self.anchored(declaration)
+        self.assertEqual(proof['raw_response_sha256'], hashlib.sha256(
+            proof['raw_response_text'].encode('utf-8')).hexdigest())
+        self.assertEqual(proof['raw_response_bytes'], len(proof['raw_response_text'].encode('utf-8')))
+        self.assertEqual(proof['query_sha256'], hashlib.sha256(proof['sql'].encode('utf-8')).hexdigest())
+        self.assertEqual(anchor['extraction_receipt']['read_only'], 'on')
+        self.assertFalse(anchor['extraction_receipt']['database_writes'])
+        parts = self.fetched_parts(declaration, anchor)
+        self.assertEqual(parts[0]['source_rows'], [])
+        self.assertEqual([row['intake']['snapshot_set_id'] for row in parts[1]['source_rows']], [ident])
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_parent_progress_and_closure_do_not_rewrite_anchored_source(self):
+        ident = self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        before = self.fetched_parts(declaration, anchor)
+        original_live = self.live_source(ident)['payload_text']
+        for minute, close in ((8, 99.), (9, 102.)):
+            self.advance_parent(minute, close)
+            self.assertNotEqual(self.live_source(ident)['payload_text'], original_live)
+            self.assertEqual(self.fetched_parts(declaration, anchor), before)
+
+    def test_late_accepted_source_cannot_expand_the_frozen_anchor_population(self):
+        ident = self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        self.admit('late-after-anchor')
+        parts = self.fetched_parts(declaration, anchor)
+        ids = [row['intake']['snapshot_set_id'] for part in parts for row in part['source_rows']]
+        self.assertEqual(ids, [ident])
+        self.assertEqual(self.count('research_watch_scan_intakes'), 2)
+
+    def test_deleted_anchored_source_cannot_be_treated_as_complete_empty_input(self):
+        ident = self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        with self.connect() as conn:
+            conn.execute('''DELETE FROM research_watch_scan_intakes
+                WHERE consumer_version=%s AND snapshot_set_id=%s''', (intake.VERSION, ident))
+        with self.assertRaises(ValueError):
+            self.fetched_parts(declaration, anchor)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_archive_guard_preserves_anchored_input_against_live_score_mutation(self):
+        ident = self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        before = self.fetched_parts(declaration, anchor)
+        with self.assertRaisesRegex(self.psycopg.errors.RaiseException, 'append-only'):
+            with self.connect() as conn:
+                conn.execute('''UPDATE research_max_pain_snapshot_sets SET source_metadata=jsonb_set(
+                    source_metadata,'{capture_metadata,operational_scores,coins,XRP,models,futures_flow,score}',
+                    '-74'::jsonb,false) WHERE snapshot_set_id=%s''', (ident,))
+        self.assertEqual(self.fetched_parts(declaration, anchor), before)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_rehashed_transport_response_with_extra_row_remains_invalid(self):
+        self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        task = next(task for task in source.leaf_tasks(declaration, anchor) if task['kind'] == 'source')
+        with self.connect() as conn:
+            proof = source.read_source_chunk(conn, declaration, anchor, task['part_ordinal'], task['ordinals'])
+        forged = deepcopy(proof)
+        raw = json.loads(forged['raw_response_text'])
+        raw['entries'].append(deepcopy(raw['entries'][0]))
+        raw['returned_count'] = len(raw['entries'])
+        forged['raw_response_text'] = contracts.canonical(raw)
+        data = forged['raw_response_text'].encode('utf-8')
+        forged['raw_response_sha256'] = hashlib.sha256(data).hexdigest()
+        forged['raw_response_bytes'] = len(data)
+        with self.assertRaises(ValueError):
+            source.validate_chunk_proof(declaration, anchor, forged)
+
+    def test_restart_after_every_bounded_step_reuses_anchor_and_matches_local_results(self):
+        self.prepared()
+        declaration = self.declaration(both_directions=True)
+        request = self.store.register_request(declaration, request_key='restartable')
+        frozen_anchor, observed_leaves = None, []
+        for _ in range(64):
+            report = self.store.report(request, include_proofs=True)
+            if report['anchor_sha256']:
+                frozen_anchor = frozen_anchor or report['anchor_sha256']
+                self.assertEqual(report['anchor_sha256'], frozen_anchor)
+            observed_leaves.append(report['leaves_completed'])
+            if report['status'] == 'ADMITTED':
+                break
+            self.assertNotEqual(report['status'], 'BLOCKED')
+            self.store.run_once('restarted', request_id=request,
+                source_connection_factory=self.connect, leaf_budget=1)
+            self.reopen()
+        else:
+            self.fail('restarted acquisition did not finish')
+        self.assertEqual(observed_leaves, sorted(observed_leaves))
+        self.assertEqual(report['leaves_completed'], report['total_leaves'])
+        self.assertEqual(self.count(PREFIX + 'anchors'), 1)
+        self.assertEqual(self.count('research_no_horizon_plans'), 1)
+        actual = self.finish_executor(report['executor_plan_id'])
+        self.assert_local_parity(declaration, report, actual)
+        self.assertEqual(actual['declared_scopes'], 2)
+        self.assertEqual(actual['outcome_trials_executed'], 2)
+        for value in (report, actual):
+            for name in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+                self.assertIs(value[name], False)
+
+    def test_crash_after_executor_commit_before_link_reuses_exact_plan(self):
+        self.prepared()
+        declaration = self.declaration(single=True)
+        request = self.store.register_request(declaration)
+        with patch.object(self.store, '_mark_admitted', side_effect=RuntimeError('crash after admission')):
+            with self.assertRaisesRegex(RuntimeError, 'crash after admission'):
+                self.finish_acquisition(request)
+        self.assertEqual(self.count('research_no_horizon_plans'), 1)
+        self.assertNotEqual(self.store.report(request)['status'], 'ADMITTED')
+        self.reopen()
+        report = self.finish_acquisition(request, reopen=True)
+        self.assertEqual(report['status'], 'ADMITTED')
+        self.assertEqual(self.count('research_no_horizon_plans'), 1)
+        self.assert_local_parity(declaration, report, self.finish_executor(report['executor_plan_id']))
+
+    def test_failed_leaf_retains_rejected_proof_and_never_refreshes_anchor(self):
+        ident = self.prepared()
+        request = self.store.register_request(self.declaration())
+        self.store.run_once('anchor-only', request_id=request,
+            source_connection_factory=self.connect, leaf_budget=1)
+        before = self.store.report(request, include_proofs=True)
+        self.assertEqual(before['leaves_completed'], 0)
+        self.assertIsNotNone(before['anchor_sha256'])
+        with self.connect() as conn:
+            conn.execute('''DELETE FROM research_watch_scan_intakes
+                WHERE consumer_version=%s AND snapshot_set_id=%s''', (intake.VERSION, ident))
+        report = self.finish_acquisition(request, reopen=True)
+        self.assertEqual(report['status'], 'BLOCKED')
+        self.assertEqual(report['anchor_proof'], before['anchor_proof'])
+        self.assertEqual(report['anchor_sha256'], before['anchor_sha256'])
+        rejected = report['terminal_receipt']['rejected_proof']
+        self.assertEqual(rejected['kind'], 'source')
+        self.assertTrue(report['terminal_receipt']['raw_response_retained'])
+        self.assertEqual(json.loads(rejected['raw_response_text'])['returned_count'], 0)
+        compact = self.store.report(request)
+        self.assertNotIn('"raw_response_text"', contracts.canonical(compact))
+        self.assertNotIn('anchor_proof', compact)
+        self.assertNotIn('leaves', compact)
+        self.assertNotIn('rejected_proof', compact['terminal_receipt'])
+        summary = compact['terminal_receipt']['rejected_proof_summary']
+        self.assertEqual(summary['raw_response_sha256'], rejected['raw_response_sha256'])
+        self.assertEqual(summary['raw_response_bytes'], rejected['raw_response_bytes'])
+        self.assertTrue(summary['full_proof_omitted_from_report'])
+        explicit = self.store.report(request, include_proofs=True)
+        self.assertEqual(explicit['terminal_receipt']['rejected_proof'], rejected)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+        forbidden = Mock(side_effect=AssertionError('terminal request refreshed source'))
+        self.assertIsNone(self.store.run_once('blocked-retry', request_id=request,
+            source_connection_factory=forbidden))
+        forbidden.assert_not_called()
+
+    def test_transient_failure_after_anchor_reopens_without_refetching_population(self):
+        self.prepared()
+        declaration = self.declaration()
+        request = self.store.register_request(declaration)
+        self.store.run_once('anchor-only', request_id=request,
+            source_connection_factory=self.connect, leaf_budget=1)
+        before = self.store.report(request, include_proofs=True)
+        with self.assertRaisesRegex(RuntimeError, 'fixture source unavailable'):
+            self.store.run_once('interrupted', request_id=request, leaf_budget=1,
+                source_connection_factory=Mock(side_effect=RuntimeError('fixture source unavailable')))
+        failed = self.store.report(request, include_proofs=True)
+        self.assertEqual(failed['status'], 'FETCHING')
+        self.assertIsNone(failed['lease_until'])
+        self.assertEqual(failed['anchor_proof'], before['anchor_proof'])
+        self.reopen()
+        report = self.finish_acquisition(request)
+        self.assertEqual(report['status'], 'ADMITTED')
+        self.assertEqual(report['anchor_proof'], before['anchor_proof'])
+        self.assert_local_parity(declaration, report, self.finish_executor(report['executor_plan_id']))
+
+    def test_not_due_request_never_opens_a_source_connection(self):
+        declaration = self.declaration()
+        with self.connect() as conn:
+            now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        delta = now + timedelta(days=1) - contracts.utc(declaration['source_start_utc'])
+        for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc'):
+            declaration[key] = (contracts.utc(declaration[key]) + delta).isoformat()
+        declaration['declared_at_utc'] = now.isoformat()
+        for part in declaration['parts']:
+            for key in ('source_start_utc', 'source_end_utc'):
+                part[key] = (contracts.utc(part[key]) + delta).isoformat()
+        declaration = cohort.normalize_declaration(declaration)
+        request = self.store.register_request(declaration)
+        factory = Mock(side_effect=AssertionError('premature source connection'))
+        self.assertIsNone(self.store.run_once('too-early', request_id=request,
+            source_connection_factory=factory))
+        factory.assert_not_called()
+        self.assertEqual(self.store.report(request)['status'], 'WAITING')
+        self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+        self.assertEqual(self.count(PREFIX + 'leaves'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+        with self.connect() as conn:
+            with self.assertRaises(source.NotDue):
+                source.read_anchor(conn, declaration)
+
+    def test_reclaimed_acquisition_lease_fences_old_worker_before_source_query(self):
+        self.prepared()
+        request = self.store.register_request(self.declaration())
+        old = self.store.claim_request('old-owner', request_id=request)
+        with self.connect() as other_conn:
+            other = acquisition.AcquisitionStore(other_conn)
+            self.assertIsNone(other.claim_request('new-owner', request_id=request))
+            with self.conn.transaction():
+                self.conn.execute('''UPDATE research_no_horizon_acquisition_requests
+                    SET lease_until=clock_timestamp()-INTERVAL '1 second' WHERE request_id=%s''',
+                    (request,))
+            new = other.claim_request('new-owner', request_id=request)
+            self.assertGreater(new['fencing_token'], old['fencing_token'])
+            forbidden = Mock(side_effect=AssertionError('stale owner reached source'))
+            with self.assertRaises(executor.LeaseLost):
+                self.store.process_claim(old, source_connection_factory=forbidden, leaf_budget=1)
+            forbidden.assert_not_called()
+            self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+            other.process_claim(new, source_connection_factory=self.connect, leaf_budget=1)
+        report = self.finish_acquisition(request)
+        self.assertEqual(report['status'], 'ADMITTED')
+        self.assertEqual(self.count(PREFIX + 'anchors'), 1)
+
+    def test_complete_empty_population_is_admitted_and_reported_not_dropped(self):
+        self.seed_prices()
+        declaration = self.declaration(both_directions=True)
+        report = self.finish_acquisition(self.store.register_request(declaration))
+        self.assertEqual(report['status'], 'ADMITTED')
+        actual = self.finish_executor(report['executor_plan_id'])
+        self.assert_local_parity(declaration, report, actual)
+        self.assertEqual(actual['declared_scopes'], 2)
+        self.assertEqual(actual['outcome_trials_executed'], 2)
+        self.assertTrue(all(row['outcomes'] == [] for row in actual['scopes']))
+
+    def test_unknown_feature_blocks_all_scopes_before_executor_plan_write(self):
+        self.admit('unknown-futures', futures_available=False)
+        self.seed_causal_parent()
+        self.seed_prices()
+        declaration = self.declaration(both_directions=True)
+        report = self.finish_acquisition(self.store.register_request(declaration))
+        self.assertEqual(report['status'], 'BLOCKED')
+        self.assertIsNone(report['executor_plan_id'])
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+        self.assertEqual(self.count('research_no_horizon_receipts'), 0)
+        self.assertEqual(report['leaves_completed'], report['total_leaves'])
+        terminal = report['terminal_receipt']
+        self.assertIsNone(terminal['rejected_proof'])
+        self.assertFalse(terminal['raw_response_retained'])
+        self.assertTrue(terminal['coverage_receipt_retained'])
+        retained = terminal['coverage_receipt']
+        parts = self.acquired_parts(declaration, report)
+        expected = coverage.preflight_cohort(declaration, report['anchor'], lambda ordinal: parts[ordinal])
+        self.assertEqual(retained, expected)
+        self.assertEqual(retained['accepted_source_rows'], 1)
+        self.assertEqual(len(retained['scopes']), 2)
+        self.assertEqual({row['base_direction'] for row in retained['scopes']}, {'LONG', 'SHORT'})
+        for row in retained['scopes']:
+            self.assertEqual(row['coverage_status'], 'BLOCKED')
+            self.assertEqual(row['source_counts']['UNKNOWN'], 1)
+            self.assertEqual(row['source_counts']['UNKNOWN_SOURCE'], 0)
+        self.assertEqual(retained['outcome_trials_executed'], 0)
+        self.assertFalse(retained['outcomes_evaluated'])
+        compact = self.store.report(report['request_id'])
+        self.assertNotIn('"raw_response_text"', contracts.canonical(compact))
+        self.assertNotIn('coverage_receipt', compact['terminal_receipt'])
+        summary = compact['terminal_receipt']['coverage_receipt_summary']
+        self.assertEqual(summary['receipt_sha256'], retained['receipt_sha256'])
+        self.assertEqual(summary['declared_scope_count'], 2)
+        self.assertEqual(summary['coverage_status_counts']['BLOCKED'], 2)
+        self.assertTrue(summary['full_receipt_omitted_from_report'])
+        self.assertEqual([row['source_counts'] for row in summary['scopes']],
+                         [row['source_counts'] for row in retained['scopes']])
+
+    def test_missing_selected_entry_keeps_blocked_scope_and_zero_match_scope(self):
+        self.admit('missing-entry')
+        self.seed_causal_parent()
+        self.seed_prices(omit=(0,))
+        declaration = self.declaration(both_directions=True)
+        report = self.finish_acquisition(self.store.register_request(declaration))
+        self.assertEqual(report['status'], 'ADMITTED')
+        actual = self.finish_executor(report['executor_plan_id'])
+        self.assert_local_parity(declaration, report, actual)
+        by_direction = {row['base_direction']: row for row in actual['scopes']}
+        self.assertEqual(by_direction['SHORT']['status'], 'INPUT_BLOCKED')
+        self.assertEqual(by_direction['LONG']['status'], 'COMPLETE')
+        self.assertEqual(actual['declared_scopes'], 2)
+        self.assertEqual(actual['outcome_trials_executed'], 1)
+
+    def test_retained_anchor_leaf_and_terminal_proof_are_immutable(self):
+        self.prepared()
+        report = self.finish_acquisition(self.store.register_request(self.declaration()))
+        self.assertEqual(report['status'], 'ADMITTED')
+        for suffix, column in (('anchors', 'proof_json'), ('leaves', 'proof_json'),
+                               ('receipts', 'payload_json')):
+            for operation in ('UPDATE', 'DELETE'):
+                with self.subTest(table=suffix, operation=operation):
+                    with self.assertRaises(self.psycopg.Error):
+                        with self.conn.transaction():
+                            if operation == 'UPDATE':
+                                self.conn.execute(self.sql.SQL('UPDATE {} SET {}={}').format(
+                                    self.sql.Identifier(PREFIX + suffix),
+                                    self.sql.Identifier(column), self.sql.Identifier(column)))
+                            else:
+                                self.conn.execute(self.sql.SQL('DELETE FROM {}').format(
+                                    self.sql.Identifier(PREFIX + suffix)))
+        self.assertEqual(self.store.report(report['request_id'], include_proofs=True), report)
+
+    def test_acquisition_migration_rollback_and_reapply_preserve_completed_evidence(self):
+        root = Path(__file__).resolve().parent / 'migrations'
+        sql056 = (root / '056_no_horizon_runtime.sql').read_text()
+        sql057 = (root / '057_no_horizon_acquisition.sql').read_text()
+        with self.connect() as conn:
+            with self.assertRaisesRegex(RuntimeError, 'rollback new acquisition schema'):
+                with conn.transaction():
+                    conn.execute('CREATE SCHEMA acquisition_migration_probe')
+                    conn.execute('SET LOCAL search_path TO acquisition_migration_probe')
+                    conn.execute(sql056, prepare=False)
+                    conn.execute(sql057, prepare=False)
+                    raise RuntimeError('rollback new acquisition schema')
+            row = conn.execute("SELECT to_regclass('acquisition_migration_probe."
+                "research_no_horizon_acquisition_requests') AS relation").fetchone()
+            self.assertIsNone(row['relation'])
+        self.prepared()
+        request = self.store.register_request(self.declaration())
+        before = self.finish_acquisition(request)
+        self.assertEqual(before['status'], 'ADMITTED')
+        with self.connect() as conn:
+            conn.execute(sql057, prepare=False)
+            conn.execute(sql057, prepare=False)
+        self.assertEqual(self.store.report(request, include_proofs=True), before)
+
+    def test_executor_fence_failure_before_commit_rolls_back_whole_admission(self):
+        self.prepared()
+        declaration = self.declaration()
+        _, anchor = self.anchored(declaration)
+        parts = self.fetched_parts(declaration, anchor)
+        guarded = executor.PostgresCohortStore(self.conn)
+        calls = []
+
+        def fence(conn):
+            self.assertIs(conn, self.conn)
+            calls.append(True)
+            if len(calls) == 2:
+                raise executor.LeaseLost('fixture expired at final admission fence')
+
+        with self.assertRaisesRegex(executor.LeaseLost, 'final admission fence'):
+            guarded.submit_cohort(declaration, anchor, lambda ordinal: parts[ordinal],
+                _transaction_guard=fence)
+        self.assertEqual(calls, [True, True])
+        for table in executor.TABLES:
+            if table != 'research_no_horizon_schema':
+                self.assertEqual(self.count(table), 0, table)
+
+
+    def calendar_declaration(self, days=1):
+        value = self.declaration()
+        with self.connect() as conn:
+            now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        delta = now + timedelta(days=days) - contracts.utc(value['source_start_utc'])
+        value['declared_at_utc'] = (now - timedelta(days=3)).isoformat()
+        for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc'):
+            value[key] = (contracts.utc(value[key]) + delta).isoformat()
+        for part in value['parts']:
+            for key in ('source_start_utc', 'source_end_utc'):
+                part[key] = (contracts.utc(part[key]) + delta).isoformat()
+        return cohort.normalize_declaration(value)
+
+    def test_calendar_registers_all_future_windows_once_without_source_reads(self):
+        plan = calendar.build_plan(self.calendar_declaration(), window_count=3)
+        first = calendar.register_plan(self.store, plan)
+        self.reopen()
+        self.assertEqual(calendar.register_plan(self.store, plan), first)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        for entry, window in zip(first['registrations'], plan['windows']):
+            self.assertEqual(entry['declaration_sha256'], window['declaration_sha256'])
+            self.assertTrue(entry['registered_before_source_start'])
+            self.assertLessEqual(contracts.utc(entry['created_at_utc']),
+                                 contracts.utc(entry['source_start_utc']))
+        factory = Mock(side_effect=AssertionError('calendar opened source before cutoff'))
+        self.assertIsNone(self.store.run_once('calendar', source_connection_factory=factory))
+        factory.assert_not_called()
+        self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_calendar_partial_registration_retries_without_duplicate_or_changed_alias(self):
+        plan = calendar.build_plan(self.calendar_declaration(), window_count=3)
+        first_id = self.store.register_request(plan['windows'][0]['declaration'],
+                                              request_key='already-registered')
+        original = self.store.register_request
+        calls = []
+
+        def interrupted(declaration, **kwargs):
+            calls.append(True)
+            if len(calls) == 3:
+                raise RuntimeError('fixture interruption')
+            return original(declaration, **kwargs)
+
+        with patch.object(self.store, 'register_request', side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, 'fixture interruption'):
+                calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 2)
+        self.reopen()
+        receipt = calendar.register_plan(self.store, plan)
+        self.assertEqual(receipt['registrations'][0]['request_id'], first_id)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        self.assertEqual(self.store.report(first_id)['request_key'], 'already-registered')
+
+    def test_calendar_late_new_registration_rolls_back_and_late_existing_cannot_be_promoted(self):
+        declaration = self.calendar_declaration(days=-2)
+        plan = calendar.build_plan(declaration, window_count=2)
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        request = self.store.register_request(plan['windows'][0]['declaration'])
+        before = self.store.registration_info(request)
+        self.assertFalse(before['registered_before_source_start'])
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        self.assertEqual(self.store.registration_info(request), before)
+        for invalid in (1, 0, 'true', None):
+            with self.assertRaisesRegex(ValueError, 'boolean'):
+                self.store.register_request(declaration, require_before_start=invalid)
+
+
+
+    def test_calendar_existing_timely_fixture_recovers_after_window_start(self):
+        plan = calendar.build_plan(self.calendar_declaration(days=-2), window_count=1)
+        declaration = plan['windows'][0]['declaration']
+        identity = {'version': acquisition.VERSION,
+            'declaration_sha256': contracts.digest(declaration),
+            'implementation_sha256': self.store.implementation_sha256,
+            'implementation': self.store.versions}
+        request = contracts.digest(identity)
+        created = contracts.utc(declaration['source_start_utc']) - timedelta(seconds=1)
+        due = max(contracts.utc(declaration['declared_at_utc']),
+                  contracts.utc(declaration['cutoff_utc']))
+        # Synthetic historical fixture, not a change to an immutable row.
+        with self.conn.transaction():
+            self.conn.execute('''INSERT INTO research_no_horizon_acquisition_requests
+                (request_id,identity_json,declaration_json,implementation_sha256,
+                 not_before_utc,created_at_utc) VALUES(%s,%s,%s,%s,%s,%s)''',
+                (request, contracts.canonical(identity), contracts.canonical(declaration),
+                 self.store.implementation_sha256, due, created))
+        receipt = calendar.register_plan(self.store, plan)
+        self.assertEqual(receipt['registrations'][0]['request_id'], request)
+        self.assertEqual(contracts.utc(receipt['registrations'][0]['created_at_utc']), created)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+
+    def test_calendar_fresh_clock_check_rejects_insert_with_earlier_fixture_timestamp(self):
+        declaration = self.calendar_declaration(days=-2)
+        # A fixture trigger forces an earlier creation field so only the fresh
+        # database-clock check can catch late new registration.
+        with self.connect() as conn:
+            conn.execute("""CREATE FUNCTION calendar_test_early_creation() RETURNS trigger
+                LANGUAGE plpgsql AS $body$ BEGIN
+                NEW.created_at_utc :=
+                    (NEW.declaration_json::jsonb->>'source_start_utc')::timestamptz - INTERVAL '1 second';
+                RETURN NEW; END $body$;
+                CREATE TRIGGER calendar_test_early_creation BEFORE INSERT
+                ON research_no_horizon_acquisition_requests FOR EACH ROW
+                EXECUTE FUNCTION calendar_test_early_creation();""", prepare=False)
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            self.store.register_request(declaration, require_before_start=True)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+
+
+
+    def test_selection_registers_frozen_policy_before_source_and_reuses_exact_receipt(self):
+        original_versions = deepcopy(self.store.versions)
+        plan = selection.build_plan(self.calendar_declaration(),
+            base_directions=['SHORT'], thresholds_pct=[.25],
+            candidate_keys=['FUTURES_CVD_TOTAL_65', 'PRICE_OI_TOTAL_65'],
+            window_count=3, top_k=1, required_eligible_windows=2)
+        with self.connect() as conn:
+            before = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        first = selection.register_plan(self.store, plan)
+        with self.connect() as conn:
+            after = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        self.assertEqual(first['plan_sha256'], plan['plan_sha256'])
+        self.assertEqual(first['discovery_plan_sha256'], plan['discovery_plan']['plan_sha256'])
+        self.assertEqual(first['discovery_registration']['plan_sha256'],
+                         plan['discovery_plan']['plan_sha256'])
+        self.assertTrue(first['registration_complete'])
+        self.assertEqual(first['receipt_sha256'],
+                         contracts.digest({key: value for key, value in first.items() if key != 'receipt_sha256'}))
+        inner = first['discovery_registration']['calendar_registration']
+        calendar_plan = plan['discovery_plan']['calendar_plan']
+        self.assertEqual(inner['plan_sha256'], calendar_plan['plan_sha256'])
+        self.assertEqual(len(inner['registrations']), 3)
+        for entry, window in zip(inner['registrations'], calendar_plan['windows']):
+            self.assertEqual(entry, {'ordinal': window['ordinal'],
+                                    **self.store.registration_info(entry['request_id'])})
+            self.assertEqual(entry['declaration_sha256'], window['declaration_sha256'])
+            self.assertTrue(entry['registered_before_source_start'])
+            created = contracts.utc(entry['created_at_utc'])
+            self.assertLessEqual(before, created)
+            self.assertLessEqual(created, after)
+            self.assertLessEqual(created, contracts.utc(entry['source_start_utc']))
+            request = self.store.report(entry['request_id'])
+            self.assertEqual(request['declaration'], window['declaration'])
+            self.assertEqual(request['identity']['implementation'], original_versions)
+            self.assertEqual(entry['implementation_sha256'], self.store.implementation_sha256)
+            self.assertEqual(request['status'], 'WAITING')
+        self.reopen()
+        self.assertEqual(selection.register_plan(self.store, plan), first)
+        self.assertEqual(self.store.versions, original_versions)
+        self.assertEqual(acquisition.implementation(), original_versions)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        factory = Mock(side_effect=AssertionError('selection registration opened source'))
+        self.assertIsNone(self.store.run_once('selection-not-due', source_connection_factory=factory))
+        factory.assert_not_called()
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
+        for value in (plan, first, first['discovery_registration'], inner):
+            for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized',
+                        'is_prospective_formula_evidence', 'validated_discovery',
+                        'scope_pooling'):
+                self.assertIs(value[key], False)
+
+    def test_selection_policy_and_window_changes_bind_every_child_request(self):
+        template = self.calendar_declaration()
+        original = deepcopy(template)
+        versions = deepcopy(self.store.versions)
+        variants = [
+            {'window_count': 2, 'top_k': 1, 'required_eligible_windows': 1},
+            {'window_count': 2, 'top_k': 2, 'required_eligible_windows': 1},
+            {'window_count': 2, 'top_k': 1, 'required_eligible_windows': 2},
+            {'window_count': 3, 'top_k': 1, 'required_eligible_windows': 1},
+        ]
+        previous_ids, previous_keys, selection_hashes, total = set(), set(), set(), 0
+        first_windows = None
+        for configuration in variants:
+            with self.subTest(configuration=configuration):
+                plan = selection.build_plan(template, base_directions=['SHORT'],
+                    thresholds_pct=[.25],
+                    candidate_keys=['FUTURES_CVD_TOTAL_65', 'PRICE_OI_TOTAL_65'],
+                    **configuration)
+                self.assertEqual(template, original)
+                windows = plan['discovery_plan']['calendar_plan']['windows']
+                if first_windows is None:
+                    first_windows = deepcopy(windows)
+                else:
+                    # Policy-only changes retain dates/scopes but create fresh
+                    # immutable identities for every corresponding window.
+                    for earlier, current in zip(first_windows, windows):
+                        for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc', 'scopes'):
+                            self.assertEqual(earlier['declaration'][key], current['declaration'][key])
+                        self.assertNotEqual(earlier['declaration_sha256'], current['declaration_sha256'])
+                receipt = selection.register_plan(self.store, plan)
+                registrations = receipt['discovery_registration']['calendar_registration']['registrations']
+                ids = {row['request_id'] for row in registrations}
+                keys = {window['declaration']['cohort_key'] for window in windows}
+                self.assertEqual(len(ids), configuration['window_count'])
+                self.assertEqual(len(keys), configuration['window_count'])
+                self.assertFalse(previous_ids & ids)
+                self.assertFalse(previous_keys & keys)
+                self.assertNotIn(plan['plan_sha256'], selection_hashes)
+                previous_ids.update(ids)
+                previous_keys.update(keys)
+                selection_hashes.add(plan['plan_sha256'])
+                total += configuration['window_count']
+                self.assertEqual(selection.register_plan(self.store, plan), receipt)
+                for entry, window in zip(registrations, windows):
+                    actual = self.store.report(entry['request_id'])
+                    self.assertEqual(actual['declaration'], window['declaration'])
+                    self.assertEqual(actual['identity']['declaration_sha256'], window['declaration_sha256'])
+                    self.assertEqual(actual['identity']['implementation'], versions)
+                    self.assertEqual(actual['status'], 'WAITING')
+        self.assertEqual(total, 9)
+        self.assertEqual(self.count(PREFIX + 'requests'), total)
+        self.assertEqual(self.store.versions, versions)
+        self.assertEqual(acquisition.implementation(), versions)
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
+
+
+    def validation_inputs(self, *, future_from_database_clock=False, training=None):
+        training = training or validation_fixtures.training_fixture()
+        selection_plan, selection_reports, _ = training
+        template, _ = validation_fixtures.future_template(training=training)
+        if future_from_database_clock:
+            with self.connect() as conn:
+                now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+            delta = now + timedelta(days=1) - contracts.utc(template['source_start_utc'])
+            template['declared_at_utc'] = now.isoformat()
+            for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc'):
+                template[key] = (contracts.utc(template[key]) + delta).isoformat()
+            for part in template['parts']:
+                for key in ('source_start_utc', 'source_end_utc'):
+                    part[key] = (contracts.utc(part[key]) + delta).isoformat()
+        plan = validation.build_plan(template, selection_plan=selection_plan,
+                                     selection_reports=selection_reports)
+        return plan, dict(selection_plan=selection_plan, selection_reports=selection_reports)
+
+    def test_validation_registration_uses_real_clock_exact_selected_tuples_and_restarts(self):
+        plan, evidence = self.validation_inputs(future_from_database_clock=True)
+        original_versions = deepcopy(self.store.versions)
+        selected = selection.select_reports(evidence['selection_plan'], evidence['selection_reports'])
+        wanted = [{key: row[key] for key in ('candidate_key', 'base_direction', 'threshold_pct')}
+                  for row in selected['selected_scopes']]
+        wanted.sort(key=lambda row: (row['candidate_key'], row['base_direction'], row['threshold_pct']))
+        self.assertEqual(plan['declaration']['scopes'], wanted)
+        self.assertEqual(len(wanted), 3)
+        # Three selected tuples from a four-cell Cartesian product must stay
+        # exactly three; validation must not reintroduce an unselected tuple.
+        self.assertEqual(len({row['candidate_key'] for row in wanted}) *
+                         len({row['base_direction'] for row in wanted}) *
+                         len({row['threshold_pct'] for row in wanted}), 4)
+        with self.connect() as conn:
+            before = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        receipt = validation.register_plan(self.store, plan, **evidence)
+        with self.connect() as conn:
+            after = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        self.assertEqual(receipt['plan_sha256'], plan['plan_sha256'])
+        self.assertEqual(receipt['request_id'], plan['request_id'])
+        self.assertTrue(receipt['registration_complete'])
+        self.assertEqual(receipt['receipt_sha256'], contracts.digest({
+            key: value for key, value in receipt.items() if key != 'receipt_sha256'}))
+        actual = self.store.registration_info(plan['request_id'])
+        self.assertEqual(receipt['registration_info'], actual)
+        created = contracts.utc(actual['created_at_utc'])
+        self.assertLessEqual(before, created)
+        self.assertLessEqual(created, after)
+        self.assertGreaterEqual(created, contracts.utc(plan['training_max_cutoff_utc']))
+        self.assertLessEqual(created, contracts.utc(plan['declaration']['source_start_utc']))
+        self.assertTrue(actual['registered_before_source_start'])
+        stored = self.store.report(plan['request_id'])
+        self.assertEqual(stored['declaration'], plan['declaration'])
+        self.assertEqual(stored['identity'], plan['request_identity'])
+        self.assertEqual(stored['identity']['implementation'], original_versions)
+        self.assertEqual(stored['status'], 'WAITING')
+        self.reopen()
+        self.assertEqual(validation.register_plan(self.store, plan, **evidence), receipt)
+        self.assertEqual(self.store.versions, original_versions)
+        self.assertEqual(acquisition.implementation(), original_versions)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        forbidden = Mock(side_effect=AssertionError('validation registration opened source'))
+        self.assertIsNone(self.store.run_once('validation-not-due', source_connection_factory=forbidden))
+        forbidden.assert_not_called()
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(receipt[key], False)
+
+    def test_validation_late_registration_and_rehashed_plan_reject_without_writes(self):
+        historical, evidence = self.validation_inputs()
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            validation.register_plan(self.store, historical, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        future, evidence = self.validation_inputs(future_from_database_clock=True)
+        changed = deepcopy(future)
+        changed['declaration']['scopes'].pop()
+        changed['plan_sha256'] = contracts.digest({
+            key: value for key, value in changed.items() if key != 'plan_sha256'})
+        with self.assertRaises(ValueError):
+            validation.register_plan(self.store, changed, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+
+    def test_validation_registration_rejects_training_beyond_actual_database_clock(self):
+        with self.connect() as conn:
+            now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        # Genuine synthetic captures/outcomes are rebuilt at a future date.
+        # The database clock and runtime clock checks remain untouched.
+        training = validation_fixtures.training_fixture(
+            base=now.replace(second=0, microsecond=0) + timedelta(days=1))
+        plan, evidence = self.validation_inputs(training=training)
+        self.assertGreater(contracts.utc(plan['training_max_cutoff_utc']), now)
+        self.assertGreater(contracts.utc(plan['declaration']['source_start_utc']), now)
+        with self.assertRaises(ValueError):
+            validation.register_plan(self.store, plan, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_validation_reads_actual_admitted_postgres_link_for_empty_future_cohort(self):
+        plan, evidence = self.validation_inputs()
+        declaration = plan['declaration']
+        identity = plan['request_identity']
+        created = max(contracts.utc(plan['training_max_cutoff_utc']),
+                      contracts.utc(declaration['declared_at_utc'])) + timedelta(seconds=1)
+        self.assertLess(created, contracts.utc(declaration['source_start_utc']))
+        due = max(contracts.utc(declaration['declared_at_utc']),
+                  contracts.utc(declaration['cutoff_utc']))
+        # Initial synthetic historical registration fixture, matching the
+        # established calendar recovery test above. No existing timestamp,
+        # guard, request identity or evidence is modified.
+        with self.conn.transaction():
+            self.conn.execute('''INSERT INTO research_no_horizon_acquisition_requests
+                (request_id,identity_json,declaration_json,implementation_sha256,
+                 not_before_utc,created_at_utc) VALUES(%s,%s,%s,%s,%s,%s)''',
+                (plan['request_id'], contracts.canonical(identity), contracts.canonical(declaration),
+                 self.store.implementation_sha256, due, created))
+        registered = validation.register_plan(self.store, plan, **evidence)
+        self.assertEqual(contracts.utc(registered['registration_info']['created_at_utc']), created)
+        acquired = self.finish_acquisition(plan['request_id'], reopen=True)
+        self.assertEqual(acquired['status'], 'ADMITTED')
+        raw = self.finish_executor(acquired['executor_plan_id'])
+        self.assertTrue(raw['all_scopes_processed'])
+        self.assertEqual(raw['coverage_receipt']['accepted_source_rows'], 0)
+        self.assertEqual(raw['declared_scopes'], 3)
+        result = validation.evaluate_plan(self.store, executor.PostgresCohortStore(self.conn),
+                                          plan, **evidence)
+        acquired_report = self.store.report(plan['request_id'])
+        reference = validation.evaluate_reports(plan, **evidence,
+            registration_info=self.store.registration_info(plan['request_id']),
+            acquisition_report=acquired_report, executor_report=raw)
+        for key in ('rows', 'qualified_scope_ids', 'denominator', 'original_verification'):
+            self.assertEqual(result[key], reference[key], key)
+        self.assertTrue(result['validation_complete'])
+        self.assertEqual(result['qualified_scope_ids'], [])
+        self.assertEqual(len(result['rows']), 3)
+        for row in result['rows']:
+            self.assertFalse(row['prospective_gate_passed'])
+            self.assertEqual(row['fresh_gate']['resolved_parents'], 0)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        self.assertEqual(self.count(PREFIX + 'anchors'), 1)
+        self.assertEqual(self.count('research_no_horizon_plans'), 1)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(result[key], False)
+
+        # Use the explicit TEST_DATABASE_URL fixture's disposable database and
+        # the native read-only connector; publication does not advance work.
+        tables = acquisition.TABLES + executor.TABLES
+        with worker._connect_source(self.dsn) as reader:
+            with reader.transaction():
+                self.assertEqual(reader.execute('SHOW default_transaction_read_only').fetchone()
+                                 ['default_transaction_read_only'], 'on')
+                before = {table: reader.execute('SELECT count(*) AS n FROM ' + table).fetchone()['n']
+                          for table in tables}
+            published = publication.publish_plan(acquisition.AcquisitionStore(reader),
+                executor.PostgresCohortStore(reader), plan, **evidence)
+            rendered = publication.render_markdown(published)
+            with reader.transaction():
+                self.assertEqual(reader.execute('SHOW default_transaction_read_only').fetchone()
+                                 ['default_transaction_read_only'], 'on')
+                after = {table: reader.execute('SELECT count(*) AS n FROM ' + table).fetchone()['n']
+                         for table in tables}
+        self.assertEqual(after, before)
+        self.assertEqual(published['validation_plan'], plan)
+        self.assertEqual(published['validation_result'], result)
+        self.assertEqual(published['state'], 'COMPLETE_NO_QUALIFICATION')
+        self.assertEqual(len(published['scope_summary']), 3)
+        self.assertEqual([row['scope_id'] for row in published['scope_summary']],
+                         [scope['scope_id'] for scope in plan['selected_scopes']])
+        self.assertTrue(all(row['global_qualified'] is False for row in published['scope_summary']))
+        self.assertEqual(published['source_hashes'], {
+            'validation_plan_sha256': plan['plan_sha256'],
+            'selection_plan_sha256': plan['selection_plan_sha256'],
+            'selection_report_sha256': plan['selection_report_sha256'],
+            'declaration_sha256': plan['declaration_sha256'],
+            'validation_result_sha256': result['report_sha256'],
+            'acquisition_report_sha256': acquired_report['report_sha256'],
+            'executor_report_sha256': raw['report_sha256'],
+            'executor_plan_id': acquired['executor_plan_id'],
+            'anchor_sha256': acquired['anchor_sha256']})
+        self.assertEqual(published['validation_result']['request_id'], plan['request_id'])
+        self.assertEqual(contracts.utc(published['validation_result']['timing_evidence']
+                                      ['registration_info']['created_at_utc']), created)
+        self.assertEqual(published['publication_sha256'], contracts.digest({
+            key: value for key, value in published.items() if key != 'publication_sha256'}))
+        self.assertIn('State: COMPLETE_NO_QUALIFICATION', rendered)
+        self.assertIn('Declared scopes: 3; processed scopes: 3; qualified scopes: 0.', rendered)
+        self.assertEqual(rendered.count('\n## Scope '), 3)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(published[key], False)
+
+
+if __name__ == '__main__':
+    unittest.main()
