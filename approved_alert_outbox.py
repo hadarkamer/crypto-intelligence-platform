@@ -8,7 +8,7 @@ history pruning and process restarts cannot recreate an old occurrence.
 import json
 
 import approved_alert_contract as contract
-from approved_alert_producer import approved_messages
+from approved_alert_producer import isolated_records
 
 TABLE = 'approved_alert_execution_outbox'
 MAX_PENDING = 8192
@@ -21,26 +21,47 @@ def synchronize(conn, source_key, state, now_ms):
         'FROM approved_alert_execution_outbox WHERE source_key=%s AND NOT canceled',
         (source_key,)).fetchall()
     positions = {p['position_id']: p for p in state.get('active', []) + state.get('history', [])}
-    records = {v['occurrence_id']: v for v in approved_messages(state, now_ms=now_ms, fence_ms=1)}
-    ids = {v['occurrence_id']: i['position_id'] for i in state.get('intents', [])
-           for v in approved_messages(dict(state, intents=[i]), now_ms=now_ms, fence_ms=1)}
+    records, ids, errors = isolated_records(state, now_ms=now_ms, fence_ms=1)
+    if errors:
+        print(f'[approved-execution] isolated invalid source occurrences count={len(errors)}', flush=True)
     # The durable row survives removal of source history/intents. Missing or
     # ended source position withdraws the remainder, never closes a venue fill.
     for row in rows:
-        value = json.loads(row['payload_json'])
-        observed = positions.get(row['source_position_id'])
-        if observed is not None and observed.get('status') == 'OPEN':
-            continue
-        as_of = max(contract.moment_ms(value['approved_at']),
-                    ((observed or {}).get('terminal_ms') or (observed or {}).get('unknown_ms')
-                     or state['bar_cursor_ms']) + 60_000)
-        if as_of > now_ms:
-            raise contract.ContractError('FUTURE_SOURCE_STATE')
-        value.update(kind='CANCEL', source_state='CANCELED', source_as_of=contract.iso_ms(as_of),
-                     source_sequence=as_of*10+contract.RANK['CANCEL'],
-                     cancel_reason='SOURCE_OBSERVATION_ENDED')
-        records[value['occurrence_id']] = contract.validate(value)
-        ids[value['occurrence_id']] = row['source_position_id']
+        try:
+            value = contract.validate(json.loads(row['payload_json']))
+            identity = row['occurrence_id']
+            if value['occurrence_id'] != identity:
+                raise contract.ContractError('APPROVED_OUTBOX_IDENTITY')
+            if identity in records and contract.plan_digest(records[identity]) != contract.plan_digest(value):
+                # A source rewrite cannot silently replace an admitted plan.
+                records.pop(identity, None)
+                ids.pop(identity, None)
+                raise contract.ContractError('APPROVED_OUTBOX_CONFLICT')
+            observed = positions.get(row['source_position_id'])
+            if observed is not None and observed.get('status') == 'OPEN':
+                continue
+            as_of = max(contract.moment_ms(value['approved_at']),
+                        ((observed or {}).get('terminal_ms') or (observed or {}).get('unknown_ms')
+                         or state['bar_cursor_ms']) + 60_000)
+            if as_of > now_ms:
+                raise contract.ContractError('FUTURE_SOURCE_STATE')
+            value.update(kind='CANCEL', source_state='CANCELED', source_as_of=contract.iso_ms(as_of),
+                         source_sequence=as_of*10+contract.RANK['CANCEL'],
+                         cancel_reason='SOURCE_OBSERVATION_ENDED')
+            records[identity] = contract.validate(value)
+            ids[identity] = row['source_position_id']
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            records.pop(row['occurrence_id'], None)
+            ids.pop(row['occurrence_id'], None)
+            print('[approved-execution] isolated invalid retained occurrence', flush=True)
+    # Replaying an unchanged valid source is not new outbox work. Avoid the
+    # global admission lock/count for these ordinary per-minute monitor ticks.
+    retained = {row['occurrence_id']: row for row in rows}
+    for identity in list(records):
+        old = retained.get(identity)
+        if old is not None and old['source_sequence'] >= records[identity]['source_sequence']:
+            records.pop(identity)
+            ids.pop(identity, None)
     if not records:
         return False
     # Serialize admission accounting across source scopes. Source locks are
@@ -78,18 +99,42 @@ def synchronize(conn, source_key, state, now_ms):
     return changed
 
 
-def read(conn, source_keys):
-    result = []
+class ReadBatch(list):
+    """Validated records plus local quarantine IDs; no durable state mutations."""
+    def __init__(self):
+        super().__init__()
+        self.blocked_occurrences = set()
+        self.source_errors = 0
+        self.complete = True
+        self.next_source_offset = 0
+
+
+def read(conn, source_keys, *, isolate=False):
+    result = ReadBatch()
     for key in source_keys:
         rows = conn.execute(
-            'SELECT payload_json FROM approved_alert_execution_outbox '
+            'SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox '
             'WHERE source_key=%s AND acknowledged_sequence<source_sequence '
             'ORDER BY canceled DESC,source_sequence LIMIT %s', (key, MAX_PENDING)).fetchall()
         for row in rows:
-            raw = row['payload_json']
-            if not isinstance(raw, str) or len(raw.encode()) > contract.MAX_BYTES:
-                raise contract.ContractError('APPROVED_OUTBOX_PAYLOAD')
-            result.append(contract.validate(json.loads(raw)))
+            try:
+                raw = row['payload_json']
+                if not isinstance(raw, str) or len(raw.encode()) > contract.MAX_BYTES:
+                    raise contract.ContractError('APPROVED_OUTBOX_PAYLOAD')
+                value = contract.validate(json.loads(raw))
+                if row.get('occurrence_id', value['occurrence_id']) != value['occurrence_id']:
+                    raise contract.ContractError('APPROVED_OUTBOX_IDENTITY')
+                result.append(value)
+            except (ValueError, TypeError, KeyError, ArithmeticError):
+                if not isolate:
+                    raise
+                # The SQL identity, never the damaged payload, identifies the
+                # affected occurrence. Missing identity is a structural failure.
+                identity = row.get('occurrence_id')
+                if not isinstance(identity, str) or not contract.HEX.fullmatch(identity):
+                    raise contract.ContractError('APPROVED_OUTBOX_IDENTITY') from None
+                result.blocked_occurrences.add(identity)
+                result.source_errors += 1
     return result
 
 

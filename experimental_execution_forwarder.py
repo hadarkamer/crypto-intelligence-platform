@@ -95,7 +95,14 @@ class Forwarder:
         """Fixed cadence after completion: no catch-up burst or parallel tick."""
         while not stop.is_set():
             self.wake.clear()
-            report = self.run_once()
+            try:
+                report = self.run_once()
+            except Exception:
+                # Keep the sole sender alive after an unexpected local cycle
+                # failure. The normal bounded recovery cadence still applies;
+                # no catch-up burst and no second worker are introduced.
+                report = dict(status='FORWARD_CYCLE_UNAVAILABLE', attempted=None,
+                              source_records_changed=0, exchange_requests_sent=0)
             emit(report)
             if report['status'] == 'DISABLED':
                 return

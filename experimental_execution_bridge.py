@@ -53,33 +53,58 @@ def _approved_connect(connect=None, *, read_only):
     return connect(_source_dsn(), connect_timeout=3, options=options)
 
 
-def read_approved(scopes, fence, *, now=None, env=None, connect=None, deadline_monotonic=None, clock=None):
-    """Read the explicit-migration durable outbox; never reconstruct old plans."""
+def read_approved(scopes, fence, *, now=None, env=None, connect=None, deadline_monotonic=None,
+                  clock=None, source_offset=0):
+    """Read independent outbox occurrences; database failures remain fail-closed.
+
+    A soft deadline returns only the fully read keys. The sender may use those
+    fresh records but cannot send retained ALERTs from unobserved keys. Rotate
+    the starting key on the next cycle so a slow source cannot starve its peers.
+    No SQL exceptions are swallowed: a broken shared transaction invalidates
+    this read and the sender continues only retained cancellations.
+    """
     if not approved_enabled(env):
         return []
     import approved_alert_contract as approved
     import approved_alert_outbox as outbox
     clock = clock or time.monotonic
     keys = approved_source_keys(scopes)
+    if keys:
+        source_offset %= len(keys)
+        keys = keys[source_offset:] + keys[:source_offset]
     fence_ms = approved.moment_ms(fence.isoformat())
+    result = outbox.ReadBatch()
     values = []
     with _approved_connect(connect, read_only=True) as conn:
-        for key in keys:
+        for index, key in enumerate(keys):
             if deadline_monotonic is not None and clock() >= deadline_monotonic:
-                raise approved.ContractError('SOURCE_READ_DEADLINE')
-            values.extend(outbox.read(conn, [key]))
+                result.complete = False
+                result.source_errors += 1
+                break
+            batch = outbox.read(conn, [key], isolate=True)
+            values.extend(batch)
+            result.blocked_occurrences.update(batch.blocked_occurrences)
+            result.source_errors += batch.source_errors
+            result.next_source_offset = (source_offset + index + 1) % len(keys)
     by_id = {}
     for value in values:
-        if approved.moment_ms(value['approved_at']) < fence_ms:
+        identity = value['occurrence_id']
+        if identity in result.blocked_occurrences or approved.moment_ms(value['approved_at']) < fence_ms:
             continue
-        previous = by_id.get(value['occurrence_id'])
-        if previous and approved.plan_digest(previous) != approved.plan_digest(value):
-            raise approved.ContractError('CONFLICTING_SOURCE_OCCURRENCE')
+        previous = by_id.get(identity)
+        same_revision_conflict = (previous and value['source_sequence'] == previous['source_sequence']
+            and any(value[k] != previous[k] for k in approved.TEMPORAL))
+        if previous and (approved.plan_digest(previous) != approved.plan_digest(value) or same_revision_conflict):
+            result.blocked_occurrences.add(identity)
+            result.source_errors += 1
+            by_id.pop(identity, None)
+            continue
         if (not previous or (value['kind'] == 'CANCEL' and previous['kind'] != 'CANCEL') or
-                (value['kind'] == previous['kind'] and value['source_sequence'] > previous['source_sequence']) or
-                (previous['kind'] != 'CANCEL' and value['source_sequence'] > previous['source_sequence'])):
-            by_id[value['occurrence_id']] = value
-    return list(by_id.values())
+                (previous['kind'] != 'CANCEL' and value['source_sequence'] > previous['source_sequence']) or
+                (value['kind'] == previous['kind'] and value['source_sequence'] > previous['source_sequence'])):
+            by_id[identity] = value
+    result.extend(value for identity, value in by_id.items() if identity not in result.blocked_occurrences)
+    return result
 
 
 def acknowledge_approved(scopes, value, *, env=None, connect=None):

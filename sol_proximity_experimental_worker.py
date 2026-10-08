@@ -117,6 +117,7 @@ class SolProximityWorker:
         self.scopes, self.lock = set(), asyncio.Lock()
         self.retry_ms, self.last_poll, self.last_price_poll = 0, None, None
         self.last_legacy_price_poll = None
+        self.transient_failures = 0
         self.source_restore_task = None
         self.runtime = {'rule_id': self.spec.rule_id, 'research_id': self.spec.research_id, 'ready': False, 'state': 'NOT_STARTED',
                         'config_sha256': self.config_sha256, 'delivered': 0}
@@ -181,14 +182,33 @@ class SolProximityWorker:
         return await asyncio.to_thread(self.store.snapshot, scope)
 
     def evidence_error(self, exc):
-        self.retry_ms = self.clock()+5*MINUTE
+        code = getattr(exc, 'code', '')
+        transient = (isinstance(exc, (TimeoutError, ConnectionError, requests.exceptions.Timeout,
+                                      requests.exceptions.ConnectionError)) or
+            type(exc).__name__ in ('OperationalError', 'InterfaceError', 'QueryCanceled', 'LockNotAvailable') or
+            code in ('EXPERIMENTAL_HYPERLIQUID_REQUEST_FAILED',
+                     'EXPERIMENTAL_HYPERLIQUID_ARCHIVE_READ_FAILED',
+                     'EXPERIMENTAL_HYPERLIQUID_ARCHIVE_WRITE_FAILED',
+                     'EXPERIMENTAL_HYPERLIQUID_INCOMPLETE_MINUTES',
+                     'EXPERIMENTAL_HYPERLIQUID_HTTP_500', 'EXPERIMENTAL_HYPERLIQUID_HTTP_502',
+                     'EXPERIMENTAL_HYPERLIQUID_HTTP_503', 'EXPERIMENTAL_HYPERLIQUID_HTTP_504'))
+        if code in ('EXPERIMENTAL_HYPERLIQUID_HTTP_429', 'EXPERIMENTAL_HYPERLIQUID_RATE_LIMIT_COOLDOWN'):
+            delay, retry_class = MINUTE, 'RATE_LIMIT_COOLDOWN'
+        elif transient:
+            self.transient_failures = min(self.transient_failures + 1, 3)
+            delay, retry_class = self.transient_failures * 10_000, 'TRANSIENT'
+        else:
+            delay, retry_class = 5 * MINUTE, 'EVIDENCE_REPAIR_REQUIRED'
+        # No in-place loop, sleep, deadline renewal or extra sender/exchange
+        # allowance. The existing serial 10-second worker cadence retries once.
+        self.retry_ms = self.clock()+delay
         self.runtime.update(ready=False, state='EVIDENCE_UNAVAILABLE', last_error_type=type(exc).__name__,
-                            next_retry_at=dt(self.retry_ms).isoformat())
-        print(f'[sol-proximity] evidence unavailable type={type(exc).__name__}', flush=True)
+                            retry_class=retry_class, next_retry_at=dt(self.retry_ms).isoformat())
+        print(f'[sol-proximity] evidence unavailable type={type(exc).__name__} retry={retry_class}', flush=True)
 
     async def monitor(self, scope, state):
         legacy = state.get('legacy_source_state')
-        if legacy and legacy['active']:
+        if legacy and any(p['status'] in ('PENDING', 'OPEN') for p in legacy['active']):
             old_start = legacy['bar_cursor_ms']+MINUTE
             old_end = min(self.clock()//MINUTE*MINUTE, old_start+1000*MINUTE)
             old_slot = (scope, self.clock()//MINUTE)
@@ -232,7 +252,8 @@ class SolProximityWorker:
         boundary = self.clock()//MINUTE*MINUTE-MINUTE
         legacy = state.get('legacy_source_state', {})
         return (state['bar_cursor_ms'] >= boundary and
-                (not legacy.get('active') or legacy['bar_cursor_ms'] >= boundary))
+                (not any(p['status'] in ('PENDING', 'OPEN') for p in legacy.get('active', []))
+                 or legacy['bar_cursor_ms'] >= boundary))
 
     async def reprice_bundle(self, bundle, now):
         """Change only the local experiment's reference quote, never Watch data."""
@@ -280,6 +301,8 @@ class SolProximityWorker:
                 if not self.allowed(chat_id):
                     return
                 outcome = await self.db(self.store.ingest, scope, decoded, guards, self.clock())
+                self.transient_failures = 0
+                self.retry_ms = 0
                 self.runtime.update(ready=True, state=outcome, last_error_type=None, next_retry_at=None)
                 self.last_poll = None
             except asyncio.CancelledError:
@@ -360,6 +383,8 @@ class SolProximityWorker:
                     pending_source_restore.schedule(self, scope)
                 if self.clock() < self.retry_ms:
                     return
+                self.transient_failures = 0
+                self.retry_ms = 0
                 self.runtime.update(ready=True, state='MONITORING' if state['initialized_universe'] else 'WAITING_WATCH_BASELINE',
                                     last_error_type=None, next_retry_at=None)
             else:
@@ -381,4 +406,3 @@ class SolProximityWorker:
 
 WORKER = SolProximityWorker()
 ADDITIONAL_WORKERS = {coin: SolProximityWorker(spec=spec) for coin, spec in SPECS.items() if coin != 'SOL'}
-
