@@ -189,5 +189,8 @@ if __name__=='__main__':
     if '--probe' in sys.argv or '--check-config' in sys.argv:deployment_check()
     elif '--source-probe' in sys.argv:probe()
     else:
+        if os.getenv('COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START','').strip().lower()=='true':
+            from source_account_diagnostic import main as check_source_account
+            check_source_account()
         from aiohttp import web
         web.run_app(create_app(),host='0.0.0.0',port=int(os.getenv('PORT','10000')),access_log=None)

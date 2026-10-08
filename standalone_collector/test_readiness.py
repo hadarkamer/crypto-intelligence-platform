@@ -42,6 +42,8 @@ def load_tests(loader, tests, pattern):
     # session and private-evidence checks without changing the service command.
     import test_authenticated_probe
     tests.addTests(loader.loadTestsFromModule(test_authenticated_probe))
+    import test_source_account_diagnostic
+    tests.addTests(loader.loadTestsFromModule(test_source_account_diagnostic))
     return tests
 
 
