@@ -104,7 +104,10 @@ class RuntimeContract:
         self.assertFalse(self.reservations);self.assertFalse(self.store.load()['trades'])
 
     def test_full_fill_protection_close_cleanup_persists_testnet_domain(self):
-        msg,result=self.start();self.assertEqual(result['operation'],'ENTRY');self.protect()
+        with patch.object(self.store,'mutate',wraps=self.store.mutate) as writes:
+            msg,result=self.start();self.assertEqual(result['operation'],'ENTRY');self.protect()
+        # Valid source/release checks are read-only for entry, STOP and TAKE_PROFIT.
+        self.assertNotIn('final_check',[call.args[0].__name__ for call in writes.call_args_list])
         trade=self.store.load()['trades'][msg['occurrence_id']]
         self.venue.fill(self.venue.oid('TAKE_PROFIT'),trade['quantity'])
         for _ in range(3):self.cycle(False)
@@ -149,12 +152,39 @@ class RuntimeContract:
         self.assertFalse(self.store.load()['trades']);self.assertFalse(self.store.load()['requests'])
 
     def test_release_halt_between_reservation_and_send_aborts_never_sent_entry(self):
-        original=self.store.commit_attempt
         def halt(*args,**kwargs):
-            result=original(*args,**kwargs);self.release['entries_enabled']=False;return result
-        with patch.object(self.store,'commit_attempt',side_effect=halt):msg,result=self.start()
-        self.assertEqual(result['status'],'CANCELED_BEFORE_TRANSPORT');self.assertFalse(self.venue.requests)
-        self.assertEqual(next(iter(self.store.load()['requests'].values()))['phase'],'ABORTED_UNSENT')
+            result=original(*args,**kwargs)
+            if scenario=='release_halt':self.release['entries_enabled']=False
+            elif scenario=='release_changed':self.release['release_id']='c'*64
+            elif scenario=='source_expired':
+                source=self.store.load()['sources'][result['proposal']['card_id']]['source']
+                self.venue.t=isolated.contract.moment_ms(source['valid_until'])
+            elif scenario=='source_canceled':
+                source=deepcopy(self.store.load()['sources'][result['proposal']['card_id']]['source'])
+                source.update(kind='CANCEL',source_state='OPEN',cancel_reason='SOURCE_ENTRY_OBSERVED',
+                    source_sequence=self.venue.t*10+isolated.contract.RANK['CANCEL'],
+                    source_as_of=isolated.contract.iso_ms(self.venue.t),
+                    valid_until=isolated.contract.iso_ms(min(self.venue.t+90000,
+                        isolated.contract.moment_ms(source['expires_at'])) if source['expires_at'] else self.venue.t+90000))
+                self.worker.receive([source])
+            return result
+        for scenario in ('release_halt','release_changed','source_canceled','source_expired','checkpoint_failed'):
+            with self.subTest(gate=scenario):
+                self.venue=SoftwareExchange(T+10000);self.make_worker(not_before=T-60000)
+                original=self.store.commit_attempt
+                with patch.object(self.store,'commit_attempt',side_effect=halt), \
+                        patch.object(self.provider,'observation_committed',
+                            side_effect=RuntimeError('CHECKPOINT_FAILED') if scenario=='checkpoint_failed' else None), \
+                        patch.object(self.store,'mutate',wraps=self.store.mutate) as writes:
+                    msg,result=self.start()
+                self.assertEqual(result['status'],'CANCELED_BEFORE_TRANSPORT');self.assertFalse(self.venue.requests)
+                request=next(iter(self.store.load()['requests'].values()))
+                self.assertEqual(request['phase'],'ABORTED_UNSENT');self.assertTrue(request['certified_unsent'])
+                self.assertEqual(sum(call.args[0].__name__=='final_check' for call in writes.call_args_list),1)
+                self.assertEqual(request['unsent_reason'],'OBSERVED_SAFETY_CHECKPOINT_PENDING'
+                    if scenario=='checkpoint_failed' else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
+                self.restart()
+                self.assertEqual(self.store.request(request['request_id']),request)
 
     def test_missing_mark_history_blocks_entry_but_keeps_protection(self):
         original=self.provider.collect

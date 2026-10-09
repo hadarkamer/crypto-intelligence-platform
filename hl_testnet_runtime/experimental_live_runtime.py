@@ -509,7 +509,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
 
         # A canceled/expired never-submitted entry keeps a durable tombstone.
-        latest_release = self._release(self.store.load(), self.venue.now())
+        latest = self.store.load()
+        latest_release = self._release(latest, self.venue.now())
         def final_check(state):
             current = state['requests'][request['request_id']]
             if current != request:
@@ -525,7 +526,10 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 self._abort_entry_unsent(state, current, self.venue.now(), reason)
                 return False
             return True
-        if not self.store.mutate(final_check):
+        # Successful validation changes no durable state. Only a refusal needs
+        # a transaction, which rechecks the exact request before saving its abort.
+        # The sender independently reloads the request and gates before transport.
+        if not final_check(latest) and not self.store.mutate(final_check):
             return dict(status='CANCELED_BEFORE_TRANSPORT', **readiness())
         admission.bind(request)
         try:
