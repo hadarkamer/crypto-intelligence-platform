@@ -233,15 +233,17 @@ class ProviderTests(unittest.TestCase):
         self.assertIn(msg['occurrence_id'],result['entry_accounts'])
         self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
 
-    def test_approved_entry_still_requires_supervisor_and_owned_inventory(self):
+    def test_approved_entry_requires_supervisor_but_external_other_coin_is_separate(self):
         msg=self.approved()
         context=self.provider.collect(self.state,entries_enabled=True)
         self.assertEqual(context['entry_blocked'][msg['occurrence_id']],
             'VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
         self.provider.safety=object();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         context=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(msg['occurrence_id'],context['entry_blocked'])
-        self.assertNotIn(msg['occurrence_id'],context['entry_accounts'])
+        self.assertNotIn(msg['occurrence_id'],context['entry_blocked'])
+        self.assertIn(msg['occurrence_id'],context['entry_accounts'])
+        observed=context['external_observation']['accounts'][self.state['routes']['long_account']]
+        self.assertEqual(observed['orders'][0]['origin'],'EXTERNAL')
 
     def test_approved_dispatch_replays_real_admission_with_no_range_lookup(self):
         from .experimental_live_runtime import TestnetExecutionRuntime
@@ -276,19 +278,21 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn('userAbstraction',kinds);self.assertNotIn('userRole',kinds)
         self.assertNotIn('userRateLimit',kinds)
 
-    def test_foreign_order_on_other_symbol_blocks_account_entry(self):
+    def test_foreign_order_on_other_symbol_is_observed_without_account_block(self):
         msg=self.pending();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         value=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
+        self.assertNotIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
+        self.assertEqual(value['external_observation']['accounts'][ROUTES['short_account']['account']]['orders'][0]['order_id'],'999')
         self.assertIn(msg['occurrence_id'],value['entry_blocked'])
 
-    def test_next_collection_reads_current_inventory_and_blocks_unknown_exposure(self):
+    def test_next_collection_reads_current_inventory_and_records_external_exposure(self):
         self.pending()
         first=self.provider.collect(self.state)
         self.assertEqual(first['account_entry_blocked'],{})
         self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         second=self.provider.collect(self.state)
-        self.assertEqual(set(second['account_entry_blocked']),set(self.state['routes'].values()))
+        self.assertEqual(second['account_entry_blocked'],{})
+        self.assertEqual(set(second['external_observation']['accounts']),set(self.state['routes'].values()))
         self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
 
     def test_real_collectors_reconstruct_exact_fill_without_source_history(self):
@@ -321,7 +325,8 @@ class ProviderTests(unittest.TestCase):
         value=self.provider.collect(self.state)
         self.assertEqual(len(value['snapshots']),1)
         self.assertEqual(value['snapshots'][0]['orders'][0]['status'],'FILLED')
-        self.assertEqual(set(value['account_entry_blocked']),{self.state['routes']['short_account']})
+        self.assertEqual(value['account_entry_blocked'],{})
+        self.assertEqual(value['external_observation']['accounts'][self.state['routes']['short_account']]['positions']['DOGE'],'3')
 
     def test_dispatch_requires_prior_collection_and_native_durable_request(self):
         self.active();request=next(iter(self.state['requests'].values()))
@@ -525,6 +530,15 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn('userAbstraction',[c[0] for c in fx.raw.calls])
         stop=fx.oracle.orders[fx.oracle.oid('STOP')]['view']
         stop['status']='CANCELED';stop['at_ms']=fx.oracle.now()
+        # Venue/system cancellation retains automatic repair. An unexplained
+        # user cancellation now hands management to the operator separately.
+        raw_status=fx.raw.status
+        def system_cancel(oid):
+            value=raw_status(oid)
+            if str(oid)==fx.oracle.oid('STOP') and value.get('order',{}).get('status')=='canceled':
+                value['order']['status']='marginCanceled'
+            return value
+        fx.raw.status=system_cancel
         fx.raw.calls.clear()
         context=fx.provider.collect(fx.store.load(),entries_enabled=False)
         self.assertIn(runtime._lane(account,msg['symbol']),context['marks'])

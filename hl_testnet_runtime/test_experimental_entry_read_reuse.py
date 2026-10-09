@@ -210,8 +210,9 @@ class EntryReadReuseTests(unittest.TestCase):
         self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
         self.state['revision']+=1;self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         changed=self.collect()
-        self.assertIn(first,changed['entry_blocked'])
-        self.assertNotIn(first,changed['entry_accounts'])
+        self.assertNotIn(first,changed['entry_blocked'])
+        self.assertIn(first,changed['entry_accounts'])
+        self.assertEqual(changed['external_observation']['accounts'][account]['orders'][0]['origin'],'EXTERNAL')
         restarted=provider_fixtures.LiveEvidenceProvider(self.provider.env,legacy_store=self.legacy,
             experimental_store=self.store,price_evidence=self.provider.prices,budget=self.budget,
             clock=self.exchange.now,info_reader=self.raw,public_reader=self.raw,lookup_reader=self.raw.lookup)

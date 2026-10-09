@@ -213,6 +213,12 @@ class LiveSafetyProvider:
         for trade in state['trades'].values():
             if trade['phase'] in FINAL or (account is not None and trade['account'] != account):
                 continue
+            from . import experimental_external_activity as external
+            if external.managed(state,trade['account'],trade['symbol']):
+                # The operator explicitly owns this coin's further management;
+                # the bot has no authority to resize/cancel/reopen its orders.
+                # Unknown bot submissions remain checked above independently.
+                continue
             if _lane(trade['account'], trade['symbol']) in state.get('blocked_lanes', {}):
                 return False
             remaining = _remaining(trade)
@@ -237,6 +243,30 @@ class LiveSafetyProvider:
                         or life.number(row['wire_order']['p']) != life.number(price)):
                     return False
         return True
+
+    def verify_exit_observation(self, *, state, request):
+        """A newly received relevant event invalidates the prepared exit size.
+
+        This consumes existing feed tokens, not REST. A disconnected feed alone
+        retains the existing reduce-only fallback; a known newer same-market
+        event is affirmative evidence that the current snapshot is stale.
+        """
+        proposal=request['proposal']
+        if proposal['operation']=='ENTRY':return
+        receipt=self._receipt(state)
+        if receipt is None:return
+        account=proposal['account']
+        role=next((r for r,a in receipt['routes'].items() if a==account),None)
+        if role is None:return
+        token=receipt['tokens'][role]
+        current=self.feed.health().get(role,{})
+        dirty=self.feed.dirty_symbols(account)
+        changed=((current.get('generation')==token.generation and current.get('revision')!=token.revision)
+                 or (current.get('generation')!=token.generation and current.get('connected') is True
+                     and current.get('snapshot_received') is True))
+        if (changed
+                and (dirty is None or proposal['symbol'] in dirty)):
+            raise SafetyError('ACCOUNT_ACTIVITY_CHANGED_REOBSERVE_BEFORE_EXIT')
 
     def verify_checkpoint(self, *, state, request, collected_at_ms, ownership_revision):
         proposal = request['proposal']

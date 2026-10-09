@@ -24,7 +24,7 @@ from . import experimental_shared_market as shared_market
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
-FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
+FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
 TERMINAL = frozenset(('FILLED', 'CANCELED', 'REJECTED'))
 
 
@@ -209,6 +209,10 @@ class IsolatedExecutionRuntime:
         for trade in state['trades'].values():
             if trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol']:
                 continue
+            if trade['phase']=='MANUALLY_CLOSED':
+                from .experimental_external_activity import closure_verified
+                if not closure_verified(trade):raise RuntimeError('MANUAL_CLOSURE_NOT_VERIFIED')
+                continue
             if set(trade['orders'])-seen:
                 raise RuntimeError('OWNED_ORDER_MISSING_FROM_COMPLETE_HISTORY')
             if _remaining(trade) < 0:
@@ -231,7 +235,8 @@ class IsolatedExecutionRuntime:
                 if observed and observed['status'] in TERMINAL and snapshot['at_ms'] >= request['attempt_at_ms']:
                     request['phase'], request['observed_oid'] = 'OBSERVED', oid
         expected_position = sum((_remaining(t)*(1 if t['side'] == 'LONG' else -1)
-            for t in state['trades'].values() if t['account'] == snapshot['account'] and t['symbol'] == snapshot['symbol']), Decimal(0))
+            for t in state['trades'].values() if t['account'] == snapshot['account'] and t['symbol'] == snapshot['symbol']
+            and t['phase']!='MANUALLY_CLOSED'), Decimal(0))
         if expected_position != life.number(snapshot['position_quantity'], signed=True):
             raise RuntimeError('POSITION_NOT_RECONCILED_TO_EXACT_OWNED_FILLS')
         self._allocations(state, snapshot, now)
@@ -240,7 +245,8 @@ class IsolatedExecutionRuntime:
     def _allocations(self, state, snapshot, now):
         bindings, rows, fills = [], [], []
         for trade in state['trades'].values():
-            if trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol'] or not trade['orders']:
+            if (trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol']
+                    or not trade['orders'] or trade['phase']=='MANUALLY_CLOSED'):
                 continue
             if not any(trade['order_legs'][oid] == 'ENTRY' for oid in trade['orders']):
                 raise RuntimeError('OBSERVED_ENTRY_OWNERSHIP_REQUIRED')

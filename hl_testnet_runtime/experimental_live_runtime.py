@@ -364,6 +364,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         # protection in another lane whose full ownership is proven.
         if context.get('basis_revision') != state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+        from . import experimental_external_activity as external
+        external.apply(state,context.get('external_observation'))
         accounts = context.get('inventory_accounts')
         account_errors = context.get('inventory_account_errors', {})
         if (context.get('inventory_complete') is not True or not isinstance(accounts, list)
@@ -379,11 +381,18 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         for account in set(state['routes'].values()) - set(accounts) - set(account_errors):
             scoped['account_entry_blocked'][account] = 'ACCOUNT_INVENTORY_NOT_COLLECTED'
         blocked = scoped.setdefault('blocked_lanes', {})
+        for key,reason in list(blocked.items()):
+            if reason==external.HUMAN and key not in state.get('external_activity',{}).get('human_managed',{}):
+                blocked.pop(key)
+        for key in state.get('external_activity',{}).get('human_managed',{}):
+            blocked[key]=external.HUMAN
         observed = set()
         for snapshot in context['snapshots']:
             if snapshot.get('account') not in accounts:
                 raise RuntimeError('SNAPSHOT_OUTSIDE_VERIFIED_ACCOUNT_INVENTORY')
             lane = _lane(snapshot['account'], snapshot['symbol'])
+            if external.managed(state,snapshot['account'],snapshot['symbol']):
+                continue
             candidate = deepcopy(state)
             try:
                 self._snapshot(candidate, snapshot, now)
@@ -394,7 +403,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             state.clear(); state.update(candidate); observed.add(lane)
         for trade in state['trades'].values():
             lane = _lane(trade['account'], trade['symbol'])
-            if trade['phase'] not in FINAL and lane not in observed:
+            if trade['phase'] not in FINAL and lane not in observed and not external.managed(state,trade['account'],trade['symbol']):
                 blocked[lane] = 'ACTIVE_MARKET_INVENTORY_UNPROVEN'
             if trade['phase'] == 'RETRY_WAIT_UNSENT' and not _source_active(state['sources'][trade['cid']], now):
                 trade['phase'] = 'CANCELED_WITHOUT_FILL'
@@ -421,7 +430,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         unavailable = {r['proposal']['account'] for r in state['requests'].values()
             if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
         emergency_accounts = {t['account'] for t in state['trades'].values()
-            if t['phase'] not in FINAL and t.get('emergency_reason')}
+            if t['phase'] not in FINAL and t.get('emergency_reason')
+            and not external.managed(state,t['account'],t['symbol'])}
         if proposal is None and entries_enabled:
             for cid in sorted(state['sources'], key=lambda k:(state['sources'][k]['source']['source_at'], k)):
                 source = state['sources'][cid]
@@ -582,4 +592,5 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
             entry_decisions=deepcopy(state.get('entry_decisions', {})),
             cards=cards_from_state(state, domain='testnet'),
+            external_activity=deepcopy(state.get('external_activity',{})),
             blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **capabilities)

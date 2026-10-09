@@ -21,6 +21,7 @@ from . import two_account_execution as roles
 from .long_stream_runtime import _validate_account_inventory
 from .experimental_market_context import MarketSnapshot
 from .request_budget import BudgetError, fresh_entry_retry_ms, request_weight
+from . import experimental_external_activity as external
 
 
 class ProviderError(ValueError):
@@ -84,6 +85,9 @@ def _retired_experimental(state, now):
     result = {}
     for cid, trade in state['trades'].items():
         if cid not in state['sources'] or not _eligible(eligible_state, cid, now):
+            continue
+        if trade['phase']==external.MANUAL_CLOSED:
+            result[cid]=dict(binding=None,snapshot=None,orders=[])
             continue
         ids = set(trade['orders'])
         if not ids:
@@ -231,12 +235,12 @@ class LiveEvidenceProvider:
             if (not isinstance(row,dict) or type(row.get('oid')) is not int
                     or not 0<row['oid']<2**64 or row['oid'] in ids):
                 raise ProviderError('EXACT_UNIQUE_ACCOUNT_ORDER_IDS_REQUIRED')
-            life.ident(row.get('coin'),r'[A-Z][A-Z0-9]{0,19}');ids.add(row['oid'])
+            life.ident(row.get('coin'),r'[A-Za-z0-9:@._-]{1,64}');ids.add(row['oid'])
         for row in positions['assetPositions']:
             p=row.get('position') if isinstance(row,dict) else None
             if not isinstance(p,dict) or p.get('coin') in symbols:
                 raise ProviderError('EXACT_UNIQUE_ACCOUNT_POSITIONS_REQUIRED')
-            life.ident(p.get('coin'),r'[A-Z][A-Z0-9]{0,19}')
+            life.ident(p.get('coin'),r'[A-Za-z0-9:@._-]{1,64}')
             life.number(p.get('szi'),signed=True);symbols.add(p['coin'])
         # Margin totals change with marks; ownership comparison uses positions.
         return dict(orders=deepcopy(sorted(orders,key=lambda x:x['oid'])),
@@ -370,6 +374,10 @@ class LiveEvidenceProvider:
                     raise ProviderError('IMMUTABLE_FINAL_FILL_CHANGED')
             observed['fills']=[f for f in observed['fills'] if f['oid'] not in ids]
         all_ids={o for b in bindings for rows in b['orders'].values() for o in rows}
+        retired=state.get('external_activity',{}).get('retired_markets',{}).get(lane)
+        if retired is not None:
+            observed['fills']=[f for f in observed['fills'] if f['oid'] in all_ids
+                               or f['at_ms']>retired['confirmed_at_ms']]
         if any(f['oid'] not in all_ids for f in observed['fills']):
             raise ProviderError('UNOWNED_ACCOUNT_FILL_REQUIRES_RECONCILIATION')
         old_ids={o for b in old_bindings for rows in b['orders'].values() for o in rows}
@@ -451,6 +459,19 @@ class LiveEvidenceProvider:
             entry_reads[account]=value
             return deepcopy(value)
 
+    def _observe_external(self,state,legacy,inventories,cache,now,*,fill_reader=None):
+        result=dict(version=external.VERSION,accounts={},human_managed=deepcopy(
+            state.get('external_activity',{}).get('human_managed',{})),errors={},owned_request_observations={})
+        for account,inventory in inventories.items():
+            try:
+                value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,fill_reader=fill_reader)
+                result['accounts'].update(value['accounts'])
+                result['human_managed'].update(value['human_managed'])
+                result['owned_request_observations'].update(value['owned_request_observations'])
+            except (ValueError,KeyError,TypeError) as exc:
+                result['errors'][account]=_error(exc)
+        return result
+
     def collect(self, state, *, entries_enabled=False):
         if state.get('domain')!='testnet':
             raise ProviderError('NATIVE_TESTNET_STATE_REQUIRED_NO_SOFTWARE_RELABELING')
@@ -469,6 +490,9 @@ class LiveEvidenceProvider:
             collector_checkpoints={},ownership_revision=ownership,rejected_requests=[],
             inventory_account_errors={},account_inventory_at_ms={},
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
+        feed=getattr(self.safety,'feed',None)
+        if callable(getattr(feed,'health',None)):
+            result['external_feed_checkpoint']=deepcopy(feed.health())
         cache=sync.ObservationReadCache(self.public)
         inventories={};account_retries={}
         def remember_retry(exc, accounts):
@@ -530,7 +554,8 @@ class LiveEvidenceProvider:
                   and type(decision.get('retry_after_ms')) is int and decision['retry_after_ms']>now}
         unresolved_accounts={r['proposal']['account'] for r in state['requests'].values()
                              if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
-        protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)}
+        protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)
+                             and not external.managed(state,t['account'],t['symbol'])}
         # Reject locally impossible admissions before reading their market or
         # order allowance. These are the same unchanged gates as _admit.
         candidates=set()
@@ -654,6 +679,28 @@ class LiveEvidenceProvider:
                     remember_retry(exc,[account])
                     continue
             current_legacy=self._legacy(state)
+            result['external_observation']=self._observe_external(state,legacy,inventories,cache,now)
+            human=result['external_observation']['human_managed']
+            # External activity is not an account inventory error. On an owned
+            # market it means explicit human management, without a new send or
+            # allocation of external fills into the bot's historic trade.
+            for lane,fact in human.items():
+                result['blocked_lanes'][lane]=external.HUMAN
+                reason=result['account_entry_blocked'].get(fact['account'])
+                if reason in ('UNASSIGNED_EXCHANGE_ORDER','UNOWNED_ACCOUNT_FILL_REQUIRES_RECONCILIATION',
+                              'UNOWNED_MARKET_EXPOSURE_REQUIRES_RECONCILIATION',
+                              'ORDER_BINDING_MISMATCH','OPEN_ORDER_TERMS_OR_QUANTITY_CHANGED',
+                              'ORDER_TERMS_NOT_BOUND_TO_INTENT'):
+                    result['account_entry_blocked'].pop(fact['account'],None)
+            for account,observed in result['external_observation']['accounts'].items():
+                occupied={o['symbol'] for o in observed['orders'] if o['origin']=='EXTERNAL'}
+                occupied|={s for s,q in observed['positions'].items()
+                           if Decimal(q) and s not in observed['bot_symbols']}
+                for symbol in occupied:
+                    key=runtime._lane(account,symbol)
+                    if key not in human:result['blocked_lanes'][key]=external.OCCUPIED
+                if occupied and result['account_entry_blocked'].get(account)=='UNOWNED_MARKET_EXPOSURE_REQUIRES_RECONCILIATION':
+                    result['account_entry_blocked'].pop(account,None)
             for role,account in state['routes'].items():
                 if account not in inventories:continue
                 try:
@@ -672,7 +719,8 @@ class LiveEvidenceProvider:
                         if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
                     continue
                 try:
-                    _validate_account_inventory(account,buckets[account],inventories[account]['orders'],inventories[account]['positions'],role=role)
+                    external.review_inventory(account,buckets[account],inventories[account]['orders'],
+                        inventories[account]['positions'],role=role,observation=result['external_observation'])
                 except ValueError as exc:result['account_entry_blocked'].setdefault(account,_error(exc))
             result['rejected_requests']=[]
             for rid,request in state['requests'].items():
@@ -703,6 +751,7 @@ class LiveEvidenceProvider:
             reconciler=object.__new__(runtime.IsolatedExecutionRuntime)
             source_io_allowed={a:True for a in state['routes'].values()}
             for snapshot in result['snapshots']:
+                if runtime._lane(snapshot['account'],snapshot['symbol']) in human:continue
                 candidate_state=deepcopy(price_state)
                 try:
                     reconciler._snapshot(candidate_state,snapshot,self.now())
@@ -711,7 +760,9 @@ class LiveEvidenceProvider:
                     continue
                 price_state=candidate_state
             for trade in price_state['trades'].values():
-                if _original_stop_needed(price_state,trade):source_io_allowed[trade['account']]=False
+                if (_original_stop_needed(price_state,trade)
+                        and runtime._lane(trade['account'],trade['symbol']) not in human):
+                    source_io_allowed[trade['account']]=False
             unresolved={r['proposal']['account'] for r in state['requests'].values()
                         if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
             # Stable fixed-exit trades consume no live mark: use the CURRENT
@@ -783,7 +834,8 @@ class LiveEvidenceProvider:
             # entry work. Reuse its unchanged candle cursor and failure behavior.
             for cid,trade in price_state['trades'].items():
                 msg=trade['source'];account=trade['account']
-                if (trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
+                if (runtime._lane(account,trade['symbol']) in human
+                        or trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
                         or not source_io_allowed[account] or cid in result['bars']):
                     continue
                 try:
@@ -878,6 +930,33 @@ class LiveEvidenceProvider:
                 result['entry_blocked'][cid]=_error(exc)
                 remember_retry(exc,[account])
                 if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
+        # Account-wide manual fills can include symbols with no bot source or
+        # position left. Reuse funded intervals first; only stable cycles may
+        # spend background allowance on an uncovered observation interval.
+        pending_protection=any(_original_stop_needed(price_state,t)
+            and not external.managed(state,t['account'],t['symbol'])
+            and runtime._lane(t['account'],t['symbol']) not in result.get('external_observation',{}).get('human_managed',{})
+            for t in price_state['trades'].values())
+        history_reader=None
+        if (state.get('external_activity') and not entry_selected and not pending_protection
+                and not unresolved and not waiting and 0<=self.now()-now<5000):
+            history_reader=self._public_reader or sync.PublicReader(budget=self.budget,priority='background')
+            # Observe the otherwise inactive account at the existing quiet
+            # account cadence; do not delay first protection for this scan.
+            for account in sorted(set(state['routes'].values())-set(inventories)):
+                feed=getattr(self.safety,'feed',None)
+                dirty=getattr(feed,'dirty_symbols',None)
+                if not callable(dirty) or not dirty(account):continue
+                try:
+                    inventories[account]=self._inventory(account,history_reader)
+                    result['account_inventory_at_ms'][account]=now
+                except (ValueError,OSError):
+                    continue
+        result['external_observation']=self._observe_external(state,legacy,inventories,cache,now,fill_reader=history_reader)
+        for lane,fact in result['external_observation']['human_managed'].items():
+            result['blocked_lanes'][lane]=external.HUMAN
+            # A late history read may newly discover an external partial close.
+            result['snapshots']=[s for s in result['snapshots'] if runtime._lane(s['account'],s['symbol'])!=lane]
         # Expired evidence closes only its account; no later optional read
         # refreshes the original observation clock.
         for account in list(inventories):
@@ -948,6 +1027,20 @@ class LiveEvidenceProvider:
         if self._revision({p['account']:current_legacy[p['account']]})!=cached['legacy_account_revisions'][p['account']]:
             raise ProviderError('LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST')
         ctx=cached['context'];trade=state['trades'][cid];account=p['account'];lane=runtime._lane(account,p['symbol'])
+        if external.managed(state,account,p['symbol']):
+            raise ProviderError(external.HUMAN)
+        feed=getattr(self.safety,'feed',None)
+        before_feed=ctx.get('external_feed_checkpoint',{}).get(p['role'])
+        if not entry and before_feed is not None and callable(getattr(feed,'health',None)):
+            current_feed=feed.health().get(p['role'],{})
+            dirty=feed.dirty_symbols(account)
+            changed=((current_feed.get('generation')==before_feed.get('generation')
+                      and current_feed.get('revision')!=before_feed.get('revision'))
+                     or (current_feed.get('generation')!=before_feed.get('generation')
+                         and current_feed.get('connected') is True and current_feed.get('snapshot_received') is True))
+            if (changed
+                    and (dirty is None or p['symbol'] in dirty)):
+                raise ProviderError('ACCOUNT_ACTIVITY_CHANGED_REOBSERVE_BEFORE_EXIT')
         if account not in ctx['inventory_accounts']:
             raise ProviderError(ctx.get('inventory_account_errors',{}).get(account,'COMPLETE_ACCOUNT_OBSERVATION_REQUIRED'))
         if lane in ctx['blocked_lanes']:
@@ -976,6 +1069,8 @@ class LiveEvidenceProvider:
             emergency_healthy=False,feed_reconciled=False,entry_circuit_clear=False,
             supervisor_at_ms=ctx['inventory_at_ms'],not_before_ms=state['not_before_ms'])
         if self.safety is not None:
+            exit_check=getattr(self.safety,'verify_exit_observation',None)
+            if not entry and callable(exit_check):exit_check(state=state,request=request)
             method=getattr(type(self.safety),'verify_checkpoint',None)
             if not callable(method): raise ProviderError('VERIFIED_SAFETY_CAPABILITY_REQUIRED')
             safety=self.safety.verify_checkpoint(state=state,request=request,
@@ -985,6 +1080,7 @@ class LiveEvidenceProvider:
             env=self.env,agent=route['agent'],host=boundary.HOST,metadata=ctx['metadata'],safety=safety,
             buckets=cached['buckets'][account],open_orders=cached['inventories'][account]['orders'],
             positions=cached['inventories'][account]['positions'])
+        result['external_observation']=deepcopy(ctx.get('external_observation'))
         if p['action']['type']!='cancel':
             result['market']={k:v for k,v in ctx['marks'][lane].items() if k!='account'}
         if entry:

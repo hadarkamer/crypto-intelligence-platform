@@ -20,7 +20,7 @@ MAX_BATCH = 32
 MAX_SCAN = 128
 MAX_BATCH_BYTES = 2*1024*1024
 MAX_RECORD_BYTES = 16*1024*1024
-FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
+FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
 TERMINAL = frozenset(('FILLED', 'CANCELED', 'REJECTED'))
 EXTRAS = ('formula_states', 'source_condition_errors', 'entry_blocked', 'entry_decisions')
 
@@ -96,6 +96,9 @@ def _eligible(state, cid, now):
         return deadline is not None and now >= contract.moment_ms(deadline)
     if trade['phase'] not in FINAL or trade.get('pending_notifications') or trade.get('pending_actions'):
         return False
+    if trade['phase']=='MANUALLY_CLOSED':
+        from .experimental_external_activity import closure_verified
+        return closure_verified(trade) and all(r['phase'] in ('OBSERVED','ABORTED_UNSENT') for r in requests)
     lane = _lane(trade['account'], trade['symbol'])
     if state.get('blocked_lanes', {}).get(lane):
         return False
@@ -138,6 +141,9 @@ def _bundle(state, cid, now):
         for key in ('snapshots', 'collector_checkpoints'):
             if lane in state.get(key, {}):
                 result['snapshots'][key] = deepcopy(state[key][lane])
+    if trade and trade['phase']=='MANUALLY_CLOSED':
+        result['snapshots']['collector_checkpoints']=deepcopy(trade['manual_closure_snapshot'])
+        result['snapshots'].pop('snapshots',None)
     return result
 
 
@@ -351,7 +357,7 @@ class HistoryMixin:
                 db.insert(record); _prune(state, record)
                 history['archived_count'] += 1
                 history['archived_trades'] += int(record['trade'] is not None)
-                history['archived_closed'] += int(record['trade'] is not None and record['trade']['phase'] == 'CLOSED')
+                history['archived_closed'] += int(record['trade'] is not None and record['trade']['phase'] in ('CLOSED','MANUALLY_CLOSED'))
                 archived += 1; total_bytes += size
                 if archived >= batch_size or total_bytes >= MAX_BATCH_BYTES: break
             history['last_maintenance_ms'] = now_ms
