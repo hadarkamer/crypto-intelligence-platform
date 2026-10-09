@@ -1,0 +1,9 @@
+# Dedicated runner import closure; isolated from Telegram/trading dependencies.
+psycopg==3.2.3
+psycopg-binary==3.2.3
+requests==2.32.3
+typing-extensions==4.16.0
+charset-normalizer==3.5.2
+idna==3.20
+urllib3==2.8.0
+certifi==2026.7.22
