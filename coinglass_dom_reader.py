@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+import runtime_memory_diagnostics
 
 
 COINGLASS_URL = "https://www.coinglass.com/liquidation-maxpain"
@@ -512,9 +513,19 @@ async def read_timeframe(
     }
 
 
+def _record_dom_memory(phase: str, context=None) -> None:
+    """Resource counters only; diagnostics must not affect page ownership."""
+    try:
+        pages = len(context.pages) if context is not None else None
+        runtime_memory_diagnostics.emit_memory_sample(phase, pages=pages)
+    except Exception:
+        pass
+
+
 async def _new_ready_page(context, url: str):
     """Open a clean CoinGlass page for a failed-timeframe retry."""
     page = await context.new_page()
+    _record_dom_memory("page_created", context)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(8000)
@@ -530,11 +541,14 @@ async def _new_ready_page(context, url: str):
         # here if setup fails or is cancelled before ownership can transfer.
         try:
             await page.close()
+            _record_dom_memory("page_close", context)
         except BaseException:
             # Cleanup must not replace the original setup error/cancellation.
+            _record_dom_memory("page_close_error", context)
             pass
         raise
 
+    _record_dom_memory("page_ready", context)
     return page
 
 
@@ -597,7 +611,9 @@ async def _retry_timeframe_on_fresh_page(
             if retry_page is not None:
                 try:
                     await retry_page.close()
+                    _record_dom_memory("page_close", context)
                 except Exception:
+                    _record_dom_memory("page_close_error", context)
                     pass
 
         await asyncio.sleep(1.5)
@@ -633,62 +649,72 @@ async def collect_coinglass_dom_snapshot(
         f"timeframes={collection_order}", flush=True,
     )
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox", "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-gpu", "--disable-extensions",
-            ],
-        )
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 1800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-        )
+    _record_dom_memory("collector_start")
+    try:
+        async with async_playwright() as p:
+            _record_dom_memory("playwright_ready")
+            browser = await p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--no-sandbox", "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu", "--disable-extensions",
+                ],
+            )
+            _record_dom_memory("browser_launched")
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 1800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/150.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+            )
 
-        try:
-            previous_fp: Optional[str] = None
-            for tf in collection_order:
-                print(f"[dom] ===== isolated timeframe {tf} =====", flush=True)
-                result = await _retry_timeframe_on_fresh_page(
-                    context,
-                    url,
-                    tf,
-                    previous_fingerprint=previous_fp,
-                    attempts=3,
-                    forbidden_fingerprints=accepted_fingerprints,
-                )
-                by_timeframe[tf] = result
-                debug = result.get("debug", {})
-                rows = result.get("rows", [])
-                fp = result.get("fingerprint")
+            _record_dom_memory("context_created", context)
+            try:
+                previous_fp: Optional[str] = None
+                for tf in collection_order:
+                    print(f"[dom] ===== isolated timeframe {tf} =====", flush=True)
+                    result = await _retry_timeframe_on_fresh_page(
+                        context,
+                        url,
+                        tf,
+                        previous_fingerprint=previous_fp,
+                        attempts=3,
+                        forbidden_fingerprints=accepted_fingerprints,
+                    )
+                    by_timeframe[tf] = result
+                    debug = result.get("debug", {})
+                    rows = result.get("rows", [])
+                    fp = result.get("fingerprint")
 
-                if result.get("verified") and rows and fp:
-                    print(
-                        f"[dom] tf={tf} ACCEPTED rows={len(rows)} "
-                        f"active={debug.get('active_label')} stable={debug.get('stable_count')} "
-                        f"unique={debug.get('unique_symbols')}", flush=True,
-                    )
-                    all_rows.extend(rows)
-                    accepted_fingerprints[tf] = fp
-                    previous_fp = fp
-                else:
-                    missing.append(tf)
-                    print(
-                        f"[dom] tf={tf} REJECTED error={result.get('error')} "
-                        f"debug={json.dumps(debug, ensure_ascii=False)[:1800]}",
-                        flush=True,
-                    )
-        finally:
-            await context.close()
-            await browser.close()
-            print("[dom] isolated browser/context closed", flush=True)
+                    if result.get("verified") and rows and fp:
+                        print(
+                            f"[dom] tf={tf} ACCEPTED rows={len(rows)} "
+                            f"active={debug.get('active_label')} stable={debug.get('stable_count')} "
+                            f"unique={debug.get('unique_symbols')}", flush=True,
+                        )
+                        all_rows.extend(rows)
+                        accepted_fingerprints[tf] = fp
+                        previous_fp = fp
+                    else:
+                        missing.append(tf)
+                        print(
+                            f"[dom] tf={tf} REJECTED error={result.get('error')} "
+                            f"debug={json.dumps(debug, ensure_ascii=False)[:1800]}",
+                            flush=True,
+                        )
+            finally:
+                await context.close()
+                _record_dom_memory("context_close", context)
+                await browser.close()
+                _record_dom_memory("browser_close")
+                print("[dom] isolated browser/context closed", flush=True)
+    finally:
+        # A final sample also records failed/cancelled entry or teardown.
+        _record_dom_memory("playwright_exit")
 
     # Final whole-snapshot integrity checks.
     pair_counts: Dict[tuple, int] = {}
