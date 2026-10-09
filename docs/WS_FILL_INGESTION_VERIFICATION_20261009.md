@@ -1,9 +1,40 @@
 # Direct WebSocket fill ingestion — 9 October 2026
 
-Status: IMPLEMENTED AND VERIFIED. Final isolated verification passed on
-9 October 2026 at 13:39:07 UTC. This change has not been activated on the live
-Testnet service. The repository
-requires explicit approval for this specific tested change before deployment.
+Status: VERIFIED AND DEPLOYED. Final isolated verification passed on
+9 October 2026 at 13:39:07 UTC. After the user's explicit approval for this
+tested change, the live Testnet deployment completed at 13:46:37 UTC
+(16:46:37 Israel). Startup verification completed at 13:48:35 UTC.
+
+## Approved live deployment
+
+- Existing Testnet service: `hl-testnet-check-yoyo`, `srv-dakptbh594qs7395460g`.
+- Branch `paper-trading-v1` advanced by a non-forced, expected-head update from
+  `93c7c6005dca34f4da10459f508434833e579ef1` to the exact tested candidate
+  `d86ed93ff6339eaa71c80394b99b726112046feb`.
+- Candidate tree `b24a8bc6a32f2202b515f4dc0643e826d4785c39` matched the local
+  candidate and isolated verification. Independent verification recomputed all
+  535 source/dependency hashes with zero mismatches.
+- Auto-deploy was confirmed disabled. One manual deployment was triggered:
+  `dep-db4evkfavr4c73e98keg`. Render reports `live` for that exact commit,
+  finished at `2026-10-09T13:46:37.612027Z`. Its build also passed all 66
+  existing build-time runtime tests.
+- At 13:47:01 UTC, the new process reported ownership contention and kept new
+  entries disabled while the previous process retired. No intervention was
+  needed to complete ownership transfer.
+- At 13:47:47 UTC, `/healthz` returned HTTP 200, `EXPERIMENTAL_OWNER_RUNNING`,
+  ownership `HELD`, entries enabled, no current-cycle error and a cycle age of
+  1.397 seconds.
+- At 13:48:35 UTC, the second check again returned HTTP 200, active ownership,
+  enabled entries and no current-cycle error. The cycle timestamp advanced
+  from `1791553665965` to `1791553709348`; its age was 5.979 seconds.
+- Warning/error log queries returned no records from startup at 13:46:20 UTC
+  through 13:48:30 UTC. The exact candidate remained the latest live deployment.
+- These checks confirm deployment and progressing worker cycles. The public
+  health endpoint does not expose per-account feed status or ingestion counters;
+  these checks do not prove a new live fill was ingested or a trade completed.
+  No diagnostic exchange requests or synthetic live orders were sent.
+- No runtime configuration, account routing, strategy, exchange request budget
+  or Mainnet setting was changed during deployment.
 
 ## What changes
 
@@ -173,15 +204,14 @@ verified that their input source hashes remained unchanged.
 
 ## Activation and remaining scope
 
-No live branch, live runtime configuration or live service deployment has been
-changed for this candidate. A read-only Render check during final verification
+Before approval, no live branch, live runtime configuration or live service
+deployment had been changed for this candidate. A read-only Render check during final verification
 confirmed the live Testnet service still runs baseline
 `93c7c6005dca34f4da10459f508434833e579ef1`, with automatic deployment disabled
 and the previous deployment `dep-db4e3rqd0e5s73emgcl0` still current.
-After explicit approval,
-deploy the exact candidate to the existing Testnet service and check startup,
-ownership, feed/reconciliation health and current-cycle errors. A successful
-isolated test is not proof of a completed live exchange trade.
+The subsequent explicitly approved deployment and startup verification are
+recorded above. A successful isolated test or healthy startup is not proof of
+a completed live exchange trade.
 
 Telegram card integration, outbound IP separation, permanent manual-activity
 archiving, and complete tracking of unfilled orders opened and canceled between
