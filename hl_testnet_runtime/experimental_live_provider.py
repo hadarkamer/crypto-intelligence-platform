@@ -953,6 +953,47 @@ class LiveEvidenceProvider:
                 except (ValueError,OSError):
                     continue
         result['external_observation']=self._observe_external(state,legacy,inventories,cache,now,fill_reader=history_reader)
+        # A completed history scan must agree with already saved stream facts.
+        # A conflicting account cannot regain entry permission; an explicitly
+        # deferred owned lane stays blocked until its evidence is reconciled.
+        for account,reason in result['external_observation']['errors'].items():
+            result['account_entry_blocked'][account]=reason
+        for trade in state['trades'].values():
+            account=trade['account'];lane=runtime._lane(account,trade['symbol'])
+            if state.get('blocked_lanes',{}).get(lane)!='STREAM_FILL_RECONCILIATION_REQUIRED':
+                continue
+            ids={fid for event in state['events']
+                if event.get('kind')=='STREAM_FILL_ALLOCATION_DEFERRED'
+                and event.get('occurrence_id')==trade['cid'] for fid in event['fill_ids']}
+            # Complete persisted checkpoints discharge older episodes. Their
+            # fills outlive the short account-observation retention window.
+            previous=state.get('collector_checkpoints',{}).get(lane,{})
+            if previous.get('history_complete') is True:
+                ids-={f['fill_id'] for f in previous.get('fills',[])}
+            retained=state.get('external_activity',{}).get('accounts',{}).get(account,{}).get('fills',[])
+            expected={f['fill_id']:{k:v for k,v in f.items() if k!='origin'}
+                      for f in retained if f['fill_id'] in ids}
+            raw=raw_snapshots.get(lane,{})
+            actual={f['fill_id']:f for f in raw.get('fills',[])}
+            reconciled=(set(expected)==ids and raw.get('history_complete') is True
+                and all(actual.get(fid)==fact for fid,fact in expected.items())
+                and any(runtime._lane(s['account'],s['symbol'])==lane for s in result['snapshots']))
+            if not reconciled or account in result['external_observation']['errors']:
+                reason='STREAM_FILL_RECONCILIATION_REQUIRED'
+                result['account_entry_blocked'].setdefault(account,reason)
+                result['blocked_lanes'][lane]=reason
+                result['snapshots']=[s for s in result['snapshots']
+                    if runtime._lane(s['account'],s['symbol'])!=lane]
+                result['collector_checkpoints'].pop(lane,None)
+        for account,error in state.get('_pending_stream_fill_errors',{}).items():
+            result['account_entry_blocked'][account]=error['reason']
+            for symbol in error['symbols']:
+                lane=runtime._lane(account,symbol)
+                result['blocked_lanes'][lane]=error['reason']
+                result['snapshots']=[s for s in result['snapshots']
+                    if runtime._lane(s['account'],s['symbol'])!=lane]
+                # Keep complete raw REST checkpoints: they are the recovery
+                # path for a full pending buffer, not permission to dispatch.
         for lane,fact in result['external_observation']['human_managed'].items():
             result['blocked_lanes'][lane]=external.HUMAN
             # A late history read may newly discover an external partial close.

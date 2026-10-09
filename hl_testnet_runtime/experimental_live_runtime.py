@@ -11,7 +11,8 @@ import threading
 
 from . import card_lifecycle as life, filled_quantity_dispatch as wire, request_budget
 from .experimental_execution_runtime import (
-    IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining, FINAL, TERMINAL,
+    IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining,
+    _merge_order_fills, FINAL, TERMINAL,
 )
 from .experimental_live_state import TestnetExecutionState
 from . import r2732_entry
@@ -404,7 +405,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         for trade in state['trades'].values():
             lane = _lane(trade['account'], trade['symbol'])
             if trade['phase'] not in FINAL and lane not in observed and not external.managed(state,trade['account'],trade['symbol']):
-                blocked[lane] = 'ACTIVE_MARKET_INVENTORY_UNPROVEN'
+                blocked.setdefault(lane, 'ACTIVE_MARKET_INVENTORY_UNPROVEN')
             if trade['phase'] == 'RETRY_WAIT_UNSENT' and not _source_active(state['sources'][trade['cid']], now):
                 trade['phase'] = 'CANCELED_WITHOUT_FILL'
                 trade.pop('entry_retry', None)
@@ -482,16 +483,150 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         finally:
             self._cycle_lock.release()
 
+    def _ingest_pending_fills(self):
+        """Persist feed deltas before REST; acknowledge only a committed batch.
+
+        A fill is never a complete inventory or an order-status certificate.
+        Unbound/ambiguous fills remain account observations for REST attribution.
+        No exchange I/O or feed locks are held inside the state transaction.
+        """
+        from . import experimental_external_activity as external
+        feed = getattr(getattr(self.venue, 'safety', None), 'feed', None)
+        pending = getattr(feed, 'pending_fills', None)
+        if not callable(pending):
+            return {}
+        errors = {}
+        for batch in pending():
+            if not batch.items:
+                continue
+            now = self.venue.now()
+            def transition(state):
+                if batch.account not in state['routes'].values():
+                    raise RuntimeError('STREAM_FILL_ACCOUNT_MISMATCH')
+                rows = []
+                owned = {}
+                completed_fills = {f['fill_id']: f
+                    for checkpoint in state.get('collector_checkpoints', {}).values()
+                    if checkpoint.get('account') == batch.account
+                    and checkpoint.get('history_complete') is True
+                    for f in checkpoint.get('fills', [])}
+                for row in batch.fills:
+                    fill = deepcopy(row)
+                    if fill.get('account') != batch.account:
+                        raise RuntimeError('STREAM_FILL_ACCOUNT_MISMATCH')
+                    # Historical reconnect replay before activation cannot
+                    # belong to this worker. It never moves a recovery cursor.
+                    if type(fill.get('at_ms')) is not int or fill['at_ms'] > now:
+                        raise RuntimeError('STREAM_FILL_TIME_INVALID')
+                    if fill['at_ms'] < state['not_before_ms']:
+                        continue
+                    # Complete checkpoints may retain facts after recent
+                    # account history is pruned. A changed replay must still
+                    # fail before retention or old deferrals can hide it.
+                    prior = completed_fills.get(fill['fill_id'])
+                    if prior is not None and prior != fill:
+                        raise RuntimeError('EXTERNAL_FILL_FACT_CHANGED')
+                    matches = [t for t in state['trades'].values()
+                        if t['account'] == fill['account'] and t['symbol'] == fill['symbol']
+                        and fill['oid'] in t['orders']]
+                    if len(matches) > 1:
+                        raise RuntimeError('EXCHANGE_ORDER_HAS_MULTIPLE_DURABLE_OWNERS')
+                    fill['origin'] = 'BOT' if matches else 'UNATTRIBUTED'
+                    rows.append(fill)
+                    if matches and not external.managed(state,fill['account'],fill['symbol']):
+                        trade = matches[0]
+                        if trade['phase'] not in FINAL:
+                            owned.setdefault(trade['cid'], []).append(fill)
+                # The same existing account records retain complete canonical
+                # facts, including unbound fills. This validates the entire batch
+                # before any attributable quantity can be changed.
+                external.record_fill_deltas(state, rows, now_ms=now)
+                for cid, fills in owned.items():
+                    candidate = deepcopy(state['trades'][cid])
+                    try:
+                        groups = {}
+                        for fill in fills:
+                            groups.setdefault(fill['oid'], []).append(fill)
+                        for oid, deltas in groups.items():
+                            order = candidate['orders'][oid]
+                            requests = [r for r in state['requests'].values()
+                                if r['proposal']['card_id'] == cid
+                                and r['proposal']['account'] == candidate['account']
+                                and r['proposal']['symbol'] == candidate['symbol']
+                                and r['phase'] == 'OBSERVED' and r.get('observed_oid') == oid
+                                and r['proposal']['action']['type'] in ('order','batchModify')
+                                and wire.requested_order(r['proposal']['action'])['c'] == order['cloid']]
+                            if len(requests) != 1:
+                                raise RuntimeError('EXACT_OBSERVED_STREAM_ORDER_REQUIRED')
+                            request = requests[0]
+                            expected = wire.requested_order(request['proposal']['action'])
+                            if (order['wire_order'] != expected
+                                    or candidate['order_legs'].get(oid) != request['proposal']['leg']
+                                    or any(f['side'] != ('B' if expected['b'] else 'A') for f in deltas)):
+                                raise RuntimeError('STREAM_FILL_ORDER_TERMS_MISMATCH')
+                            compact = [{k:f[k] for k in ('fill_id','quantity','price','at_ms')} for f in deltas]
+                            if order['status'] in TERMINAL:
+                                prior = {f['fill_id']:f for f in order['fills']}
+                                if any(prior.get(f['fill_id']) != f for f in compact):
+                                    raise RuntimeError('TERMINAL_ORDER_CHANGED')
+                            merged = _merge_order_fills(candidate,request,oid,compact,now,complete=False)
+                            # Quantity facts change together. Status/phase and
+                            # all coverage timestamps remain independently proven.
+                            candidate['orders'][oid]['fills'] = merged
+                        if _remaining(candidate) < 0:
+                            raise RuntimeError('EXIT_EXCEEDED_OWNED_QUANTITY_PEER_RISK')
+                    except (ValueError,KeyError,TypeError) as exc:
+                        # A sparse/reordered stream is not complete evidence.
+                        # The canonical facts are saved above, but allocation
+                        # waits for complete reconciliation. Persist the reason
+                        # with those facts instead of silently accepting an
+                        # invalid side, quantity, price or terminal transition.
+                        reason = str(exc)
+                        if (not reason or len(reason)>140 or not all(
+                                c.isupper() or c.isdigit() or c=='_' for c in reason)):
+                            reason = 'STREAM_FILL_FACTS_REQUIRE_REVIEW'
+                        fact = dict(kind='STREAM_FILL_ALLOCATION_DEFERRED',
+                            occurrence_id=cid, account=candidate['account'],
+                            symbol=candidate['symbol'], reason=reason,
+                            fill_ids=sorted(f['fill_id'] for f in fills))
+                        if not any(all(event.get(k)==v for k,v in fact.items())
+                                   for event in state['events']):
+                            state['events'].append(dict(at_ms=now, **fact))
+                        state.setdefault('blocked_lanes', {})[_lane(
+                            candidate['account'],candidate['symbol'])] = 'STREAM_FILL_RECONCILIATION_REQUIRED'
+                        continue
+                    state['trades'][cid] = candidate
+            # Validate against a committed read before opening a write. A
+            # malformed/future delta or a bounded retention limit must not
+            # starve REST recovery or the other account. Database failures are
+            # not caught here, and an uncertain write never acknowledges data.
+            simulation = self.store.load()
+            try:
+                transition(simulation)
+            except (RuntimeError,external.ExternalActivityError,life.LifecycleError) as exc:
+                errors[batch.account] = dict(reason=str(exc),
+                    symbols=sorted({f['symbol'] for f in batch.fills}))
+                continue
+            self.store.mutate(transition)
+            feed.acknowledge_fills(batch)
+        return errors
+
     def _run_once(self, *, entries_enabled):
         owner=getattr(self,'startup_owner',None)
         if owner is not None:
             owner.verify()
+        stream_errors = self._ingest_pending_fills()
         history_ok=self._compact_history()
         before = self.store.load()
         admission_release = self._release(before, self.venue.now())
         collect_entries = (entries_enabled is True and history_ok
             and releases.entry_enabled(admission_release,self.venue.now()))
-        context = self.venue.collect(deepcopy(before), entries_enabled=collect_entries)
+        collection_state = deepcopy(before)
+        if stream_errors:
+            # Collection-only diagnostics: the provider closes affected entry
+            # gates before staging its receipt, while REST can still recover.
+            collection_state['_pending_stream_fill_errors'] = stream_errors
+        context = self.venue.collect(collection_state, entries_enabled=collect_entries)
         # Optional history maintenance and collection keep their independent
         # recovery paths. Warm the shared socket before the short permit;
         # each subsequent state operation still commits separately.
