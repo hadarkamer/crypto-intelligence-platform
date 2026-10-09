@@ -546,8 +546,13 @@ def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
     return result
 
 
-def load_source(conn: Any, wave_ids: list[str]) -> tuple[list[dict], list[dict]]:
-    """Read a bounded cohort in the caller's read-only repeatable-read snapshot."""
+def load_source(conn: Any, wave_ids: list[str], *,
+                event_projector: Callable[[dict, Mapping], dict | None] | None = None) -> tuple[list[dict], list[dict]]:
+    """Read a bounded cohort in the caller's read-only repeatable-read snapshot.
+
+    An optional projector may retain a compact event or return None. It runs
+    only after the full per-wave source count passes the existing cap.
+    """
     if not 0 < len(set(wave_ids)) <= MAX_WAVES or len(set(wave_ids)) != len(wave_ids):
         raise ValueError("Specify 1..32 unique wave IDs")
     waves = list(conn.execute("""SELECT p.btc_parent_movement_id, p.episode_policy_version,
@@ -581,7 +586,13 @@ def load_source(conn: Any, wave_ids: list[str]) -> tuple[list[dict], list[dict]]
             (POLICY_VERSION, wave["start_time_utc"], wave["end_time_utc"], MAX_EVENTS_PER_WAVE + 1)).fetchall())
         if len(rows) > MAX_EVENTS_PER_WAVE:
             raise ValueError("Candidate source exceeds bounded per-wave budget; no partial report published")
-        events.extend({**dict(row), "btc_parent_movement_id": wave["btc_parent_movement_id"]} for row in rows)
+        if event_projector is None:
+            events.extend({**dict(row), "btc_parent_movement_id": wave["btc_parent_movement_id"]} for row in rows)
+        else:
+            events.extend(projected for row in rows if (projected := event_projector(
+                {**dict(row), "btc_parent_movement_id": wave["btc_parent_movement_id"]}, wave)) is not None)
+        # Release the raw batch before the next wave query hydrates snapshots.
+        del rows
     return [dict(wave) for wave in waves], events
 
 

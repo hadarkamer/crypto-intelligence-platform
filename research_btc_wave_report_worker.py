@@ -55,29 +55,29 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def _compact_source_event(event):
+    from research_outcome_worker import _snapshot_price_provenance
+    row = dict(event)
+    if row.get("engine_snapshot_compacted"):
+        return row
+    frozen = report.snapshot_digest(event.get("engine_snapshot"))
+    if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
+        raise ValueError("Frozen engine snapshot changed")
+    row["engine_snapshot_digest"] = frozen
+    if row.get("symbol") != "HYPE":
+        provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
+        row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
+        row["engine_snapshot_compacted"] = True
+    return row
+
+
 def compact_source(source):
     """Keep exact Spot provenance and a digest of each full archived snapshot.
 
     HYPE retains its full snapshot because the native derived price contract
     binds the exact original event, including that snapshot.
     """
-    from research_outcome_worker import _snapshot_price_provenance
-    events = []
-    for event in source["events"]:
-        row = dict(event)
-        if row.get("engine_snapshot_compacted"):
-            events.append(row)
-            continue
-        frozen = report.snapshot_digest(event.get("engine_snapshot"))
-        if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
-            raise ValueError("Frozen engine snapshot changed")
-        row["engine_snapshot_digest"] = frozen
-        if row.get("symbol") != "HYPE":
-            provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
-            row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
-            row["engine_snapshot_compacted"] = True
-        events.append(row)
-    return {"waves": source["waves"], "events": events}
+    return {"waves": source["waves"], "events": [_compact_source_event(event) for event in source["events"]]}
 
 
 def compact_job(job):
@@ -103,7 +103,7 @@ def _connect(url):
 
 
 def load_job_source(conn, observed_at):
-    """No newest-N window: exceeding the declared bound stops publication."""
+    """Load compact source; exceeding the full source bound stops publication."""
     parents = conn.execute("""SELECT btc_parent_movement_id FROM research_btc_parent_movements
         WHERE episode_policy_version=%s AND start_time_utc<=%s
           AND (end_time_utc IS NULL OR end_time_utc>=%s)
@@ -113,7 +113,16 @@ def load_job_source(conn, observed_at):
         raise ValueError("FULL_WAVE_POPULATION_EXCEEDS_32_PARENTS; no truncated headline published")
     if not parents:
         return {"waves": [], "events": []}
-    waves, events = report.load_source(conn, [p["btc_parent_movement_id"] for p in parents])
+    def project_event(event, wave):
+        if not SOURCE_START <= report.utc(event["alert_time_utc"]) <= observed_at:
+            return None
+        # The versioned initial warmup parent stays outside the population;
+        # source or price availability never selects the eligible universe.
+        if wave["evidence_eligible"] is not True:
+            return None
+        return _compact_source_event(event)
+    waves, events = report.load_source(conn, [p["btc_parent_movement_id"] for p in parents],
+                                      event_projector=project_event)
     for wave in waves:
         # Freeze only information observable by this report's source cutoff.
         if wave.get("end_time_utc") and report.utc(wave["end_time_utc"]) > observed_at:
@@ -122,11 +131,7 @@ def load_job_source(conn, observed_at):
         if wave.get("observed_through_utc"):
             wave["observed_through_utc"] = min(report.utc(wave["observed_through_utc"]),
                                               report.latest_closed_cutoff(observed_at))
-    events = [event for event in events if SOURCE_START <= report.utc(event["alert_time_utc"]) <= observed_at]
-    # Versioned policy excludes its initial boundary-unverified warmup parent;
-    # no source or price availability condition selects the eligible universe.
-    eligible = {wave["btc_parent_movement_id"] for wave in waves if wave["evidence_eligible"] is True}
-    return {"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]}
+    return {"waves": waves, "events": events}
 
 
 def prepare_job(source, observed_at, *, previous_report=None, previous_source=None):
@@ -344,7 +349,7 @@ class ResearchBTCWaveReportWorker:
                 if not job:
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        source = compact_source(load_job_source(conn, now))
+                        source = load_job_source(conn, now)
                     if not source["waves"]:
                         return {"waiting_for": "BTC_PARENT_POPULATION"}
                     job = prepare_job(source, now, previous_report=state["report"], previous_source=state["source"])
@@ -365,7 +370,7 @@ class ResearchBTCWaveReportWorker:
                     conn.commit()
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        current_source = compact_source(load_job_source(conn, report.utc(job["observed_at"])))
+                        current_source = load_job_source(conn, report.utc(job["observed_at"]))
                     if digest(current_source) != job["source_digest"]:
                         revised = prepare_job(current_source, job["observed_at"],
                             previous_report=completed, previous_source=job["source"])

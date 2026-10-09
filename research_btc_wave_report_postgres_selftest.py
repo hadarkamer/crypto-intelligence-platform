@@ -62,8 +62,11 @@ class WaveReportPostgresTests(unittest.TestCase):
 
     def run_worker(self, *, fail_staging=False, source_reader=None, now=None, connector=None):
         self.last_worker = worker.ResearchBTCWaveReportWorker()
+        def compact_reader(conn, observed):
+            # load_job_source now returns its final compact source contract.
+            return worker.compact_source((source_reader or (lambda conn, now:self.source))(conn, observed))
         with patch.object(worker, "_connect", connector or self.connect), patch.object(worker, "_database_url", lambda:self.dsn), \
-             patch.object(worker, "load_job_source", source_reader or (lambda conn, now:self.source)):
+             patch.object(worker, "load_job_source", compact_reader):
             if fail_staging:
                 real_stage = worker.research_sheet_outbox.stage_upserts
                 def fail(conn, rows):
