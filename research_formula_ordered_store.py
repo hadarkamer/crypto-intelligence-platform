@@ -349,14 +349,17 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         features_by_id[event['event_id']]=features
         if not any(name.endswith('.aligned_score') and value is not None for name,value in features.items()):
             missing_features += 1
+        features_json = None
         for candidate in catalog:
             if evaluator.matches(candidate,features,event['direction']):
                 snapshot = event.get('engine_snapshot') or {}
                 inverse=candidate.get('research_orientation')=='INVERSE'
                 if inverse: inverse_requests.add(event['event_id'])
                 direction=({'LONG':'SHORT','SHORT':'LONG'}[event['direction']] if inverse else event['direction'])
+                if features_json is None:
+                    features_json = canonical(features)
                 records.append((candidate['formula_id'],event['event_id'],event['symbol'],direction,event['alert_time_utc'],
-                                snapshot.get('sheet_snapshot_id') or event['event_fingerprint'],event['current_price'],canonical(features)))
+                                snapshot.get('sheet_snapshot_id') or event['event_fingerprint'],event['current_price'],features_json))
     screens=question_store.record_screens(conn,changed,features_by_id,catalog,now=now,inverse_requested=inverse_requests)
     for refresh in past_refresh:
         # ACK is conditional on the captured version and commits atomically
