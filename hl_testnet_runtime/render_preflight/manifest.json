@@ -278,7 +278,7 @@
     "hl_testnet_runtime/test_u21_intake.py": "e7dd11e191992dae5052d936bc5c069a590d37050f7e77feebc97d360eee5d49",
     "hl_testnet_runtime/test_unavailable_asset_cards.py": "d047958bd0da0189d28f5c365cb07aac74ba6112fb8781f7eb692bfc969d8a38",
     "hl_testnet_runtime/test_ws_fill_buffer.py": "0641ff492ff7a3f449d7a38125d061fe15536a08a02ab02c33b8c23c23291628",
-    "hl_testnet_runtime/test_ws_fill_ingestion.py": "55d3d8d8eda0ea4c90bd098f8a0edecf1515e2ad1d2e40c7be63a5b7d5a621e6",
+    "hl_testnet_runtime/test_ws_fill_ingestion.py": "6b39c5607b086337b1ec2b1c02e14495c8d4e2e3e533a6ccc929961d73da6f6c",
     "hl_testnet_runtime/testnet_diagnostics.py": "a8d1fb4ea0228dfb7fe47c20dac1f51eaf621a7440c65cd9d944df1fd354453e",
     "hl_testnet_runtime/trade_card_store.py": "69eb029d01b6806b7c52edb02f6d35ac2aa95840f06ce4fdbf86cdd2f5a8a977",
     "hl_testnet_runtime/trade_cards.py": "bde5ac03e552ce0ad1e2b103b647f05482b063603eb060fc2f1a1ce042672c6f",

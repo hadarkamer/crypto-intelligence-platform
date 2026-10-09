@@ -228,19 +228,27 @@ class WsFillIngestionTests(IngestionFixture, unittest.TestCase):
         self.assertEqual(len(self.saved_fills()), 2)
 
     def test_reducer_failure_rolls_back_raw_and_allocated_fills_together(self):
+        from .postgres_journal import JournalError
         cid, oid = self.bound_entry()
         self.enqueue(self.exchange_fill(oid))
         before = self.store.load()
         mutate = self.store.mutate
+        reached_injection = []
         def fail_inside_transaction(fn):
             def failing(value):
                 fn(value)
                 self.assertEqual(isolated._remaining(value['trades'][cid]), Decimal('1'))
+                reached_injection.append(True)
                 raise ValueError('INJECTED_ROLLBACK')
             return mutate(failing)
+        expected_type = JournalError if self.real_pg else ValueError
+        expected_code = 'PERSISTENCE_UNAVAILABLE_NO_SEND' if self.real_pg else 'INJECTED_ROLLBACK'
         with patch.object(self.store, 'mutate', side_effect=fail_inside_transaction), \
-                self.assertRaisesRegex(ValueError, 'INJECTED_ROLLBACK'):
+                self.assertRaises(expected_type) as raised:
             self.worker._ingest_pending_fills()
+        self.assertIs(type(raised.exception), expected_type)
+        self.assertEqual(str(raised.exception), expected_code)
+        self.assertEqual(reached_injection, [True])
         self.assertEqual(self.store.load(), before)
         self.assert_pending(1)
 
