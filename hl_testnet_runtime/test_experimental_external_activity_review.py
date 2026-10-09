@@ -40,6 +40,80 @@ def inventory(*, orders=(), quantity='0', symbol='SOL'):
     return dict(orders=list(orders), positions=dict(assetPositions=positions))
 
 
+class StreamFillObservationTests(unittest.TestCase):
+    def delta(self, raw=None, *, account=ACCOUNT, origin='UNATTRIBUTED'):
+        raw = fill() if raw is None else raw
+        return dict(ext.sync.normalize_fill(raw, account, raw['coin'], 1, T+20000), origin=origin)
+
+    def observe(self, state, rows, *, now=T+20000):
+        prior = state['external_activity']['accounts'][ACCOUNT]
+        cursor = prior.get('history_cursor_ms')
+        start = max(1,cursor-ext.sync.OVERLAP_MS) if cursor is not None else prior['history_started_at_ms']
+        cache=SimpleNamespace(samples=[{('userFillsByTime', ACCOUNT, None, start, now):list(rows)}])
+        return ext.observe(state, {ACCOUNT:[],OTHER:[]}, {ACCOUNT:inventory()}, cache, now_ms=now)
+
+    def test_sparse_record_has_no_invented_inventory_or_complete_history(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        account=state['external_activity']['accounts'][ACCOUNT]
+        self.assertEqual(set(account),{'account','fills','history_cursor_ms','history_complete','history_started_at_ms'})
+        self.assertIsNone(account['history_cursor_ms'])
+        self.assertFalse(account['history_complete'])
+        self.assertEqual(state['external_activity']['events'],[])
+        before=deepcopy(state)
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        self.assertEqual(state,before)
+
+    def test_same_fill_id_in_separate_accounts_is_independent(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta(),self.delta(account=OTHER)],now_ms=T+20000)
+        accounts=state['external_activity']['accounts']
+        self.assertEqual(set(accounts),{ACCOUNT,OTHER})
+        self.assertEqual([len(a['fills']) for a in accounts.values()],[1,1])
+
+    def test_replay_preserves_verified_origin_and_inventory_fields(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        ext.apply(state,self.observe(state,[fill()]))
+        before=deepcopy(state)
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        self.assertEqual(state,before)
+        self.assertEqual(state['external_activity']['accounts'][ACCOUNT]['fills'][0]['origin'],'EXTERNAL')
+
+    def test_invalid_second_account_does_not_partially_change_first(self):
+        state=empty_state();before=deepcopy(state)
+        bad=self.delta(account=OTHER);bad['side']='LONG'
+        with self.assertRaisesRegex(ext.ExternalActivityError,'DELTA_FACTS_INVALID'):
+            ext.record_fill_deltas(state,[self.delta(),bad],now_ms=T+20000)
+        self.assertEqual(state,before)
+
+    def test_complete_rest_cannot_omit_staged_fill_or_advance_its_cursor(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        before=deepcopy(state)
+        with self.assertRaisesRegex(ext.ExternalActivityError,'PREVIOUS_FILL_MISSING_IN_OVERLAP'):
+            self.observe(state,[])
+        self.assertEqual(state,before)
+        ext.apply(state,self.observe(state,[fill()]))
+        self.assertEqual(state['external_activity']['accounts'][ACCOUNT]['history_cursor_ms'],T+20000)
+        self.assertEqual(sum(e['kind']=='EXTERNAL_FILL_OBSERVED' for e in state['external_activity']['events']),1)
+
+    def test_complete_rest_cannot_change_a_staged_fill(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        with self.assertRaisesRegex(ext.ExternalActivityError,'FILL_FACT_CHANGED'):
+            self.observe(state,[fill(quantity='3')])
+
+    def test_history_window_does_not_require_old_facts_outside_its_bounds(self):
+        state=empty_state()
+        ext.record_fill_deltas(state,[self.delta()],now_ms=T+20000)
+        account=state['external_activity']['accounts'][ACCOUNT]
+        account.update(history_cursor_ms=T+120000,history_complete=True)
+        current=self.observe(state,[],now=T+130000)['accounts'][ACCOUNT]
+        self.assertTrue(current['history_complete'])
+        self.assertEqual(current['history_cursor_ms'],T+130000)
+
+
 class ReviewTests(unittest.TestCase):
     def observed(self, state, *, inv=None, fills=(), now=T+20000):
         cache=SimpleNamespace(samples=[{('userFillsByTime', ACCOUNT, None,

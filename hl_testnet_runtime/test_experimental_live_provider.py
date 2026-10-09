@@ -160,6 +160,22 @@ class ProviderTests(unittest.TestCase):
         state=h.store.load()
         self.state.update(deepcopy(state));self.state['domain']='testnet'
         for request in self.state['requests'].values():request['domain']='testnet'
+        # The raw /info oracle maps software IDs to numeric venue tids. The
+        # copied durable testnet fixture must already use those same canonical
+        # identities; a real prior fill may never be renamed during collection.
+        def normalized_fill(value):
+            result=deepcopy(value)
+            result['fill_id']='hl:'+str(int(life.digest(value['fill_id'])[:12],16))
+            return result
+        for trade in self.state['trades'].values():
+            for key in ('entry_fills','exit_fills'):
+                fills=[normalized_fill(f) for f in trade[key].values()]
+                trade[key]={f['fill_id']:f for f in fills}
+            for order in trade['orders'].values():
+                order['fills']=[normalized_fill(f) for f in order['fills']]
+        for snapshot in self.state['snapshots'].values():
+            for order in snapshot['orders']:
+                order['fills']=[normalized_fill(f) for f in order['fills']]
         self.exchange.orders=deepcopy(h.venue.orders);self.exchange.requests=deepcopy(h.venue.requests)
         self.exchange.mark=deepcopy(h.venue.mark)
         self.exchange.t=h.venue.t
@@ -624,6 +640,36 @@ class ProviderTests(unittest.TestCase):
         with patch.object(self.raw,'read',side_effect=mismatch):
             result=self.provider.collect(self.state)
         self.assertIn('OPEN_ORDER_HISTORY_INCOMPLETE',result['blocked_lanes'].values())
+
+    def test_staged_own_fill_missing_from_rest_cannot_advance_lane_checkpoint(self):
+        msg=self.active(steps=4);trade=self.state['trades'][msg['occurrence_id']]
+        take=self.exchange.oid('TAKE_PROFIT')
+        quantity=Decimal(trade['quantity'])/2
+        stale=deepcopy(self.exchange.orders)
+        self.exchange.fill(take,str(quantity))
+        current=deepcopy(self.exchange.orders)
+        executed=current[take]['view']['fills'][-1]
+        saved=dict(executed,fill_id='hl:'+str(int(life.digest(executed['fill_id'])[:12],16)))
+        # Stream receipt was durably saved, while the coherent REST replica
+        # still reports the earlier order/position/history view.
+        trade['orders'][take]['fills'].append(deepcopy(saved))
+        trade['exit_fills'][saved['fill_id']]=dict(saved,order_id=take)
+        self.exchange.orders=stale
+        before=deepcopy(self.state)
+        lane=runtime._lane(trade['account'],trade['symbol'])
+        refused=self.provider.collect(self.state)
+        self.assertEqual(refused['blocked_lanes'][lane],'PREVIOUS_FILL_REMOVED_OR_CHANGED')
+        self.assertNotIn(lane,refused['collector_checkpoints'])
+        self.assertFalse(refused['snapshots'])
+        self.assertEqual(self.state,before)
+        # Once REST includes the identical execution, ordinary reconciliation
+        # succeeds without renaming, losing or allocating the fill twice.
+        self.exchange.orders=current
+        accepted=self.provider.collect(self.state)
+        self.assertNotIn(lane,accepted['blocked_lanes'])
+        self.assertIn(lane,accepted['collector_checkpoints'])
+        order=next(o for s in accepted['snapshots'] for o in s['orders'] if o['oid']==take)
+        self.assertEqual(order['fills'],[saved])
 
     def legacy_active(self,*,pending=None):
         from .experimental_live_provider import _empty

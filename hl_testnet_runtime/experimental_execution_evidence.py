@@ -85,6 +85,12 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_termi
         if row is None:
             raise EvidenceError('LOOKUP_ORDER_ABSENT_FROM_COMPLETE_SNAPSHOT')
         own_fills=fills.get(oid,[])
+        prior=state['trades'][p['card_id']]['orders'].get(oid)
+        if prior is not None:
+            current={f['fill_id']:{k:f[k] for k in ('fill_id','quantity','price','at_ms')}
+                     for f in own_fills}
+            if any(current.get(f['fill_id'])!=f for f in prior['fills']):
+                raise EvidenceError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
         if any(f['at_ms']<request['attempt_at_ms'] for f in own_fills):
             raise EvidenceError('FILL_PRECEDES_OWNED_ATTEMPT')
         total=sum((life.number(f['quantity'],positive=True) for f in own_fills),Decimal(0))

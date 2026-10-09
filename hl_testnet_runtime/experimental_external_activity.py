@@ -294,9 +294,15 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                     observed['history_error'] = code if code and len(code)<140 and all(c.isupper() or c.isdigit() or c=='_' for c in code) else 'EXTERNAL_HISTORY_UNAVAILABLE'
         if raw_fills is not None:
             try:
-                symbols = {r['coin'] for r in raw_fills}
+                # Buffered stream executions are individual immutable facts.
+                # A completed REST interval covering one must reproduce it;
+                # an empty/delayed response cannot silently advance past it.
+                prior_facts = [{k:v for k,v in f.items() if k!='origin'}
+                               for f in before.get('fills', []) if start <= f['at_ms'] <= now_ms]
+                symbols = {r['coin'] for r in raw_fills} | {f['symbol'] for f in prior_facts}
                 normalized = [f for symbol in symbols
-                              for f in sync.merge_fills([], raw_fills, account, symbol, start, now_ms)]
+                              for f in sync.merge_fills([f for f in prior_facts if f['symbol']==symbol],
+                                                       raw_fills, account, symbol, start, now_ms)]
                 if len(normalized) > MAX_RECENT_FILLS:
                     raise ExternalActivityError('EXTERNAL_HISTORY_CAPACITY_REVIEW_REQUIRED')
                 for fill in normalized:
@@ -314,7 +320,10 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                                 account=account, symbol=fill['symbol'], at_ms=now_ms,
                                 reason='EXTERNAL_FILL', fill_id=fill['fill_id'])
                 observed.update(fills=normalized, history_complete=True, history_cursor_ms=now_ms)
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError) as exc:
+                if isinstance(exc, sync.SyncError) and str(exc) in (
+                        'FILL_FACT_CHANGED', 'PREVIOUS_FILL_MISSING_IN_OVERLAP'):
+                    raise ExternalActivityError('EXTERNAL_'+str(exc)) from None
                 observed['history_error'] = 'EXTERNAL_FILL_FACTS_REQUIRE_REVIEW'
         result['accounts'][account] = observed
         prior_fills={f['fill_id']:f for f in before.get('fills',[])}
@@ -376,6 +385,88 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
     return result
 
 
+def _merge_recent_fills(previous, incoming, cursor, *, preserve_origin=False):
+    """Merge immutable facts without treating deltas as complete history."""
+    values = {f['fill_id']: deepcopy(f) for f in previous}
+    for fill in incoming:
+        old = values.get(fill['fill_id'])
+        if old is not None and {k:v for k,v in old.items() if k!='origin'} != {
+                k:v for k,v in fill.items() if k!='origin'}:
+            raise ExternalActivityError('EXTERNAL_FILL_FACT_CHANGED')
+        saved = deepcopy(fill)
+        if preserve_origin and old is not None and old['origin'] in ('BOT', 'EXTERNAL'):
+            saved['origin'] = old['origin']
+        values[fill['fill_id']] = saved
+    retained = sorted((f for f in values.values() if f['at_ms'] >= (cursor or 0)-2*sync.OVERLAP_MS),
+                      key=lambda f:(f['at_ms'],f['fill_id']))
+    if len(retained) > MAX_RECENT_FILLS:
+        raise ExternalActivityError('EXTERNAL_FILL_RETENTION_CAPACITY_REVIEW_REQUIRED')
+    return retained
+
+
+def record_fill_deltas(state, rows, *, now_ms):
+    """Persist received executions without inventing an account inventory.
+
+    The caller proves BOT ownership or leaves a fill UNATTRIBUTED. Existing
+    complete REST clocks and observations remain untouched; an identical replay
+    cannot downgrade an attribution already established by reconciliation.
+    This pure reducer belongs inside the existing execution-state transaction.
+    """
+    life.moment(now_ms)
+    if not isinstance(rows, (list, tuple)):
+        raise ExternalActivityError('EXTERNAL_FILL_DELTA_BATCH_INVALID')
+    fields = {'account', 'symbol', 'oid', 'fill_id', 'quantity', 'price',
+              'fee', 'fee_token', 'side', 'at_ms', 'origin'}
+    grouped = {}
+    for fill in rows:
+        if not isinstance(fill, dict) or set(fill) != fields:
+            raise ExternalActivityError('EXTERNAL_FILL_DELTA_FACTS_INVALID')
+        account = fill['account']
+        if account not in state['routes'].values() or life.address(account) != account:
+            raise ExternalActivityError('EXTERNAL_OBSERVATION_ACCOUNT_INVALID')
+        life.ident(fill['symbol'], r'[A-Za-z0-9:@._-]{1,64}')
+        life.ident(fill['oid'], r'[1-9][0-9]{0,19}')
+        life.ident(fill['fill_id'], r'hl:(0|[1-9][0-9]*)')
+        if (int(fill['oid']) >= 2**64 or fill['side'] not in ('A', 'B')
+                or fill['origin'] not in ('BOT', 'UNATTRIBUTED')):
+            raise ExternalActivityError('EXTERNAL_FILL_DELTA_FACTS_INVALID')
+        life.number(fill['quantity'], positive=True)
+        life.number(fill['price'], positive=True)
+        life.number(fill['fee'], signed=True)
+        life.ident(fill['fee_token'])
+        if life.moment(fill['at_ms']) > now_ms:
+            raise ExternalActivityError('EXTERNAL_FILL_FROM_FUTURE')
+        grouped.setdefault(account, []).append(fill)
+    if not grouped:
+        return
+    existing = state.get('external_activity', {})
+    if existing and existing.get('version') != VERSION:
+        raise ExternalActivityError('EXTERNAL_OBSERVATION_VERSION_INVALID')
+    accounts = existing.get('accounts', {})
+    updates = {}
+    for account, fills in grouped.items():
+        prior = accounts.get(account)
+        if prior is None:
+            saved = dict(account=account, fills=[], history_cursor_ms=None,
+                         history_complete=False, history_started_at_ms=min(
+                             max(1, now_ms-sync.OVERLAP_MS), min(f['at_ms'] for f in fills)))
+        else:
+            if prior.get('account') != account:
+                raise ExternalActivityError('EXTERNAL_OBSERVATION_ACCOUNT_INVALID')
+            saved = deepcopy(prior)
+            if saved.get('history_cursor_ms') is None:
+                # A later delivery can precede the first uncompleted interval.
+                saved['history_started_at_ms'] = min(saved.get('history_started_at_ms', now_ms),
+                                                       min(f['at_ms'] for f in fills))
+        saved['fills'] = _merge_recent_fills(saved.get('fills', []), fills,
+            saved.get('history_cursor_ms'), preserve_origin=True)
+        updates[account] = saved
+    # Validate every account before changing any part of the supplied state.
+    value = state.setdefault('external_activity', dict(version=VERSION, accounts={}, human_managed={},
+                                                     events=[], evicted_events=0))
+    value['accounts'].update(updates)
+
+
 def apply(state, observation):
     """Idempotent journal reducer; never rewrites attributable bot quantities."""
     if not observation:
@@ -412,18 +503,13 @@ def apply(state, observation):
                       order_id=oid, observed_at_ms=current['observed_at_ms'],
                       at_ms=current['observed_at_ms'], status='NO_LONGER_OPEN_OUTCOME_UNASSIGNED'))
         old_fills = {f['fill_id']:f for f in prior.get('fills', [])}
+        cursor = current.get('history_cursor_ms') or prior.get('history_cursor_ms') or 0
+        retained = _merge_recent_fills(prior.get('fills', []), current['fills'], cursor)
         for fill in current['fills']:
             previous = old_fills.get(fill['fill_id'])
-            if previous is not None and {k:v for k,v in previous.items() if k!='origin'} != {k:v for k,v in fill.items() if k!='origin'}:
-                raise ExternalActivityError('EXTERNAL_FILL_FACT_CHANGED')
             if fill['origin'] == 'EXTERNAL' and (previous is None or previous['origin'] != 'EXTERNAL'):
                 event('EXTERNAL_FILL_OBSERVED', fill)
             old_fills[fill['fill_id']] = deepcopy(fill)
-        cursor = current.get('history_cursor_ms') or prior.get('history_cursor_ms') or 0
-        retained = sorted((f for f in old_fills.values() if f['at_ms'] >= cursor-2*sync.OVERLAP_MS),
-                          key=lambda f:(f['at_ms'],f['fill_id']))
-        if len(retained) > MAX_RECENT_FILLS:
-            raise ExternalActivityError('EXTERNAL_FILL_RETENTION_CAPACITY_REVIEW_REQUIRED')
         saved = deepcopy(current); saved['fills'] = retained
         if not current['history_complete']:
             saved['history_cursor_ms'] = prior.get('history_cursor_ms')

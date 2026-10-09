@@ -247,24 +247,38 @@ def history(reader, account, start, end, *, depth=0):
     return rows
 
 
+def normalize_fill(row, account, symbol, start, end):
+    """Normalize one REST or websocket fill without asserting history coverage.
+
+    Both sources retain the existing persisted identity, decimal strings and
+    exact snapshot fields. Other symbols are filtered as in REST collection;
+    optional wire metadata does not change a fill's economic facts. A caller
+    processing deltas must separately preserve the last complete history cursor.
+    """
+    if not isinstance(row,dict) or not isinstance(row.get('coin'),str):
+        raise SyncError('INVALID_FILL_SYMBOL')
+    if row['coin'] != symbol:
+        return None
+    tid, oid = row.get('tid'),row.get('oid')
+    if type(tid) is not int or tid < 0 or type(oid) is not int or not 0 < oid < 2**64:
+        raise SyncError('EXACT_FILL_IDENTIFIERS_REQUIRED')
+    q, px = row.get('sz'),row.get('px')
+    life.number(q,positive=True); life.number(px,positive=True)
+    life.number(row.get('fee'),signed=True); life.ident(row.get('feeToken'))
+    if row.get('side') not in ('A','B'): raise SyncError('INVALID_FILL_SIDE')
+    at = life.moment(row.get('time'))
+    if not start <= at <= end: raise SyncError('FILL_TIME_OUTSIDE_WINDOW')
+    return dict(account=account,symbol=symbol,oid=str(oid),fill_id='hl:'+str(tid),
+        quantity=q,price=px,fee=row['fee'],fee_token=row['feeToken'],side=row['side'],at_ms=at)
+
+
 def merge_fills(previous, raw, account, symbol, start, end):
     by_id = {f['fill_id']:deepcopy(f) for f in previous}
     recent = {}
     for row in raw:
-        if not isinstance(row.get('coin'),str): raise SyncError('INVALID_FILL_SYMBOL')
-        if row['coin'] != symbol: continue
-        tid, oid = row.get('tid'),row.get('oid')
-        if type(tid) is not int or tid < 0 or type(oid) is not int or not 0 < oid < 2**64:
-            raise SyncError('EXACT_FILL_IDENTIFIERS_REQUIRED')
-        q, px = row.get('sz'),row.get('px')
-        life.number(q,positive=True); life.number(px,positive=True)
-        life.number(row.get('fee'),signed=True); life.ident(row.get('feeToken'))
-        if row.get('side') not in ('A','B'): raise SyncError('INVALID_FILL_SIDE')
-        at = life.moment(row.get('time'))
-        if not start <= at <= end: raise SyncError('FILL_TIME_OUTSIDE_WINDOW')
-        fid = 'hl:'+str(tid)
-        value = dict(account=account,symbol=symbol,oid=str(oid),fill_id=fid,
-            quantity=q,price=px,fee=row['fee'],fee_token=row['feeToken'],side=row['side'],at_ms=at)
+        value = normalize_fill(row,account,symbol,start,end)
+        if value is None: continue
+        fid = value['fill_id']
         for known in (by_id,recent):
             if fid in known and known[fid] != value: raise SyncError('FILL_FACT_CHANGED')
         recent[fid] = value

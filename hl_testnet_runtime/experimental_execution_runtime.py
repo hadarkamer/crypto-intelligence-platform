@@ -54,6 +54,48 @@ def _remaining(trade):
     return _sum(trade['entry_fills']) - _sum(trade['exit_fills'])
 
 
+def _merge_order_fills(trade, request, oid, rows, at_ms, *, complete):
+    """One idempotent quantity reducer for full observations and fill deltas.
+
+    This does not change order finality, request ownership or coverage clocks.
+    Callers commit the returned facts and quantity dictionaries together.
+    """
+    from .filled_quantity_dispatch import requested_order
+    p = request['proposal']; expected = requested_order(p['action'])
+    prior = trade['orders'].get(oid, {}).get('fills', [])
+    fills = {} if complete else {f['fill_id']:deepcopy(f) for f in prior}
+    seen = set()
+    for fill in rows:
+        if (set(fill) != {'fill_id','quantity','price','at_ms'}
+                or fill['fill_id'] in seen or type(fill['at_ms']) is not int
+                or not request['attempt_at_ms'] <= fill['at_ms'] <= at_ms):
+            raise RuntimeError('EXACT_MONOTONIC_FILL_HISTORY_REQUIRED')
+        life.ident(fill['fill_id']); _number(fill['quantity']); _number(fill['price'])
+        if p['leg'] == 'ENTRY':
+            limit = _number(expected['p'])
+            if _number(fill['price']) > limit if expected['b'] else _number(fill['price']) < limit:
+                raise RuntimeError('ENTRY_FILL_WORSE_THAN_FROZEN_LIMIT')
+        if fill['fill_id'] in fills and fills[fill['fill_id']] != fill:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+        seen.add(fill['fill_id']); fills[fill['fill_id']] = deepcopy(fill)
+    if any(fills.get(f['fill_id']) != f for f in prior):
+        raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    target = trade['entry_fills'] if p['leg'] == 'ENTRY' else trade['exit_fills']
+    other = trade['exit_fills'] if p['leg'] == 'ENTRY' else trade['entry_fills']
+    for fid, saved in target.items():
+        if saved['order_id'] == oid and fills.get(fid) != {k:v for k,v in saved.items() if k!='order_id'}:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    if _sum(fills) > _number(expected['s']):
+        raise RuntimeError('ORDER_FILLED_QUANTITY_MISMATCH')
+    for fid, fill in fills.items():
+        full = {**fill, 'order_id':oid}
+        if fid in other or fid in target and target[fid] != full:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    for fid, fill in fills.items():
+        target[fid] = {**deepcopy(fill), 'order_id':oid}
+    return list(fills.values())
+
+
 def _source_active(source, now):
     msg = source['source']
     if contract.is_approved(msg):
@@ -179,30 +221,18 @@ class IsolatedExecutionRuntime:
             old = trade['orders'].get(row['oid'])
             if old and old['status'] in TERMINAL and row != old:
                 raise RuntimeError('TERMINAL_ORDER_CHANGED')
-            fills = {}
             for fill in row['fills']:
-                if (set(fill) != {'fill_id','quantity','price','at_ms'} or fill['fill_id'] in fills_seen
-                        or type(fill['at_ms']) is not int or not request['attempt_at_ms'] <= fill['at_ms'] <= snapshot['at_ms']):
+                if fill['fill_id'] in fills_seen:
                     raise RuntimeError('EXACT_MONOTONIC_FILL_HISTORY_REQUIRED')
-                life.ident(fill['fill_id']); _number(fill['quantity']); _number(fill['price'])
-                if p['leg'] == 'ENTRY':
-                    limit = _number(expected['p'])
-                    if _number(fill['price']) > limit if expected['b'] else _number(fill['price']) < limit:
-                        raise RuntimeError('ENTRY_FILL_WORSE_THAN_FROZEN_LIMIT')
-                fills_seen.add(fill['fill_id']); fills[fill['fill_id']] = deepcopy(fill)
+                fills_seen.add(fill['fill_id'])
+            merged = _merge_order_fills(trade, request, row['oid'], row['fills'],
+                                        snapshot['at_ms'], complete=True)
+            fills = {f['fill_id']:f for f in merged}
             total = _sum(fills)
             if total > _number(expected['s']) or row['status'] == 'FILLED' and total != _number(expected['s']):
                 raise RuntimeError('ORDER_FILLED_QUANTITY_MISMATCH')
             if row['status'] == 'REJECTED' and total:
                 raise RuntimeError('REJECTED_ORDER_HAS_FILL')
-            if old and any(fills.get(f['fill_id']) != f for f in old['fills']):
-                raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
-            target = trade['entry_fills'] if p['leg'] == 'ENTRY' else trade['exit_fills']
-            for fid, fill in fills.items():
-                full = {**fill, 'order_id': row['oid']}
-                if fid in target and target[fid] != full:
-                    raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
-                target[fid] = full
             trade['orders'][row['oid']] = deepcopy(row)
             trade['order_legs'][row['oid']] = p['leg']
             request['phase'], request['observed_oid'] = 'OBSERVED', row['oid']
