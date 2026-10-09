@@ -1,0 +1,15 @@
+{
+  "errors": 0,
+  "failure_details": [],
+  "failures": 0,
+  "network_attempts_blocked": 0,
+  "passed": 2492,
+  "skipped": 568,
+  "source_files": 535,
+  "source_sha256": "950da8397845498bb2d3bf7f930214247d5df0d230ebe076616a1e48a0993b50",
+  "source_unchanged": true,
+  "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+  "successful": true,
+  "tests_run": 3060,
+  "unexpected_successes": 0
+}

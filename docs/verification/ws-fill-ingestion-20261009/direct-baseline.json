@@ -1,0 +1,38 @@
+{
+  "kind": "synthetic_ws_fill_persistence_v1",
+  "limitations": [
+    "Synthetic exchange and in-memory state only.",
+    "Required REST reconciliation remains; this does not establish a global request reduction."
+  ],
+  "network_attempts_blocked": 0,
+  "repository": "/workspace/scratch/a625dd2bda28/manual-observation",
+  "results": {
+    "direct_ingestion_available": false,
+    "direct_stage": {
+      "fills": 0,
+      "order_calls": 0,
+      "quantity": "0",
+      "rest_calls": 0
+    },
+    "extra_synthetic_orders": 0,
+    "quantity_after_rest": "1",
+    "quantity_after_websocket_callback": "0",
+    "quantity_before_delivery": "0",
+    "quantity_visible_when_rest_begins": "0",
+    "repeated_delivery": {
+      "fills": 0,
+      "order_calls": 0,
+      "quantity": "0",
+      "rest_calls": 0
+    },
+    "rest_failure_stage": {
+      "durable_quantity": "0",
+      "order_calls": 0,
+      "rest_attempts": 1
+    },
+    "same_execution_facts_after_rest": true
+  },
+  "source_files": 532,
+  "source_sha256": "161944f3c0b08810f9ac5286e52f15f3c184e7f81a13f928d12a9b6943ed241e",
+  "source_unchanged": true
+}

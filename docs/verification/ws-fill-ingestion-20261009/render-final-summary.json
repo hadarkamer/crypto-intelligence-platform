@@ -1,0 +1,120 @@
+{
+  "candidate": {
+    "file_count": 535,
+    "sha256": "71eac3145aef7953339c0f65316f61a67da5a14c189f70f7341448843b64862e",
+    "version_base": "3084c5c7cd53b70d0569086ba78a78f8fc53a9ac"
+  },
+  "current_stage": null,
+  "durable_checks": "COMPLETED",
+  "duration_seconds": 229.023,
+  "exchange": "SYNTHETIC_ONLY",
+  "isolated": true,
+  "kind": "finished",
+  "limits": [
+    "Free instance timing is not live-service latency or capacity evidence.",
+    "No live exchange, trading account or existing database is accessed.",
+    "Runtime benchmark uses four rounds; observed tails are not guarantees."
+  ],
+  "observed_finished_at": "2026-10-09T13:39:07.082456025Z",
+  "postgres": "FRESH_LOOPBACK_POSTGRES18",
+  "postgres_stopped": true,
+  "render_commit": "5de49616728ee94d321c71a353b9501bec4553e8",
+  "render_deploy_id": "dep-db4epmrl550s73bh6rv0",
+  "schema": "render_offline_preflight_v1",
+  "stages": [
+    {
+      "artifact_sha256": "122c3eb841604ecefbaadf665935f4ee3303a6d48a9fa383e8c3bffe6bb4df45",
+      "duration_seconds": 0.601,
+      "errors": 0,
+      "exit_code": 0,
+      "failure_code": null,
+      "failure_details": [],
+      "failures": 0,
+      "skipped": 0,
+      "successful": true,
+      "task": "timing_tests",
+      "tests_run": 28,
+      "unexpected_successes": 0
+    },
+    {
+      "artifact_sha256": "856a0e0ad15cb837901c5daadb697670837c4c99307b9e2855c4cfcc8a2fb7ca",
+      "comparisons": [
+        {
+          "added_mean_ns": 13241.83203125,
+          "payload": "notification",
+          "producers": 1
+        },
+        {
+          "added_mean_ns": 11923.1650390625,
+          "payload": "notification",
+          "producers": 2
+        },
+        {
+          "added_mean_ns": 31446.498697916668,
+          "payload": "trade_projection",
+          "producers": 1
+        },
+        {
+          "added_mean_ns": 27395.064127604168,
+          "payload": "trade_projection",
+          "producers": 2
+        }
+      ],
+      "conditions": 14,
+      "duration_seconds": 1.002,
+      "exit_code": 0,
+      "failure_code": null,
+      "measured_calls": 27648,
+      "network_attempts_blocked": 0,
+      "task": "recorder"
+    },
+    {
+      "artifact_sha256": "66761d020b3bb060d40da29575b6ef895351d8d648915580c22fec23ca353b6a",
+      "duration_seconds": 2.804,
+      "exact_feed_state_parity_pairs": 120,
+      "exit_code": 0,
+      "failure_code": null,
+      "network_attempts_blocked": 0,
+      "single_update_added_mean_ns": [
+        40099.666666666664,
+        32883.666666666664
+      ],
+      "task": "feed"
+    },
+    {
+      "artifact_sha256": "100471eb9b472cfd876a0ae6f1d9d55e2d063d9cbe81299c4656894774015393",
+      "duration_seconds": 64.681,
+      "exit_code": 0,
+      "failure_code": null,
+      "fill_to_projection_mean_ms": {
+        "disabled": 114.54006033333333,
+        "enabled": 115.96405772916667
+      },
+      "measured_scenarios": 80,
+      "rounds": 4,
+      "runtime_mean_ms": {
+        "disabled": 525.8953649375,
+        "enabled": 528.634969625
+      },
+      "simulated_order_requests_per_scenario": 8,
+      "simulated_reader_calls_per_scenario": 174,
+      "task": "runtime",
+      "trace_equality_checks": 80
+    },
+    {
+      "artifact_sha256": "4d1da1911d660e3093829355161e8934346cb27609a22b027a7dd8601f7b3610",
+      "duration_seconds": 158.586,
+      "errors": 0,
+      "exit_code": 0,
+      "failure_code": null,
+      "failure_details": [],
+      "failures": 0,
+      "skipped": 0,
+      "successful": true,
+      "task": "full_suite",
+      "tests_run": 3060,
+      "unexpected_successes": 0
+    }
+  ],
+  "status": "PASSED"
+}

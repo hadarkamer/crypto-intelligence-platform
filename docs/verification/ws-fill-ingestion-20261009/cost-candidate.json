@@ -1,0 +1,228 @@
+{
+  "candidate": true,
+  "kind": "synthetic_external_observation_cost_v1",
+  "limitations": [
+    "Synthetic exchange, SQL and clock boundaries. No live exchange or database calls.",
+    "Zero simulated latency; pong notifications maintain synthetic feed continuity.",
+    "Counts are scenario measurements, not universal rate ceilings.",
+    "New large/truncated histories can require multiple paginated reads."
+  ],
+  "limits": {
+    "background": 800,
+    "maximum": 1200,
+    "permit_ms": 1000,
+    "window_ms": 69000
+  },
+  "network_attempts_blocked": 0,
+  "repository": "/workspace/scratch/a625dd2bda28/ws-fill-ingestion",
+  "results": {
+    "empty_two_accounts_60s": {
+      "by_kind": {
+        "clearinghouseState": 2,
+        "frontendOpenOrders": 2,
+        "userFillsByTime": 2
+      },
+      "extra_synthetic_order_actions": 0,
+      "reads": 6,
+      "transitions": [
+        {
+          "by_kind": {
+            "clearinghouseState": 2,
+            "frontendOpenOrders": 2,
+            "userFillsByTime": 2
+          },
+          "elapsed_ms": 60000,
+          "reads": 6,
+          "weight": 84
+        }
+      ],
+      "weight": 84
+    },
+    "existing_counts": {
+      "blocked_peer_collection": {
+        "by_kind": {
+          "clearinghouseState": 1,
+          "frontendOpenOrders": 1
+        },
+        "entry_blocked": {
+          "bf1845754975c7c948ef20eed09870943fdd9cb8700dbb4e40831a23493b2538": "SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED"
+        },
+        "entry_preparation_count": 0,
+        "reads": 2,
+        "weight": 22
+      },
+      "budget_wait_30_seconds": {
+        "by_kind": {},
+        "reads": 0,
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED"
+        ],
+        "synthetic_actions": 0,
+        "weight": 0
+      },
+      "empty_inventory": {
+        "by_kind": {
+          "clearinghouseState": 2,
+          "frontendOpenOrders": 2
+        },
+        "reads": 4,
+        "weight": 44
+      },
+      "entry_collection": {
+        "by_kind": {
+          "clearinghouseState": 1,
+          "frontendOpenOrders": 1,
+          "metaAndAssetCtxs": 1,
+          "userRateLimit": 1,
+          "userRole": 1
+        },
+        "reads": 5,
+        "weight": 122
+      },
+      "idle_30_seconds": {
+        "by_kind": {},
+        "reads": 0,
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED"
+        ],
+        "synthetic_actions": 0,
+        "weight": 0
+      },
+      "reused_entry_0": {
+        "by_kind": {
+          "clearinghouseState": 1,
+          "frontendOpenOrders": 1
+        },
+        "reads": 2,
+        "weight": 22
+      },
+      "reused_entry_5000": {
+        "by_kind": {
+          "clearinghouseState": 1,
+          "frontendOpenOrders": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "reads": 3,
+        "weight": 42
+      },
+      "stable_protected_collection": {
+        "by_kind": {
+          "clearinghouseState": 1,
+          "frontendOpenOrders": 1
+        },
+        "entry_blocked": {},
+        "entry_preparation_count": 0,
+        "reads": 2,
+        "weight": 22
+      }
+    },
+    "external_scan_primitives": {
+      "missing_due_fill_interval": {
+        "history_complete": true,
+        "reads": 1,
+        "weight": 20
+      },
+      "missing_interval_deferred_for_protection": {
+        "history_complete": false,
+        "reads": 0,
+        "weight": 0
+      },
+      "reused_complete_fill_interval": {
+        "history_complete": true,
+        "reads": 0,
+        "weight": 0
+      }
+    },
+    "protected_60s": {
+      "by_kind": {
+        "clearinghouseState": 6,
+        "frontendOpenOrders": 6,
+        "userFillsByTime": 2
+      },
+      "extra_synthetic_order_actions": 0,
+      "reads": 14,
+      "transitions": [
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1
+          },
+          "elapsed_ms": 10000,
+          "reads": 2,
+          "weight": 22
+        },
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1,
+            "userFillsByTime": 1
+          },
+          "elapsed_ms": 20000,
+          "reads": 3,
+          "weight": 43
+        },
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1
+          },
+          "elapsed_ms": 30000,
+          "reads": 2,
+          "weight": 22
+        },
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1
+          },
+          "elapsed_ms": 40000,
+          "reads": 2,
+          "weight": 22
+        },
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1,
+            "userFillsByTime": 1
+          },
+          "elapsed_ms": 50000,
+          "reads": 3,
+          "weight": 43
+        },
+        {
+          "by_kind": {
+            "clearinghouseState": 1,
+            "frontendOpenOrders": 1
+          },
+          "elapsed_ms": 60000,
+          "reads": 2,
+          "weight": 22
+        }
+      ],
+      "weight": 174
+    },
+    "stable_with_inactive_account_hint_due": {
+      "by_kind": {
+        "clearinghouseState": 2,
+        "frontendOpenOrders": 2,
+        "userFillsByTime": 2
+      },
+      "inventory_accounts": 2,
+      "reads": 6,
+      "weight": 85
+    }
+  },
+  "source_input_files": 535,
+  "source_input_sha256": "950da8397845498bb2d3bf7f930214247d5df0d230ebe076616a1e48a0993b50",
+  "source_unchanged_during_measurement": true
+}
