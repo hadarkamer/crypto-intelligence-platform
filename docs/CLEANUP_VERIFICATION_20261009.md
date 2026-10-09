@@ -1,8 +1,29 @@
 # Manual activity and card-read cleanup — 9 October 2026
 
-Status: PASSED. The exact candidate completed isolated Render verification on
-9 October 2026 at 12:36:45 UTC. It has not been deployed to the live Testnet bot.
-Activation on the live Testnet bot requires the user's separate approval.
+Status: PASSED AND DEPLOYED. The exact candidate completed isolated Render
+verification on 9 October 2026 at 12:36:45 UTC. The user then explicitly approved
+activation. The live Testnet deployment completed at 12:46:31 UTC (15:46:31 Israel).
+
+## Approved live deployment
+
+- Live Testnet service: `hl-testnet-check-yoyo`, `srv-dakptbh594qs7395460g`.
+- Branch `paper-trading-v1` advanced with an expected-head check from
+  `f6992f81320e3e6ba003c75c03412b5ae69233ac` to the exact tested candidate
+  `93c7c6005dca34f4da10459f508434833e579ef1`.
+- Render auto-deploy was confirmed disabled. One manual deployment was triggered:
+  `dep-db4e3rqd0e5s73emgcl0`. Render reports `live` for that exact commit.
+- During handover the new process initially reported ownership contention and
+  disabled new entries. It subsequently acquired ownership without intervention.
+- At 12:47:40 UTC, `/healthz` returned HTTP 200, `EXPERIMENTAL_OWNER_RUNNING`,
+  ownership `HELD`, new entries enabled, no current-cycle error and a cycle age
+  of 3.873 seconds. The post-start warning/error log query returned no records.
+- A second check at 12:48:34 UTC again returned HTTP 200, active ownership,
+  enabled entries and no current-cycle error; the cycle timestamp had advanced
+  and was 4.167 seconds old. Warning/error logs remained empty through 12:48:31.
+- These are deployment/startup checks, not proof of a new completed exchange
+  trade. No diagnostic exchange requests or synthetic live orders were sent.
+- WebSocket payload ingestion, Telegram integration and outbound IP changes
+  remain outside this deployed package.
 
 ## Exact candidate
 
@@ -139,7 +160,8 @@ uses the three initial responses and adds zero reads: three total, with all
 - `trade_card()` is not yet connected to the existing Telegram buttons; that
   integration remains deferred.
 - No live account, existing account database or exchange endpoint was used for
-  these tests. No production branch or live service configuration was changed.
+  the isolated tests. Subsequent approved activation is recorded above; runtime
+  configuration was not changed.
 
 ## Authorization boundary
 
