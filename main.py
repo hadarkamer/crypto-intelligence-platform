@@ -32,6 +32,7 @@ import alert_summary
 import technical_signal_store
 import coinglass_oi_regime_service
 import coinglass_history_backfill
+import runtime_memory_diagnostics
 import coinglass_flow_foundation
 import coinglass_flow_engine
 import time_family_engine
@@ -83,6 +84,16 @@ except Exception:
     dict_row = None
 
 load_dotenv()
+
+
+def _record_runtime_memory(phase: str) -> None:
+    """Best-effort aggregate resource diagnostics; no source or result payloads."""
+    try:
+        counters = coinglass_history_backfill.reference_cache_memory_counts()
+        counters["active_watch"] = int(bool(WATCH_RUNTIME.get("scan_in_progress")))
+        runtime_memory_diagnostics.emit_memory_sample(phase, counters=counters)
+    except Exception:
+        pass
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -1307,6 +1318,7 @@ async def collect_live_rows_for_watch(
     archive_rows: List[Dict[str, Any]] = []
     archive_attempted = False
     official_price_task = None
+    _record_runtime_memory("archive_start")
     archive_requested = bool(
         archive_context is not None and research_max_pain_archive.archive_enabled()
     )
@@ -1529,6 +1541,7 @@ async def collect_live_rows_for_watch(
             if not official_price_task.done():
                 official_price_task.cancel()
             await asyncio.gather(official_price_task, return_exceptions=True)
+        _record_runtime_memory("archive_end")
 
 
 
@@ -4782,6 +4795,7 @@ async def run_watch_cycle(
         experimental_reference_prices_by_symbol=experimental_references,
     )
     derivatives_task = None
+    _record_runtime_memory("watch_start")
 
     try:
         scrape_lock = _get_scrape_lock()
@@ -4801,6 +4815,7 @@ async def run_watch_cycle(
                         },
                     }
                 async def _prepare(rows, live_result):
+                    _record_runtime_memory("scoring_start")
                     try:
                         await derivatives_task
                         # C1274 is a standalone SOL Futures rule. Its source
@@ -4821,6 +4836,8 @@ async def run_watch_cycle(
                     except Exception as exc:
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
                         raise
+                    finally:
+                        _record_runtime_memory("scoring_end")
                     try:
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.build_bundle(
                             cycle_id=watch_scan_id, rows=rows, snapshot=snapshot, frozen=frozen, evidence=evidence,
@@ -5229,6 +5246,8 @@ async def run_watch_cycle(
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["cycle_stage"] = None
+
+        _record_runtime_memory("watch_end")
 
 
 def _watch_consumers_active() -> bool:
@@ -5705,8 +5724,13 @@ async def _ensure_watch_coordinator(
 async def _watch_supervisor_loop(bot_app) -> None:
     """Keep every persisted Watch subscription alive until an explicit stop."""
     import alert_delivery_policy
+    last_memory_sample = None
     while True:
         try:
+            now_monotonic = time.monotonic()
+            if last_memory_sample is None or now_monotonic - last_memory_sample >= 60:
+                last_memory_sample = now_monotonic
+                _record_runtime_memory("runtime_poll")
             if _watch_consumers_active():
                 chat_id = WATCH_RUNTIME.get("chat_id")
                 if chat_id is None:
@@ -7659,6 +7683,7 @@ async def start_web_server(bot_app):
     print(f"[health] server running on port {PORT}")
 
 async def main():
+    _record_runtime_memory("runtime_start")
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
     if not PUBLIC_URL:

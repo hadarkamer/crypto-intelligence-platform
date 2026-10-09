@@ -254,6 +254,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             capture_combined_state_changes=Mock(side_effect=lifecycle))
         scope.update({
             'asyncio': asyncio, 'json': json, 'WATCH_RUNTIME': {'chat_id': 1}, 'WATCH_GENERAL_ENABLED': True,
+            '_record_runtime_memory': Mock(),
             'WATCH_PRIORITY_THRESHOLD': 70, '_get_scrape_lock': lambda: asyncio.Lock(),
             'collect_live_rows_for_watch': collect, '_ensure_watch_derivatives_ready': AsyncMock(return_value={}),
             'research_watch_score_capture': SimpleNamespace(failure=failed,

@@ -31,6 +31,11 @@ jobs:
         run: python -m py_compile coinglass_dom_reader.py coinglass_dom_cleanup_selftest.py
       - name: Run collector page ownership regressions
         run: python coinglass_dom_cleanup_selftest.py
+      - name: Run bounded memory diagnostics regressions
+        run: |
+          python runtime_memory_diagnostics_selftest.py
+          python reference_cache_memory_counts_selftest.py
+          python memory_diagnostics_hooks_selftest.py
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 12
