@@ -159,6 +159,70 @@ class WaveReportPostgresTests(unittest.TestCase):
         self.assertIsNone(self.state()["pending_job"])
         self.assertEqual(self.state()["report_observed_at_utc"], later)
 
+    def test_pending_resume_does_not_decode_or_modify_published_source(self):
+        from psycopg.types.json import set_json_loads
+        self.assertTrue(self.run_worker()["published"])
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        original = self.state()
+        later = START+timedelta(minutes=136)
+        pending = worker.prepare_job(worker.compact_source(self.source), later,
+            previous_report=original["report"], previous_source=original["source"])
+        published_source = {**original["source"], "published_source_decode_probe": True}
+        future_next_report = later+timedelta(minutes=30)
+        self.conn.execute("""UPDATE research_btc_wave_report_state
+            SET pending_job=%s::jsonb,source=%s::jsonb,next_report_at_utc=%s""",
+            (worker.canonical(pending), worker.canonical(published_source), future_next_report))
+        before = self.state()
+        outbox_before = self.conn.execute(
+            "SELECT * FROM research_sheet_upsert_outbox ORDER BY sheet_name,row_key").fetchall()
+        def loads(value):
+            decoded = json.loads(value)
+            if isinstance(decoded, dict) and decoded.get("published_source_decode_probe"):
+                raise AssertionError("Pending resume decoded unused published source")
+            return decoded
+        def reject_published_source(url):
+            conn = self.connect(url)
+            set_json_loads(loads, conn)
+            return conn
+        no_source = Mock(side_effect=AssertionError("Incomplete checkpoint read fresh source"))
+        with patch.object(worker, "advance_job", return_value={"processed_paths": 0,
+                "remaining_paths": len(pending["pending_event_ids"]), "completed": False}) as advance:
+            resumed = self.run_worker(now=later, source_reader=no_source,
+                connector=reject_published_source)
+        self.assertFalse(resumed["published"])
+        advance.assert_called_once()
+        no_source.assert_not_called()
+        after = self.state()
+        self.assertEqual(after["pending_job"], before["pending_job"])
+        self.assertEqual(after["source"], before["source"])
+        self.assertEqual(after["report"], before["report"])
+        self.assertEqual(after["next_report_at_utc"], future_next_report)
+        self.assertEqual(self.conn.execute(
+            "SELECT * FROM research_sheet_upsert_outbox ORDER BY sheet_name,row_key").fetchall(), outbox_before)
+
+    def test_falsy_pending_values_keep_published_source_for_closed_cache(self):
+        self.assertTrue(self.run_worker()["published"])
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        original = self.state()
+        later = START+timedelta(minutes=136)
+        values = [("SQL_NULL", None)] + [
+            (repr(value), json.dumps(value)) for value in (None, False, 0, 0.0, "", [], {})]
+        for label, payload in values:
+            with self.subTest(pending=label):
+                self.conn.execute("UPDATE research_btc_wave_report_state SET pending_job=%s::jsonb", (payload,))
+                with patch.object(worker, "advance_job", return_value={"processed_paths": 0,
+                        "remaining_paths": 1, "completed": False}) as advance:
+                    result = self.run_worker(now=later)
+                self.assertFalse(result["published"])
+                job = advance.call_args.args[0]
+                # This cache entry is reused only after checking the old source;
+                # projecting NULL for a false-y checkpoint would lose that reuse.
+                self.assertEqual(job["reused_closed_paths"], 1)
+                self.assertEqual(job["pending_event_ids"], [2])
+                self.assertEqual(self.state()["source"], original["source"])
+                self.assertEqual(self.state()["report"], original["report"])
+                self.assertEqual(self.state()["pending_job"]["reused_closed_paths"], 1)
+
     def test_changed_xmin_blocks_mixed_generation_then_next_pass_resumes(self):
         self.assertTrue(self.run_worker()["published"])
         self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
@@ -187,7 +251,7 @@ class WaveReportPostgresTests(unittest.TestCase):
 
             def execute(self, sql, params=()):
                 normalized = " ".join(sql.split())
-                if normalized.startswith("SELECT pending_job,source FROM research_btc_wave_report_state"):
+                if normalized.startswith("SELECT pending_job,") and "FROM research_btc_wave_report_state" in normalized:
                     owner.assertEqual(state_after_external_write, [])
                     # The class connection is a separate autocommit session:
                     # the worker still holds the prior report/header generation.

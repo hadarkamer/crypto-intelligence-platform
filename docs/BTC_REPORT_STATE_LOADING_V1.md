@@ -21,6 +21,17 @@ version guard does not replace that lock or protect against an uncoordinated
 writer after the deferred read. No schema change or persistent digest cache is
 introduced.
 
+For a pending checkpoint, the deferred query returns `pending_job` and SQL NULL
+for the previous published `source`. The checkpoint already owns its frozen
+source; only a new generation needs the previous source for closed-path cache
+reuse. The projection uses the initial truthiness marker under the same `xmin`
+guard and does not modify the stored source.
+
+After completed work passes the source-digest recheck, the worker releases that
+temporary recheck graph before serializing and staging publication. Publication
+still uses the original frozen job source. A changed source retains the recheck
+graph to prepare the revised checkpoint at the original observation cutoff.
+
 The SQL pending marker matches Python truthiness for SQL NULL, JSON null,
 false, numeric zero, empty string, empty array and empty object. Report/source
 generation, atomic outbox publication, checkpoint recovery and late-source
@@ -30,7 +41,9 @@ Run `research_btc_wave_report_worker_selftest.py` and, against an isolated test
 database, `research_btc_wave_report_postgres_selftest.py`. The full repository
 CI runs both, with PostgreSQL 18 for the database tests. The tests cover waiting
 without payload reads, exact ACK priority, checkpoint resume, JSON truthiness,
-concurrent version changes, publication and rollback.
+concurrent version changes, publication and rollback. Source-lifetime regressions
+also check that pending resumes omit only the unused prior source and that an
+equal recheck graph is released before publication without changing output.
 
 This removes a demonstrated unnecessary load. It does not establish the cause
 of the earlier service OOM or prove long-term memory stability. Existing
