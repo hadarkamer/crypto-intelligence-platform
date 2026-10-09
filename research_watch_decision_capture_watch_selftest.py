@@ -265,6 +265,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                 WORKER=SimpleNamespace(observe=AsyncMock(side_effect=observe_sol)),
                 ADDITIONAL_WORKERS={symbol: SimpleNamespace(observe=AsyncMock())
                                     for symbol in ('HYPE', 'DOGE', 'XRP')}),
+            'doge_partial_experimental_worker': SimpleNamespace(
+                WORKER=SimpleNamespace(observe=AsyncMock())),
             'experimental_reference_price': SimpleNamespace(prepare_reference_prices=AsyncMock(side_effect=prepare_references)),
             'watch_transition_delivery': SimpleNamespace(record_watch=AsyncMock(), drain=AsyncMock(return_value=0),
                 cycle_result=Mock(return_value={'status': 'COMPLETE'})),
@@ -303,6 +305,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         scope['sol_proximity_experimental_worker'].WORKER.observe.assert_awaited_once_with(base, 1)
         for worker in scope['sol_proximity_experimental_worker'].ADDITIONAL_WORKERS.values():
             worker.observe.assert_awaited_once_with(base, 1)
+        scope['doge_partial_experimental_worker'].WORKER.observe.assert_awaited_once_with(base, 1)
         self.assertLess(order.index('archive'), order.index('sol_proximity'))
         self.assertLess(order.index('sol_proximity'), order.index('prepare_references'))
         self.assertLess(order.index('prepare_references'), order.index('c1274_manual'))
@@ -393,6 +396,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                 scope['sol_proximity_experimental_worker'].WORKER.observe.assert_not_awaited()
                 for worker in scope['sol_proximity_experimental_worker'].ADDITIONAL_WORKERS.values():
                     worker.observe.assert_not_awaited()
+                scope['doge_partial_experimental_worker'].WORKER.observe.assert_not_awaited()
                 self.assertTrue(result['ok'], result)
                 self.assertEqual(scope['COMBINED_CONFIRMATION_STATE'], {})
                 self.assertNotIn('special_lifecycle', order)

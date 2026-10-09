@@ -515,15 +515,25 @@ async def read_timeframe(
 async def _new_ready_page(context, url: str):
     """Open a clean CoinGlass page for a failed-timeframe retry."""
     page = await context.new_page()
-    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(8000)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(8000)
 
-    for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
+        for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
+            try:
+                await page.get_by_text(label, exact=True).first.click(timeout=1000)
+                await page.wait_for_timeout(400)
+            except Exception:
+                pass
+    except BaseException:
+        # The caller owns the page only after this function returns. Close it
+        # here if setup fails or is cancelled before ownership can transfer.
         try:
-            await page.get_by_text(label, exact=True).first.click(timeout=1000)
-            await page.wait_for_timeout(400)
-        except Exception:
+            await page.close()
+        except BaseException:
+            # Cleanup must not replace the original setup error/cancellation.
             pass
+        raise
 
     return page
 
