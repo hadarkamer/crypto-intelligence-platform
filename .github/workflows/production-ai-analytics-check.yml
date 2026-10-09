@@ -45,7 +45,9 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/.ci/receiver
     services:
       postgres:
-        image: postgres:18
+        # Docker Official Images mirror; pin the same PostgreSQL 18 image used
+        # by the prior passing CI run, avoiding Docker Hub's anonymous quota.
+        image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_USER: research_test
           POSTGRES_PASSWORD: research_test

@@ -13,6 +13,8 @@ from pathlib import Path
 import time
 import uuid
 
+from runtime_allocation_diagnostics import collect_allocation_stats
+
 PREFIX = "[MEMORY_DIAGNOSTIC]"
 MAX_PROC_ENTRIES = 512
 MAX_FILE_BYTES = 8192
@@ -280,6 +282,19 @@ def _sample(phase, pages, counters):
     result["partial_reasons"] = sorted(reader.reasons)
     result["partial"] = bool(reader.reasons)
     result["bytes_read"] = reader.bytes_read
+    # Allocation availability is separate from the filesystem/process sample.
+    # A missing optional allocator must not turn valid process visibility into
+    # an unknown value, or suppress the already collected measurements.
+    try:
+        result["allocation"] = collect_allocation_stats(
+            result["phase"], deadline=reader.deadline)
+    except Exception:
+        result["allocation"] = {
+            "version": 1, "implementation": None,
+            "python_allocated_blocks": None, "gc": None,
+            "active_threads": None, "native_allocator": None,
+            "partial": True, "reasons": ["allocation_sample_failed"],
+        }
     return result
 
 
