@@ -1,5 +1,12 @@
 # Original research worker: host preparation and activation
 
+Scope update (2026-10-09): this document is retained as archived preparation for
+an optional implementation. The active
+[formula-discovery-only plan](FORMULA_DISCOVERY_ONLY_PLAN_2026-10-09.md) reuses
+human-initiated bounded research passes. Worker provisioning, deployment and
+enablement below are not active-plan steps or instructions to perform them.
+This scope note makes no claim about current hosting or deployment status.
+
 This change packages PR148's existing runner for one persistent background
 worker. It does not alter the eight original registrations, native acquisition
 queries, execution engine, discovery policy, deadlines, or Production service.

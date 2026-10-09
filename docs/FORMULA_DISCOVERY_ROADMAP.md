@@ -1,5 +1,22 @@
 # Formula Discovery Roadmap
 
+## Active scope override — 2026-10-09
+
+The authoritative current plan is
+[formula discovery and validation only](FORMULA_DISCOVERY_ONLY_PLAN_2026-10-09.md).
+Finish the eight original registered requests, select exact candidate scopes,
+validate them on a separately registered fixed future population, and report
+the full evidence. Retain the existing collector and reuse bounded,
+human-initiated research passes through the existing connector path.
+Trading/alert activation and new unattended worker deployment are not remaining
+objectives of this plan.
+
+## Historical roadmap below
+
+The following body is preserved as historical design and implementation context.
+Its dated status, thresholds and activation lifecycle do not override the
+active scope or the original no-horizon experiment's frozen contracts.
+
 ## Primary objective
 
 The production AI Research layer exists to discover reproducible conditions
