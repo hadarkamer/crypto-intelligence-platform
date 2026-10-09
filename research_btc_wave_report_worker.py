@@ -337,10 +337,13 @@ class ResearchBTCWaveReportWorker:
                 # The advisory lock serializes normal workers. Bind this
                 # deferred read to the same committed row if another writer
                 # updates state without taking that lock; never mix generations.
-                deferred = conn.execute("""SELECT pending_job,source
+                # A checkpoint owns its frozen source. Only a new job needs
+                # the prior published source to reuse closed-path results.
+                deferred = conn.execute("""SELECT pending_job,
+                    CASE WHEN %s THEN NULL::jsonb ELSE source END AS source
                     FROM research_btc_wave_report_state
                     WHERE worker_key=%s AND xmin::text=%s""",
-                    (VERSION, state["state_xmin"])).fetchone()
+                    (state["has_pending_job"], VERSION, state["state_xmin"])).fetchone()
                 conn.commit()
                 if deferred is None:
                     raise RuntimeError("Full-wave report state changed during deferred read; retry next poll")
@@ -381,6 +384,9 @@ class ResearchBTCWaveReportWorker:
                             remaining_paths=len(revised["pending_event_ids"]))
                         self.metrics.update(runs=self.metrics["runs"]+1, last_result=progress, last_error=None)
                         return progress
+                    # The recheck graph is no longer needed after equality;
+                    # publish the original frozen job source below.
+                    del current_source
                     source_json = canonical(job["source"])
                     if len(source_json.encode()) > _MAX_SOURCE_JSON_BYTES:
                         raise ValueError("FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION")
