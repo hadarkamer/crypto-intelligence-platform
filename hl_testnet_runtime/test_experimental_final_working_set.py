@@ -67,7 +67,7 @@ class FinalWorkingSetTests(unittest.TestCase):
         planner._snapshot(replay,snapshot,self.exchange.t)
         self.assertEqual(replay['trades'][cid]['orders'],old_orders)
 
-    def test_reappearing_final_oid_and_unknown_position_remain_account_fences(self):
+    def test_reappearing_final_oid_fences_account_but_external_position_only_its_coin(self):
         cid,trade,lane=self.final_trade();new=self.candidate_same_lane(trade)
         self.raw.extra_orders=[dict(coin=trade['symbol'],oid=int(next(iter(trade['orders']))))]
         result=self.provider.collect(self.state,entries_enabled=True)
@@ -75,7 +75,9 @@ class FinalWorkingSetTests(unittest.TestCase):
         self.assertNotIn(new,result['entry_accounts'])
         self.raw.extra_orders=[];self.raw.extra_positions=[dict(position=dict(coin=trade['symbol'],szi='-1'))]
         result=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(trade['account'],result['account_entry_blocked']);self.assertNotIn(new,result['entry_accounts'])
+        self.assertNotIn(trade['account'],result['account_entry_blocked'])
+        self.assertEqual(result['blocked_lanes'][lane],'EXTERNAL_MARKET_OCCUPIED_NO_NEW_ENTRY')
+        self.assertNotIn(new,result['entry_accounts'])
 
     def test_prior_terminal_contradiction_cannot_be_hidden_by_later_flat_inventory(self):
         cid,trade,lane=self.final_trade()

@@ -193,8 +193,9 @@ def review(request, context, *, now_ms):
             raise BoundaryError('SOURCE_PRECEDES_RELEASE_WINDOW')
         # Unknown orders, foreign/manual position, opposite exposure and ANY
         # unresolved request close only the entry lane, preserving exit work.
-        _validate_account_inventory(p['account'],context['buckets'],context['open_orders'],
-                                    context['positions'],role=p['role'])
+        from . import experimental_external_activity as external
+        external.review_inventory(p['account'],context['buckets'],context['open_orders'],
+            context['positions'],role=p['role'],observation=context.get('external_observation'),target_symbol=p['symbol'])
         bucket=next((s for s in context['buckets'] if s['symbol']==p['symbol']),None)
         if bucket and bucket['bindings']:
             view=life.review(bucket['bindings'],bucket['evidence']['snapshot'],now_ms=now_ms)

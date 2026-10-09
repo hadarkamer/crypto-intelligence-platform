@@ -516,7 +516,7 @@ class FullConnectionTests(unittest.TestCase):
         self.assertFalse(self.http)
         self.assertEqual(self.store.load()['entry_blocked'][msg['occurrence_id']],'SOURCE_TIMEOUT')
 
-    def test_freshly_canceled_stop_skips_all_slow_source_reads_and_restores_protection(self):
+    def test_system_canceled_stop_skips_all_slow_source_reads_and_restores_protection(self):
         self.oracle=SoftwareExchange(ARM+10000);self.build(CREATED-60000)
         msg=r2732_message(entry=2.3,decision_ms=ARM-60000);self.seed(msg)
         self.service.tick()
@@ -526,6 +526,13 @@ class FullConnectionTests(unittest.TestCase):
         self.assertEqual(trade['orders'][stop]['status'],'OPEN')
         self.oracle.t+=1
         self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
+        original_status=self.raw.status
+        def system_cancel(oid):
+            value=original_status(oid)
+            if str(oid)==stop and value.get('order',{}).get('status')=='canceled':
+                value['order']['status']='marginCanceled'
+            return value
+        self.raw.status=system_cancel
         self.seed(hype_row71205_message(entry=100,decision_ms=ARM-60000))
         started=self.oracle.t;raw_start=len(self.raw.calls)
         original_entry=self.provider._entry_account
