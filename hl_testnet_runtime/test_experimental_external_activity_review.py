@@ -527,7 +527,26 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
         self.assertEqual(self.compact()['archived'],1)
         self.reconnect();self._manual_exchange_observation(account,symbol,manual_fills)
         self.assertEqual(self.store.archive_record(cid)['trade']['phase'],ext.MANUAL_CLOSED)
-        second=pg_fixture.alert(cycle='pg-manual-successor',approved_ms=self.oracle.t//60000*60000)
+        released_at=closed['external_activity']['retired_markets'][ext.lane(account,symbol)]['confirmed_at_ms']
+        # Rounding the current time down yields a closed-minute decision from
+        # BEFORE release. Archive/restart must not make that stale alert eligible.
+        stale_at=self.oracle.t//60000*60000
+        self.assertLessEqual(stale_at,released_at)
+        stale=pg_fixture.alert(cycle='pg-manual-stale-before-release',approved_ms=stale_at)
+        self.worker.receive([stale])
+        self.assertNotEqual(self.cycle(entries=True).get('operation'),'ENTRY')
+        after_stale=self.store.load()
+        self.assertEqual(len(self.oracle.requests),sent)
+        self.assertEqual(len(self.replayed_entries),1)
+        self.assertNotIn(stale['occurrence_id'],after_stale['trades'])
+        self.assertEqual(after_stale['entry_blocked'][stale['occurrence_id']],
+            'NEW_ALERT_REQUIRED_AFTER_MANUAL_RELEASE')
+        # A genuinely new independent alert is approved at the next closed
+        # minute, strictly after the durable second clean observation.
+        next_approval=(max(self.oracle.t,released_at)//60000+1)*60000
+        self.assertGreater(next_approval,released_at)
+        self.oracle.t=next_approval+1000
+        second=pg_fixture.alert(cycle='pg-manual-successor',approved_ms=next_approval)
         self.start(second)
         self.cycle()
         self.assertEqual(len(self.replayed_entries),2)
