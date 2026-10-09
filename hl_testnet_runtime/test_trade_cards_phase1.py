@@ -178,21 +178,6 @@ class CardTests(unittest.TestCase):
         self_test=self
         c.account_routes(Env(routes()))
 
-    def test_journal_projection_has_no_private_or_manual_fields(self):
-        payload=c.journal_projection(card())
-        self.assertEqual(payload['external_id'],card()['card_id'])
-        self.assertFalse(payload['delivery_enabled'])
-        self.assertEqual(payload['environment'],'testnet')
-        self.assertIsNone(payload['machine_fields']['pnl'])
-        text=json.dumps(payload)
-        for value in ('notes','conclusions','private_key','workspace_id','agent_address'):
-            self.assertNotIn(value,text)
-
-    def test_projection_cannot_mutate_card(self):
-        item=card();before=deepcopy(item)
-        c.journal_projection(item)['machine_fields']['source']['entry']='1'
-        self.assertEqual(item,before)
-
     def test_disabled_startup_has_no_io(self):
         report=startup.run({},journal=object())
         self.assertEqual(report['status'],'DISABLED')

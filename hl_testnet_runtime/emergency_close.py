@@ -568,6 +568,9 @@ class Controller:
         fill_wakeups=vars(normal.venue).get('fill_wakeups')
         if fill_wakeups is not None:
             self.venue.fill_wakeups=fill_wakeups
+        owner=vars(normal.venue).get('startup_owner')
+        if owner is not None:
+            self.venue.startup_owner=owner
         if self.venue.domain != self.store.domain:
             raise DispatchError('SOFTWARE_AND_ACCOUNT_STORAGE_MUST_NOT_MIX')
 
@@ -1126,6 +1129,9 @@ class Controller:
 
 class Venue(dispatch.TestnetVenue):
     def authorize(self,state,proposal):
+        owner=getattr(self,'startup_owner',None)
+        if owner is not None:
+            owner.verify()
         env=self.env
         if (env.get('HL_TESTNET_EMERGENCY_CLOSE')!=APPROVAL
                 or env.get('RENDER_SERVICE_ID')!=dispatch.roles.SERVICE

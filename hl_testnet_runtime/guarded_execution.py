@@ -1,8 +1,7 @@
-"""One-shot Testnet dispatch through the current-settings budget precheck.
+"""Read-only Testnet review through the current-settings budget precheck.
 
-No work on import, no HTTP endpoint, no automatic signing from the web service.
-The deployed web service calls review_only; sending remains an explicit separate
-call and is refused on ephemeral Render storage. No source times are rewritten.
+No work on import, HTTP endpoint or signing. The deployed web service calls
+review_only. No source times are rewritten.
 """
 from __future__ import annotations
 
@@ -14,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import time
 
 from . import checks
 
@@ -178,31 +176,3 @@ def review_only(message, *, account, agent, journal=None, exit_type=None, client
     except Exception:
         report['blockers'].append('GUARD_INPUT_OR_CHECK_UNAVAILABLE')
     return report
-
-
-def submit_checked(message, *, account, agent, journal, exit_type, enable_testnet=False):
-    """Budget gate -> original one-shot sender; never usable via web requests.
-
-    The caller must execute this in a supervised process with durable storage.
-    Authorization is an actual bool, not an environment string. The legacy
-    sender retains account/nonce/response/read-back checks. No source rewriting.
-    """
-    if enable_testnet is not True:
-        return {'mode': 'testnet', 'status': 'DISABLED', 'order_requests_sent': 0}
-    signal, at = _frozen(message)
-    started = time.monotonic()
-    review = review_only(signal, account=account, agent=agent, journal=journal, exit_type=exit_type)
-    if not review['eligible_for_controlled_attempt']:
-        return {**review, 'status': 'BLOCKED_BEFORE_SIGNING'}
-    # Bound the budget observation before entering the sender's own fresh checks.
-    if time.monotonic() - started > 8:
-        return {**review, 'eligible_for_controlled_attempt': False,
-                'status': 'BUDGET_SAMPLE_EXPIRED_BEFORE_DISPATCH', 'order_requests_sent': 0}
-    if not 0 <= (datetime.now(timezone.utc) - at).total_seconds() <= MAX_SOURCE_AGE_SECONDS:
-        return {**review, 'eligible_for_controlled_attempt': False,
-                'status': 'SOURCE_EXPIRED_BEFORE_DISPATCH', 'order_requests_sent': 0}
-    import hyperliquid_testnet_executor as sender
-    # Passing the exact frozen message avoids replacing old signals with a new at.
-    result = sender.submit_once(signal, account=account, journal=journal,
-                                exit_type=exit_type, enable_testnet=True)
-    return {'mode': 'testnet', 'budget_gate_passed': True, **result}

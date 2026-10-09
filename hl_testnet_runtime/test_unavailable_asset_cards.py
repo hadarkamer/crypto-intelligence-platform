@@ -59,15 +59,6 @@ class UnpreparedCardTests(unittest.TestCase):
         for value in ({**delivery(),'secret':'DO_NOT_STORE'},
                       {**delivery(),'side':'BUY'}, {**delivery(),'text':'incomplete'}):
             with self.assertRaises(wire.WireError):unprepared.prepare(value)
-    def test_existing_journal_projection_keeps_blocked_state_and_nulls(self):
-        card=unprepared.prepare(delivery());out=cards.journal_projection(card)
-        self.assertEqual(out['external_id'],card['card_id'])
-        self.assertEqual(out['machine_fields']['status'],unprepared.STATE)
-        self.assertIsNone(out['machine_fields']['rounded'])
-        self.assertIsNone(out['machine_fields']['planned_quantity'])
-        self.assertIsNone(out['machine_fields']['pnl'])
-        self.assertFalse(out['delivery_enabled'])
-        self.assertNotIn('notes',str(out));self.assertNotIn('conclusions',str(out))
     def test_validation_returns_independent_copy(self):
         card=unprepared.prepare(delivery());before=deepcopy(card)
         cards.validate_card(card)['delivery']['text']='changed'

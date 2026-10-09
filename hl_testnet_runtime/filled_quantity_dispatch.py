@@ -610,10 +610,6 @@ class Controller:
         self._observations=_ObservationCoordinator()
 
     @property
-    def _observation_guard(self):
-        return self._observations.guard
-
-    @property
     def _observation_flights(self):
         return self._observations.flights
 
@@ -1817,6 +1813,9 @@ class TestnetVenue:
             raise DispatchError('POST_REJECTION_EVIDENCE_REQUIRED')
         return observed['snapshot']
     def _gate(self,proposal,after_exit_policy):
+        owner=getattr(self,'startup_owner',None)
+        if owner is not None:
+            owner.verify()
         env=self.env
         if hasattr(self,'store'):
             self.store.action_allowed(proposal)

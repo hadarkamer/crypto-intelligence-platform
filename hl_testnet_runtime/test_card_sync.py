@@ -187,6 +187,97 @@ class TerminalCertificateTests(unittest.TestCase):
         with self.assertRaisesRegex(e.SyncError,'TERMINAL_CERTIFICATE_OPT_IN_INVALID'):
             e.collect(ev,Reader(ev),reuse_verified_terminals=1,clock=lambda:T+10000)
 
+    def cached_monitor(self, ev, *, reader=None, now=T+10000, reuse=True):
+        reader=reader or Reader(ev)
+        cache=e.ObservationReadCache(reader)
+        cached=cache.pass_reader(0)
+        cached.read('frontendOpenOrders',ev['snapshot']['account'])
+        cached.read('clearinghouseState',ev['snapshot']['account'])
+        # The experimental provider already has exact owned status evidence.
+        for oid,raw in reader.data['statuses'].items():
+            cache.samples[0][cache._key('orderStatus',ev['snapshot']['account'],oid=oid)]=deepcopy(raw)
+        result=e.collect(ev,reader,clock=lambda:now,reuse_verified_terminals=True,
+            verification_passes=1,observation_cache=cache,reuse_unchanged_fills=reuse)
+        return result,reader
+
+    def test_unchanged_owned_orders_use_two_reads_without_replaying_fill_history(self):
+        for side in ('LONG','SHORT'):
+            with self.subTest(side=side):
+                ev=evidence(binding(side=side),is_open=True)
+                full,baseline=self.cached_monitor(ev,reuse=False)
+                result,reader=self.cached_monitor(ev)
+                self.assertEqual((baseline.calls,reader.calls),(3,2))
+                self.assertEqual(reader.windows,[])
+                self.assertEqual(result,full)
+
+    def test_unchanged_history_reuse_requires_same_interval_and_cached_inventory(self):
+        ev=evidence(is_open=True)
+        for now in (T+30000,T+60000):
+            with self.subTest(now=now):
+                result,reader=self.cached_monitor(ev,now=now)
+                self.assertEqual(reader.calls,3)
+                self.assertEqual(reader.windows,[(T-60000,now)])
+        reader=Reader(ev)
+        e.collect(ev,reader,clock=lambda:T+10000,reuse_verified_terminals=True,
+                  verification_passes=1,reuse_unchanged_fills=True)
+        self.assertEqual(len(reader.windows),1)
+
+    def test_changed_or_missing_owned_order_always_collects_real_fills(self):
+        ev=evidence(is_open=True)
+        target=evidence()
+        result,reader=self.cached_monitor(ev,reader=Reader(target))
+        self.assertEqual(len(reader.windows),1)
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+        self.assertEqual(result['snapshot']['fills'],target['snapshot']['fills'])
+        b=binding();b['orders']['STOP']=[];b['orders']['TAKE_PROFIT']=[]
+        partial=dict(bindings=[b],snapshot=snapshot(b,
+            fills=[{**fill(b,qty='40'),'fill_id':'hl:1000'}],
+            opens=[order(b,'ENTRY',qty='60')],position='40'))
+        result,reader=self.cached_monitor(partial)
+        self.assertEqual(len(reader.windows),1)
+        self.assertEqual(result['report']['cards'][0]['entry_quantity'],'40')
+
+    def test_periodic_overlap_catches_delayed_history_after_quiet_monitoring(self):
+        ev=evidence(is_open=True)
+        quiet,reader=self.cached_monitor(ev,now=T+20000)
+        checkpoint=dict(bindings=ev['bindings'],snapshot=quiet['snapshot'])
+        reader=Reader(ev)
+        late=deepcopy(reader.data['fills'][0]);late.update(oid=999,tid=999,time=T+5000)
+        reader.data['fills'].append(late)
+        result,reader=self.cached_monitor(checkpoint,reader=reader,now=T+30000)
+        self.assertEqual(reader.windows,[(T-60000,T+30000)])
+        self.assertTrue(result['report']['needs_review'])
+        self.assertTrue(any(row['oid']=='999' for row in result['snapshot']['fills']))
+
+    def test_delayed_fill_cannot_age_out_during_skipped_history_polls(self):
+        plans=[]
+        @contextmanager
+        def batch(reader,bodies):
+            plans.extend(deepcopy(bodies))
+            yield
+        for resume_after_restart in (False,True):
+            with self.subTest(restart=resume_after_restart):
+                base=evidence(is_open=True);checkpoint=deepcopy(base);found_at=None
+                for offset in range(5000,90001,5000):
+                    reader=Reader(base)
+                    if offset>=65000:
+                        late=deepcopy(reader.data['fills'][0])
+                        late.update(oid=999,tid=999,time=T+1000)
+                        reader.data['fills'].append(late)
+                    plans.clear()
+                    with patch.object(Reader,'observation_batch',batch,create=True):
+                        result,reader=self.cached_monitor(checkpoint,reader=reader,now=T+offset,
+                            reuse=not (resume_after_restart and offset==90000))
+                    checkpoint=dict(bindings=base['bindings'],snapshot=result['snapshot'])
+                    if any(row['oid']=='999' for row in result['snapshot']['fills']):
+                        found_at=offset
+                        self.assertTrue(result['report']['needs_review'])
+                        self.assertEqual(reader.windows,[(T,T+90000)])
+                        self.assertEqual([(row['startTime'],row['endTime']) for row in plans
+                            if row['type']=='userFillsByTime'],reader.windows)
+                        break
+                self.assertEqual(found_at,90000)
+
 
 def collected(ev,target=None,**kw):
     return e.collect(ev,Reader(target or ev),clock=lambda:T+10000,**kw)

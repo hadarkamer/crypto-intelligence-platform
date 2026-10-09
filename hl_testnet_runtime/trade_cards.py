@@ -168,19 +168,3 @@ def route_summary(card, env):
     return dict(account_role=card['account_role'],
                 account_status=routes[card['account_role']]['status'],
                 dispatch_enabled=False, exchange_mapping_verified=False)
-
-
-def journal_projection(card):
-    """Contract draft for the EXISTING app, not a network sender or new screen.
-
-    Only bot-owned fields. Never notes, conclusions, credentials or app user IDs.
-    Null actuals must stay null, not become zero-profit trades in app statistics.
-    """
-    card = validate_card(card)
-    return dict(contract='bot-journal-record-v1', external_id=card['card_id'], revision=1,
-        environment='testnet', record_kind=card['record_kind'], delivery_enabled=False,
-        machine_fields=dict(source_event_id=card['event_id'], rule=card['rule'],
-            account_role=card['account_role'], source=card['prepared']['source'],
-            rounded=card['prepared']['execution'], risk=card['risk'],
-            planned_quantity=card['planning']['quantity'], status=card['state'],
-            actual_execution=None, pnl=None))
