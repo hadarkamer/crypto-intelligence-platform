@@ -69,6 +69,12 @@ unavailable and must not be invented as an alternative qualification route.
    Carry the complete training evidence and exclude known training parents and
    movements that began before validation. Never form new combinations from
    selected values or add training counts to the fresh evidence.
+   Preserve the completed original-eight state and transport evidence as
+   training inputs. Use separate validation work state with the existing generic
+   validation/acquisition APIs: both original-eight drivers require exactly
+   those eight request IDs, so adding validation requests to their registry would
+   break original-state verification and export. Do not use their restricted
+   request loop to process the new validation population.
 6. After the fixed validation cutoff, evaluate the linked native evidence and
    produce the [verified report](NO_HORIZON_PUBLICATION_V1.md). Neither this
    document nor a discovery selection automatically registers validation.
