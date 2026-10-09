@@ -76,30 +76,65 @@ def run():
     # actual wait path with PostgreSQL-shaped datetime values, including a
     # saved pending job, without hiding the failure with default=str.
     class WaitingConnection:
-        def __init__(self, ack_rows, pending_job=None):
+        def __init__(self, ack_rows, pending_job=None, *, allow_deferred=False, version_changed=False):
             self.rows = ack_rows
             self.state = {"report": completed, "report_observed_at_utc": now,
-                "next_report_at_utc": now+timedelta(minutes=15), "pending_job": pending_job}
+                "next_report_at_utc": now+timedelta(minutes=15)}
+            self.pending_job = pending_job
+            self.allow_deferred = allow_deferred
+            self.version_changed = version_changed
+            self.deferred_reads = 0
+            self.writes = []
+            self.unlocked = False
         def __enter__(self): return self
         def __exit__(self, *args): return False
         def execute(self, sql, params=()):
-            self.sql = sql
+            self.sql = " ".join(sql.split())
+            if self.sql.startswith("SELECT report,report_observed_at_utc,next_report_at_utc,"):
+                assert "xmin::text AS state_xmin" in self.sql and "AS has_pending_job" in self.sql
+                assert params == (worker.VERSION,)
+            elif self.sql.startswith("SELECT pending_job,source"):
+                assert self.allow_deferred, "Waiting poll hydrated source/checkpoint"
+                assert "WHERE worker_key=%s AND xmin::text=%s" in self.sql
+                assert params == (worker.VERSION, "101")
+                self.deferred_reads += 1
+            elif self.sql.startswith("SELECT row_key,sync_status,"):
+                assert "WHERE sheet_name=%s" in self.sql and "LIMIT 257" in self.sql
+                assert params == (worker.SHEET_NAME,)
+            elif self.sql.startswith("UPDATE research_btc_wave_report_state"):
+                assert self.allow_deferred
+                self.writes.append((self.sql, params))
+            elif self.sql.startswith("SELECT pg_advisory_unlock"):
+                self.unlocked = True
+            else:
+                assert self.sql.startswith("SELECT pg_try_advisory_lock"), self.sql
             return self
         def fetchone(self):
-            return self.state if "SELECT * FROM research_btc_wave_report_state" in self.sql else {"held": True}
+            if self.sql.startswith("SELECT report,"):
+                return {**self.state, "has_pending_job": bool(self.pending_job), "state_xmin": "101"}
+            if self.sql.startswith("SELECT pending_job,source"):
+                return None if self.version_changed else json.loads(worker.canonical(
+                    {"pending_job": self.pending_job, "source": source}))
+            return {"held": True}
         def fetchall(self): return self.rows
         def commit(self): pass
         def rollback(self): pass
-    for saved_job in (None, {"next_index": 1}):
-        connection = WaitingConnection(acknowledgments, saved_job)
-        service = worker.ResearchBTCWaveReportWorker()
-        with patch.object(worker, "_connect", lambda url: connection):
-            waiting = service.run_once(now=now+timedelta(minutes=20))
-        assert waiting["waiting_for_sheet_delivery"]
-        assert waiting["pending_job_preserved"] is bool(saved_job)
-        assert waiting["report_observed_at_utc"] == now.isoformat()
-        json.dumps(service.status(), allow_nan=False)
-        json.dumps(waiting, allow_nan=False)
+    for saved_job in (None, {}, [], False, 0, 0.0, "", {"next_index": 1}):
+        for elapsed in (1, 20):
+            connection = WaitingConnection(acknowledgments, saved_job)
+            service = worker.ResearchBTCWaveReportWorker()
+            before = worker.canonical(saved_job)
+            with patch.object(worker, "_connect", lambda url: connection):
+                waiting = service.run_once(now=now+timedelta(minutes=elapsed))
+            # The stale ACK gate wins even before the report deadline, and
+            # neither wait may read or alter an already-saved checkpoint.
+            assert waiting["waiting_for_sheet_delivery"]
+            assert waiting["pending_job_preserved"] is bool(saved_job)
+            assert waiting["report_observed_at_utc"] == now.isoformat()
+            assert connection.deferred_reads == 0 and not connection.writes and connection.unlocked
+            assert worker.canonical(connection.pending_job) == before
+            json.dumps(service.status(), allow_nan=False)
+            json.dumps(waiting, allow_nan=False)
     acknowledgments[0]["report_digest"] = worker.digest(completed)
     connection = WaitingConnection(acknowledgments)
     service = worker.ResearchBTCWaveReportWorker()
@@ -107,8 +142,41 @@ def run():
         waiting = service.run_once(now=now+timedelta(minutes=1))
     assert "waiting_until" in waiting
     assert service.status()["last_result"] == waiting
+    assert connection.deferred_reads == 0 and not connection.writes and connection.unlocked
     json.dumps(service.status(), allow_nan=False)
     json.dumps(waiting, allow_nan=False)
+    # A pending checkpoint bypasses only the time gate, after exact ACKs.
+    # Stop before path work: this exercises the real deferred read/compaction
+    # and checkpoint write without adding provider calls to the fake database.
+    pending_job = worker.prepare_job(source, now)
+    connection = WaitingConnection(acknowledgments, pending_job, allow_deferred=True)
+    service = worker.ResearchBTCWaveReportWorker()
+    with patch.object(worker, "_connect", lambda url: connection), \
+         patch.object(worker, "load_job_source", side_effect=AssertionError("Pending job reloaded source")), \
+         patch.object(worker, "advance_job", return_value={"processed_paths": 0,
+             "remaining_paths": len(pending_job["pending_event_ids"]), "completed": False}) as advance:
+        resumed = service.run_once(now=now+timedelta(minutes=1))
+    assert resumed["completed"] is False and advance.call_count == 1
+    assert connection.deferred_reads == 1 and len(connection.writes) == 1 and connection.unlocked
+    assert json.loads(connection.writes[0][1][0]) == advance.call_args.args[0]
+    # Another writer ignoring the advisory lock cannot combine a new source
+    # or checkpoint with the old report header. Both due-new and resume paths
+    # must stop before source loading, calculation, publication, or any write.
+    for saved_job in (None, pending_job):
+        connection = WaitingConnection(acknowledgments, saved_job,
+            allow_deferred=True, version_changed=True)
+        service = worker.ResearchBTCWaveReportWorker()
+        with patch.object(worker, "_connect", lambda url: connection), \
+             patch.object(worker, "load_job_source", side_effect=AssertionError("Stale state loaded source")), \
+             patch.object(worker, "advance_job", side_effect=AssertionError("Stale state advanced job")), \
+             patch.object(worker, "sheet_upserts", side_effect=AssertionError("Stale state published rows")):
+            try:
+                service.run_once(now=now+timedelta(minutes=20))
+            except RuntimeError as exc:
+                assert str(exc) == "Full-wave report state changed during deferred read; retry next poll"
+            else:
+                raise AssertionError("Changed state generation was accepted")
+        assert connection.deferred_reads == 1 and not connection.writes and connection.unlocked
     # Reload a stored report: JSON timestamp types must not prevent safe
     # complete closed path reuse on the next actual DB-backed generation.
     previous = json.loads(worker.canonical(completed))
@@ -174,7 +242,7 @@ def run():
     assert all(r["row"]["coverage_status"] == "REMOVED_FROM_CURRENT_SOURCE_POPULATION" for r in withdrawn)
     assert all("success_probability" not in r["row"] for r in withdrawn)
     # A data source claiming future close bars never advances a frozen prefix.
-    print("PASS full-wave worker bounded resume, JSON closed cache, frozen cutoff, all8 cells, missing representative and stale row withdrawal")
+    print("PASS full-wave worker bounded resume, deferred waiting reads, row-version guard, JSON closed cache, frozen cutoff, all8 cells, missing representative and stale row withdrawal")
 
 
 if __name__ == "__main__":
