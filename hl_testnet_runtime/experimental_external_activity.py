@@ -32,6 +32,21 @@ def managed(state, account, symbol):
     return lane(account, symbol) in state.get('external_activity', {}).get('human_managed', {})
 
 
+def entry_reason(state, account, message):
+    """Flat release permits a new signal, not an older queued or replayed one."""
+    retired = state.get('external_activity', {}).get('retired_markets', {}).get(
+        lane(account, message['symbol']))
+    if retired is None:
+        return None
+    import approved_alert_contract as contract
+    # Approved alerts can refer to a much older source observation. Their
+    # approval is the new entry decision; receipt and heartbeat times are not.
+    stamp = message['approved_at'] if contract.is_approved(message) else message['created_at']
+    if contract.moment_ms(stamp) <= retired['confirmed_at_ms']:
+        return 'NEW_ALERT_REQUIRED_AFTER_MANUAL_RELEASE'
+    return None
+
+
 def _active(state, account):
     from .experimental_execution_runtime import FINAL
     return {t['symbol'] for t in state['trades'].values()
@@ -109,12 +124,24 @@ def normalize_order(account, raw, now):
 
 def cached_history(cache, account, start, end):
     """Return a complete already-funded account interval when one is available."""
+    pages = cache.samples[0]
+    class CachedOnlyReader:
+        def read(self, kind, owner, *, oid=None, start=None, end=None):
+            key = (kind, owner, str(oid) if oid is not None else None, start, end)
+            if key not in pages:
+                raise sync.SyncError('CACHED_HISTORY_INCOMPLETE')
+            return deepcopy(pages[key])
     samples = []
-    for key, rows in cache.samples[0].items():
+    for key in pages:
         kind, owner, _, beginning, ending = key
         if kind == 'userFillsByTime' and owner == account and beginning <= start and ending >= end:
-            if isinstance(rows, list) and len(rows) < 2000 and len({r.get('time') for r in rows}) < 500:
-                samples.append([r for r in rows if start <= r.get('time', -1) <= end])
+            try:
+                # Use the existing bounded split/validation logic, but never
+                # fetch a missing child or mix independent verification passes.
+                rows = sync.history(CachedOnlyReader(), account, beginning, ending)
+            except (ValueError, KeyError, TypeError):
+                continue
+            samples.append([r for r in rows if start <= r['time'] <= end])
     return min(samples, key=len) if samples else None
 
 
