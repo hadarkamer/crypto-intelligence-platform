@@ -299,11 +299,17 @@ class ResearchBTCWaveReportWorker:
             if not held:
                 return {"locked": True}
             try:
-                state = conn.execute("SELECT * FROM research_btc_wave_report_state WHERE worker_key=%s", (VERSION,)).fetchone()
+                # Waiting polls need the exact report for the ACK gate, but
+                # never need to hydrate the much larger source/checkpoint.
+                # Match Python JSON truthiness, including legacy empty values.
+                state = conn.execute("""SELECT report,report_observed_at_utc,next_report_at_utc,
+                    xmin::text AS state_xmin,
+                    COALESCE(pending_job NOT IN ('null'::jsonb,'false'::jsonb,'0'::jsonb,
+                        '\"\"'::jsonb,'[]'::jsonb,'{}'::jsonb),FALSE) AS has_pending_job
+                    FROM research_btc_wave_report_state WHERE worker_key=%s""", (VERSION,)).fetchone()
                 conn.commit()
                 if state is None:
                     raise RuntimeError("Full-wave report migration045 required")
-                job = state["pending_job"]
                 # A previous deployment may already have checkpointed a newer
                 # job while the old report is still being delivered. Preserve
                 # that checkpoint, but never advance it past unACKed evidence.
@@ -314,15 +320,28 @@ class ResearchBTCWaveReportWorker:
                         waiting = {"waiting_for_sheet_delivery": True, "delivery": delivery,
                             "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"]),
                             "earliest_next_report_at_utc": _iso_or_none(state["next_report_at_utc"]),
-                            "pending_job_preserved": bool(job)}
+                            "pending_job_preserved": state["has_pending_job"]}
                         self.metrics.update(last_result=waiting, last_error=None)
                         return waiting
-                if not job:
+                if not state["has_pending_job"]:
                     if state["next_report_at_utc"] and now < state["next_report_at_utc"]:
                         waiting = {"waiting_until": _iso_or_none(state["next_report_at_utc"]),
                                    "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"])}
                         self.metrics.update(last_result=waiting, last_error=None)
                         return waiting
+                # The advisory lock serializes normal workers. Bind this
+                # deferred read to the same committed row if another writer
+                # updates state without taking that lock; never mix generations.
+                deferred = conn.execute("""SELECT pending_job,source
+                    FROM research_btc_wave_report_state
+                    WHERE worker_key=%s AND xmin::text=%s""",
+                    (VERSION, state["state_xmin"])).fetchone()
+                conn.commit()
+                if deferred is None:
+                    raise RuntimeError("Full-wave report state changed during deferred read; retry next poll")
+                state.update(deferred)
+                job = state["pending_job"]
+                if not job:
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                         source = compact_source(load_job_source(conn, now))

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import research_btc_wave_report_worker as worker
@@ -60,9 +60,9 @@ class WaveReportPostgresTests(unittest.TestCase):
     def state(self):
         return self.conn.execute("SELECT * FROM research_btc_wave_report_state").fetchone()
 
-    def run_worker(self, *, fail_staging=False, source_reader=None, now=None):
+    def run_worker(self, *, fail_staging=False, source_reader=None, now=None, connector=None):
         self.last_worker = worker.ResearchBTCWaveReportWorker()
-        with patch.object(worker, "_connect", self.connect), patch.object(worker, "_database_url", lambda:self.dsn), \
+        with patch.object(worker, "_connect", connector or self.connect), patch.object(worker, "_database_url", lambda:self.dsn), \
              patch.object(worker, "load_job_source", source_reader or (lambda conn, now:self.source)):
             if fail_staging:
                 real_stage = worker.research_sheet_outbox.stage_upserts
@@ -105,14 +105,36 @@ class WaveReportPostgresTests(unittest.TestCase):
         self.assertTrue(refreshed["published"])
         self.assertEqual(self.state()["report_observed_at_utc"], later)
 
+    def test_pending_marker_matches_decoded_json_truthiness_before_ack(self):
+        self.assertTrue(self.run_worker()["published"])
+        # SQL NULL and JSON null decode alike; all JSON false-y values must
+        # retain the old Python bool(job) semantics without loading the job.
+        values = [("SQL_NULL", None)] + [
+            (repr(value), json.dumps(value)) for value in
+            (None, False, 0, 0.0, "", [], {}, True, 1, -1, "pending", [0], {"next_index": 0})
+        ]
+        no_source = Mock(side_effect=AssertionError("UnACKed report cannot read source"))
+        for label, payload in values:
+            with self.subTest(pending=label):
+                self.conn.execute("UPDATE research_btc_wave_report_state SET pending_job=%s::jsonb",
+                                  (payload,))
+                original = self.state()
+                waiting = self.run_worker(now=START+timedelta(minutes=136), source_reader=no_source)
+                self.assertTrue(waiting["waiting_for_sheet_delivery"])
+                self.assertIs(waiting["pending_job_preserved"], bool(original["pending_job"]))
+                self.assertEqual(self.state(), original)
+        no_source.assert_not_called()
+
     def test_pending_job_from_previous_deployment_waits_for_old_report_ack(self):
         self.assertTrue(self.run_worker()["published"])
         original = self.state()
         later = START+timedelta(minutes=136)
         pending = worker.prepare_job(self.source, later,
             previous_report=original["report"], previous_source=original["source"])
-        self.conn.execute("UPDATE research_btc_wave_report_state SET pending_job=%s::jsonb",
-                          (worker.canonical(pending),))
+        future_next_report = later+timedelta(minutes=30)
+        self.conn.execute("""UPDATE research_btc_wave_report_state
+            SET pending_job=%s::jsonb,next_report_at_utc=%s""",
+            (worker.canonical(pending), future_next_report))
         checkpoint = self.state()["pending_job"]
         self.assertTrue(checkpoint["pending_event_ids"])
         def no_source(conn, now):
@@ -124,9 +146,74 @@ class WaveReportPostgresTests(unittest.TestCase):
         self.assertTrue(waiting["pending_job_preserved"])
         self.assertEqual(self.state()["pending_job"], checkpoint)
         self.assertEqual(self.state()["report"], original["report"])
+        self.assertEqual(self.state()["next_report_at_utc"], future_next_report)
         self.assertEqual(self.conn.execute("SELECT count(*) AS n FROM research_sheet_upsert_outbox").fetchone()["n"], 16)
         self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
-        resumed = self.run_worker(now=later)
+        # The next-generation clock cannot delay a previously frozen job,
+        # and a later invocation must not replace that job's observation time.
+        resumed = self.run_worker(now=later+timedelta(minutes=1))
+        self.assertTrue(resumed["published"])
+        self.assertIsNone(self.state()["pending_job"])
+        self.assertEqual(self.state()["report_observed_at_utc"], later)
+
+    def test_changed_xmin_blocks_mixed_generation_then_next_pass_resumes(self):
+        self.assertTrue(self.run_worker()["published"])
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        original = self.state()
+        later = START+timedelta(minutes=136)
+        pending = worker.prepare_job(self.source, later,
+            previous_report=original["report"], previous_source=original["source"])
+        outbox_before = self.conn.execute(
+            "SELECT * FROM research_sheet_upsert_outbox ORDER BY sheet_name,row_key").fetchall()
+        state_after_external_write = []
+        owner = self
+
+        class ConcurrentWriteConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                self.connection.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.connection.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def execute(self, sql, params=()):
+                normalized = " ".join(sql.split())
+                if normalized.startswith("SELECT pending_job,source FROM research_btc_wave_report_state"):
+                    owner.assertEqual(state_after_external_write, [])
+                    # The class connection is a separate autocommit session:
+                    # the worker still holds the prior report/header generation.
+                    owner.conn.execute("""UPDATE research_btc_wave_report_state
+                        SET pending_job=%s::jsonb,next_report_at_utc=%s,updated_at_utc=NOW()
+                        WHERE worker_key=%s""",
+                        (worker.canonical(pending), later+timedelta(minutes=30), worker.VERSION))
+                    state_after_external_write.append(owner.state())
+                return self.connection.execute(sql, params)
+
+        def concurrent_connection(url):
+            return ConcurrentWriteConnection(self.connect(url))
+
+        no_source = Mock(side_effect=AssertionError("Changed state cannot read source"))
+        with patch.object(worker, "advance_job", side_effect=AssertionError("Changed state cannot advance")) as advance, \
+             patch.object(worker.research_sheet_outbox, "stage_upserts",
+                          side_effect=AssertionError("Changed state cannot stage rows")) as stage:
+            with self.assertRaisesRegex(RuntimeError, "state changed during deferred read"):
+                self.run_worker(now=later, source_reader=no_source, connector=concurrent_connection)
+        self.assertEqual(len(state_after_external_write), 1)
+        self.assertEqual(self.state(), state_after_external_write[0])
+        self.assertEqual(self.conn.execute(
+            "SELECT * FROM research_sheet_upsert_outbox ORDER BY sheet_name,row_key").fetchall(), outbox_before)
+        no_source.assert_not_called()
+        advance.assert_not_called()
+        stage.assert_not_called()
+        # The failed pass releases its lock. The unchanged next pass reloads
+        # the committed generation and resumes its checkpoint before next_report.
+        resumed = self.run_worker(now=later+timedelta(minutes=1))
         self.assertTrue(resumed["published"])
         self.assertIsNone(self.state()["pending_job"])
         self.assertEqual(self.state()["report_observed_at_utc"], later)
