@@ -65,6 +65,9 @@ class Fixture:
         stack.enter_context(patch.object(diagnostics.os, "getpid", return_value=10))
         stack.enter_context(patch.object(diagnostics.os, "sysconf", return_value=4096))
         stack.enter_context(patch.object(diagnostics.time, "monotonic", return_value=0))
+        stack.enter_context(patch.object(diagnostics, "collect_allocation_stats",
+            return_value={"version": 1, "partial": False,
+                          "reasons": []}))
 
 
 class MemoryDiagnosticsTests(unittest.TestCase):
@@ -258,6 +261,32 @@ class MemoryDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("SECRET", output.getvalue())
         with patch.object(diagnostics, "_sample", return_value={}), patch("builtins.print", side_effect=BrokenPipeError("SECRET")):
             self.assertIsNone(diagnostics.emit_memory_sample("collector_end"))
+
+    def test_allocation_failure_preserves_complete_process_sample(self):
+        fixture = Fixture()
+        with ExitStack() as stack:
+            fixture.install(stack)
+            stack.enter_context(patch.object(diagnostics, "collect_allocation_stats",
+                side_effect=RuntimeError("SECRET allocator detail")))
+            value = diagnostics._sample("runtime_poll", None, None)
+        self.assertFalse(value["partial"])
+        self.assertEqual(value["main_rss_bytes"], 3 * 4096)
+        self.assertEqual(value["cgroup"]["current_bytes"], 123456)
+        self.assertTrue(value["allocation"]["partial"])
+        self.assertEqual(value["allocation"]["reasons"], ["allocation_sample_failed"])
+        self.assertNotIn("SECRET", json.dumps(value))
+
+    def test_allocation_receives_existing_phase_and_deadline(self):
+        fixture = Fixture()
+        with ExitStack() as stack:
+            fixture.install(stack)
+            probe = stack.enter_context(patch.object(diagnostics, "collect_allocation_stats",
+                return_value={"version": 1, "partial": True,
+                              "reasons": ["native_unavailable"]}))
+            value = diagnostics._sample("runtime_poll", None, None)
+        probe.assert_called_once_with("runtime_poll", deadline=diagnostics.MAX_SAMPLE_SECONDS)
+        self.assertFalse(value["partial"])
+        self.assertTrue(value["allocation"]["partial"])
 
 
 if __name__ == "__main__":
