@@ -156,6 +156,33 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ext.ExternalActivityError,'FILL_FACT_CHANGED'):
             ext.apply(state,obs)
 
+    def test_manual_release_uses_alert_decision_not_receipt_or_source_reference(self):
+        from approved_alert_fixtures import maxpain_alert
+        state=empty_state()
+        state['external_activity']=dict(retired_markets={
+            ext.lane(ACCOUNT,'HYPE'):dict(confirmed_at_ms=T)})
+        old=maxpain_alert(approved_ms=T,as_of_ms=T+10000)
+        self.assertEqual(ext.entry_reason(state,ACCOUNT,old),'NEW_ALERT_REQUIRED_AFTER_MANUAL_RELEASE')
+        later=maxpain_alert(approved_ms=T+60000)
+        self.assertIsNone(ext.entry_reason(state,ACCOUNT,later),
+            'new approval remains valid when its underlying source predates release')
+        self.assertIsNone(ext.entry_reason(state,OTHER,old),'release cutoff is account-scoped')
+        self.assertIsNone(ext.entry_reason(state,ACCOUNT,dict(old,symbol='SOL')),
+            'release cutoff is coin-scoped')
+
+    def test_reapproval_cannot_change_original_alert_decision(self):
+        from approved_alert_fixtures import maxpain_alert
+        import approved_alert_contract as contract
+        from .experimental_plan_store import PlanStoreError, reduce_source
+        original=maxpain_alert(approved_ms=T)
+        now=contract.iso_ms(T+10000);not_before=contract.iso_ms(T-60000)
+        record,_=reduce_source(None,original,now=now,not_before=not_before,domain='testnet')
+        reapproved=maxpain_alert(approved_ms=T+60000)
+        self.assertEqual(original['occurrence_id'],reapproved['occurrence_id'])
+        with self.assertRaisesRegex(PlanStoreError,'IMMUTABLE_PLAN_CHANGED'):
+            reduce_source(record,reapproved,now=contract.iso_ms(T+70000),
+                not_before=not_before,domain='testnet')
+
 
 class IntegratedReviewTests(unittest.TestCase):
     def setUp(self):
@@ -229,6 +256,27 @@ class IntegratedReviewTests(unittest.TestCase):
         exit_requests=[r for r in self.fx.store.load()['requests'].values()
             if r['proposal']['operation']=='CREATE_EXIT']
         self.assertEqual(exit_requests[0]['phase'],'ABORTED_UNSENT')
+
+    def test_durable_handoff_between_preparation_and_send_prevents_entry_transport(self):
+        previous=self.fx.port.context_loader
+        injected=[]
+        def final_context(request):
+            p=request['proposal']
+            if p['operation']=='ENTRY' and not injected:
+                injected.append(True)
+                def handoff(state):
+                    ext.apply(state,dict(version=ext.VERSION,accounts={},human_managed={
+                        ext.lane(p['account'],p['symbol']):dict(account=p['account'],symbol=p['symbol'],
+                            at_ms=self.fx.oracle.t,reason='EXTERNAL_OPEN_ORDER',order_id='909')}))
+                self.fx.store.mutate(handoff)
+            return previous(request)
+        self.fx.port.context_loader=final_context
+        self.fx.service.tick()
+        self.assertTrue(injected)
+        self.assertEqual(self.fx.http,[])
+        requests=list(self.fx.store.load()['requests'].values())
+        self.assertEqual(len(requests),1)
+        self.assertEqual(requests[0]['phase'],'ABORTED_UNSENT')
 
     def test_same_coin_notification_after_collection_prevents_stale_exit_transport(self):
         self._notification_after_collection(reconnect=False)
@@ -369,6 +417,22 @@ class IntegratedReviewTests(unittest.TestCase):
         result=self.fx.service.tick()
         self.assertEqual(result.get('operation'),'ENTRY',result)
         self.assertEqual(len(self.fx.http),sent+1)
+
+    def test_manual_full_close_does_not_replay_older_unsubmitted_same_coin_alert(self):
+        for _ in range(4):self.fx.service.tick()
+        # A second decision is still fresh but predates the manual release.
+        # Delayed delivery must not turn it into a new independent signal.
+        self.fx.oracle.t=T+900000+65000
+        after,trade,sent=self._manual_full_close()
+        older=r2732_message(entry=2.3,decision_ms=T+900000-60000)
+        self.fx.seed(older)
+        result=self.fx.service.tick()
+        self.assertNotEqual(result.get('operation'),'ENTRY',result)
+        self.assertEqual(len(self.fx.http),sent)
+        state=self.fx.store.load()
+        self.assertNotIn(older['occurrence_id'],state['trades'])
+        self.assertEqual(state['entry_blocked'][older['occurrence_id']],
+            'NEW_ALERT_REQUIRED_AFTER_MANUAL_RELEASE')
 
     def test_manual_close_real_archive_accepts_unchanged_overlapping_entry_fill(self):
         from .experimental_execution_state import ExecutionState, VERSION

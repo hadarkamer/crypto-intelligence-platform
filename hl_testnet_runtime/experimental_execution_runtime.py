@@ -413,6 +413,11 @@ class IsolatedExecutionRuntime:
                     or condition['status'] in ('PRICE_GAP','AMBIGUOUS','EXIT_RECONCILIATION_REQUIRED')):
                 return None
         role = 'long_account' if msg['side']=='LONG' else 'short_account'; account=state['routes'][role]
+        from . import experimental_external_activity as external
+        release_reason = external.entry_reason(state, account, msg)
+        if release_reason:
+            state.setdefault('entry_blocked', {})[cid] = release_reason
+            return None
         peers = [t for t in state['trades'].values() if t['account']==account and t['phase'] not in FINAL]
         if any(t['symbol']==msg['symbol'] for t in peers):
             state.setdefault('entry_blocked', {})[cid] = shared_market.ENTRY_BLOCK

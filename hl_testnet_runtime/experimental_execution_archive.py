@@ -226,6 +226,51 @@ class _SQL:
 class HistoryMixin:
     """Store-specific fields below select the existing transaction and validator."""
     @contextmanager
+    def _history_snapshot(self):
+        """One checked read snapshot, without the trading writer lock.
+
+        PostgreSQL needs REPEATABLE READ because the card spans state, archive
+        and source updates. Use a separate connection: the journal's normal
+        transaction has already queried the database before yielding, and a
+        leased writer connection must not be borrowed for presentation reads.
+        SQLite keeps its configured journal mode; query_only is connection-local.
+        """
+        from .experimental_execution_state import checked as software_checked
+        if hasattr(self, 'path'):
+            with closing(self._connect()) as conn:
+                try:
+                    conn.execute('PRAGMA query_only=ON')
+                    conn.execute('BEGIN')
+                    row = conn.execute('SELECT value,checksum FROM experimental_state WHERE singleton=1').fetchone()
+                    if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
+                    yield _SQL(conn), software_checked(*row)
+                finally:
+                    conn.rollback()
+            return
+        if self.domain == 'testnet':
+            from .experimental_live_state import checked, PG_SCHEMA
+        else:
+            from .experimental_execution_state import PG_SCHEMA
+            checked = software_checked
+        from .postgres_journal import JournalError
+        # Keep the journal's identity and redacted failure policy, but configure
+        # the transaction before its first SELECT establishes a snapshot.
+        try:
+            with self.journal._connect() as conn:
+                conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+                actual = conn.execute('SELECT current_database()').fetchone()[0]
+                if actual != self.journal._parameters['dbname']:
+                    raise JournalError('WRONG_DATABASE')
+                if self.domain == 'testnet': self._ready(conn)
+                row = conn.execute(f'SELECT value,checksum FROM {PG_SCHEMA}.state WHERE singleton').fetchone()
+                if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
+                yield _SQL(conn, PG_SCHEMA), checked(*row)
+        except JournalError:
+            raise
+        except Exception:
+            raise JournalError('PERSISTENCE_UNAVAILABLE_NO_SEND') from None
+
+    @contextmanager
     def _history_transaction(self):
         from .experimental_execution_state import checked as software_checked, encode
         if hasattr(self, 'path'):
@@ -383,7 +428,7 @@ class HistoryMixin:
         if (type(after_update_revision) is not int or after_update_revision < 0
                 or type(update_limit) is not int or not 1 <= update_limit <= 100):
             raise _error('BOUNDED_HISTORY_PAGE_REQUIRED')
-        with self._history_transaction() as (db, state, _save):
+        with self._history_snapshot() as (db, state):
             if cid in state['trades']:
                 return dict(card=_card(state, cid), location='active',
                     snapshot_revision=state['revision'],
