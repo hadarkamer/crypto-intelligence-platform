@@ -595,181 +595,216 @@ class LiveEvidenceProvider:
         source_lanes={(state['routes']['long_account' if state['sources'][cid]['source']['side']=='LONG'
                                     else 'short_account'],state['sources'][cid]['source']['symbol'])
                       for cid in candidates}
+        owned_lanes=set(lanes)
         lanes|=source_lanes
         # A known source-only allowance wait must not consume its own future
         # budget through empty scans. It supplies no fresh account evidence.
         waiting=bool(deferred or any(reason in ('TESTNET_REQUEST_BUDGET_EXHAUSTED',
             'TESTNET_REQUEST_BUDGET_BUSY','TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
             'TESTNET_OBSERVATION_BATCH_EXPIRED') for reason in result['entry_blocked'].values()))
-        for account in sorted({account for account,_ in lanes} or (set() if waiting else set(state['routes'].values()))):
-            result['account_inventory_at_ms'][account]=now
-            try:
-                inventories[account]=self._inventory(account,cache.pass_reader(0))
-            except Exception as exc:
-                result['inventory_account_errors'][account]=_error(exc)
-                result['account_entry_blocked'][account]=_error(exc)
-                remember_retry(exc,[account])
-        for account,symbol in sorted(lanes):
-            lane=runtime._lane(account,symbol)
-            if account not in inventories:
-                result['blocked_lanes'][lane]=result['account_entry_blocked'][account]
-                continue
-            try:
-                normalized,raw,bucket,occupied,bindings,lookups=self._lane(
-                    working,account,symbol,legacy_live[account],inventories[account],
-                    observation_cache=cache,observation_end_ms=now,historical=cold[account].get(symbol))
-                historical=cold[account].get(symbol)
-                if historical:
-                    facts={f['fill_id']:f for f in historical['evidence']['snapshot']['fills']}
-                    ids={oid for b in historical['bindings'] for values in b['orders'].values() for oid in values}
-                    for fill in raw['fills']:
-                        if fill['oid'] in ids and facts.get(fill['fill_id'])!=fill:
-                            raise ProviderError('IMMUTABLE_FINAL_FILL_CHANGED')
-                    # _lane normally rejects unknown OIDs before this point;
-                    # immutable overlap is handled in its scoped cold input.
-                    bucket=_merge_bucket(bucket,historical)
-                    buckets[account]=[b for b in buckets[account] if b['symbol']!=symbol]
-                result['collector_checkpoints'][lane]=bucket['evidence']['snapshot']
-                raw_snapshots[lane]=bucket['evidence']['snapshot'];lookup_facts[lane]=lookups
-                buckets[account].append(bucket)
-                for binding in bindings:owners[binding['card_id']]=binding
-                if occupied:result['blocked_lanes'][lane]='LEGACY_PREDECESSOR_NOT_FINAL'
-                elif normalized is not None:
-                    for cid,item in retired.items():
-                        t=state['trades'][cid]
-                        if t['account']==account and t['symbol']==symbol:
-                            normalized['orders']+=deepcopy(item['orders'])
-                    result['snapshots'].append(normalized)
-            except (ValueError,KeyError,TypeError) as exc:
-                result['blocked_lanes'][lane]=_error(exc)
-                result['account_entry_blocked'].setdefault(account,_error(exc))
-                remember_retry(exc,[account])
-                continue
-        current_legacy=self._legacy(state)
-        for role,account in state['routes'].items():
-            if account not in inventories:continue
-            try:
-                if self._revision({account:current_legacy[account]})!=self._revision({account:legacy[account]}):
-                    raise ProviderError('ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY')
-                if not 0<=self.now()-result['account_inventory_at_ms'][account]<=15000:
-                    raise ProviderError('ACCOUNT_COLLECTION_EXPIRED')
-            except Exception as exc:
-                result['inventory_account_errors'][account]=_error(exc)
-                result['account_entry_blocked'].setdefault(account,_error(exc))
-                inventories.pop(account,None)
-                result['snapshots']=[s for s in result['snapshots'] if s['account']!=account]
-                for lane in [k for k,v in result['collector_checkpoints'].items() if v['account']==account]:
-                    result['collector_checkpoints'].pop(lane)
-                for a,symbol in lanes:
-                    if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
-                continue
-            try:
-                _validate_account_inventory(account,buckets[account],inventories[account]['orders'],inventories[account]['positions'],role=role)
-            except ValueError as exc:result['account_entry_blocked'].setdefault(account,_error(exc))
-        for rid,request in state['requests'].items():
-            p=request['proposal'];lane=runtime._lane(p['account'],p['symbol'])
-            if (request['phase']!='OUTCOME_UNKNOWN' or p['action']['type'] not in ('order','batchModify','cancel')
-                    or (request.get('reply') or {}).get('state')!='REJECTED'
-                    or request.get('observed_oid') is not None or lane in result['blocked_lanes']):
-                continue
-            action=p['action'];kind=action['type'];old_oid=None
-            if kind!='cancel':
-                cloid=wire.requested_order(action)['c']
-                if lookup_facts.get(lane,{}).get(cloid)!={'status':'unknownOid'}:continue
-            if kind in ('batchModify','cancel'):
-                old_oid=str(action['modifies'][0]['oid'] if kind=='batchModify' else action['cancels'][0]['o'])
-                normalized=next((s for s in result['snapshots'] if runtime._lane(s['account'],s['symbol'])==lane),None)
-                old=next((o for o in (normalized or {}).get('orders',[]) if o['oid']==old_oid),None)
-                prior=state['trades'][p['card_id']]['orders'].get(old_oid)
-                if old is None or old['status']!='OPEN' or prior!=old:continue
-            fact=dict(request_id=rid,account=p['account'],symbol=p['symbol'],at_ms=now,
-                lookup_status='orderStillOpen' if kind=='cancel' else 'unknownOid',reply_digest=life.digest(request['reply']))
-            if old_oid is not None:fact['old_order_id']=old_oid
-            result['rejected_requests'].append(fact)
-        # Reuse the lifecycle's pure reconciliation before deciding whether
-        # optional source reads may run. An old durable STOP can be canceled
-        # or undersized by a newly observed fill. This throwaway projection
-        # never persists state, advances a source cursor or proposes an action.
-        price_state=deepcopy(state)
-        reconciler=object.__new__(runtime.IsolatedExecutionRuntime)
-        source_io_allowed={a:True for a in state['routes'].values()}
-        for snapshot in result['snapshots']:
-            candidate_state=deepcopy(price_state)
-            try:
-                reconciler._snapshot(candidate_state,snapshot,self.now())
-            except (ValueError,KeyError,TypeError):
-                source_io_allowed[snapshot['account']]=False
-                continue
-            price_state=candidate_state
-        for trade in price_state['trades'].values():
-            if _original_stop_needed(price_state,trade):source_io_allowed[trade['account']]=False
-        unresolved={r['proposal']['account'] for r in state['requests'].values()
-                    if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
-        # Stable fixed-exit trades consume no live mark: use the CURRENT
-        # reconciled fill/order facts, so newly missing or undersized exits
-        # still request a fresh market before the runtime repairs them.
-        market_lanes=set(source_lanes);cancellation_lanes=set()
-        for trade in price_state['trades'].values():
-            if trade['phase'] in runtime.FINAL:continue
-            active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
-                    if order['status']=='OPEN']
-            remaining=runtime._remaining(trade)
-            if remaining==0 and active and not any(leg=='ENTRY' for leg,order in active):
-                # Closing has already been observed. Cancel the leftover owned
-                # exit by ID; a price quote cannot change that decision.
-                cancellation_lanes.add((trade['account'],trade['symbol']))
-                continue
-            stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
-                and not any(leg=='ENTRY' for leg,order in active)
-                and trade['account'] not in unresolved
-                and all(len([o for own_leg,o in active if own_leg==leg])==1
-                    and all(o['wire_order']['r'] is True
-                        and life.number(o['wire_order']['s'])-sum(
-                            (life.number(f['quantity']) for f in o['fills']),Decimal(0))==remaining
-                        and life.number(o['wire_order']['p'])==life.number(price)
-                        for own_leg,o in active if own_leg==leg)
-                    for leg,price in (('STOP',trade['prices']['stop']),
-                                      ('TAKE_PROFIT',trade['prices']['take_profit']))))
-            if not stable:market_lanes.add((trade['account'],trade['symbol']))
-        market=None;market_error=None
-        if market_lanes:
-            market_at=self.now()
-            try:
-                cached=self._market
-                if cached is not None and 0<=market_at-cached[0]<5000:
-                    market_at,market=cached
-                else:
+        # Observe owned lanes before touching candidate-only accounts. The
+        # existing planner below gives actionable maintenance its full turn;
+        # account inventories and lane history are never collected twice.
+        for collection_lanes in ((owned_lanes,source_lanes-owned_lanes)
+                if owned_lanes and source_lanes-owned_lanes else (lanes,)):
+            for account in sorted(({account for account,_ in collection_lanes}
+                    or (set() if waiting else set(state['routes'].values())))
+                    -set(inventories)-set(result['inventory_account_errors'])):
+                result['account_inventory_at_ms'][account]=now
+                try:
+                    inventories[account]=self._inventory(account,cache.pass_reader(0))
+                except Exception as exc:
+                    result['inventory_account_errors'][account]=_error(exc)
+                    result['account_entry_blocked'][account]=_error(exc)
+                    remember_retry(exc,[account])
+            for account,symbol in sorted(collection_lanes):
+                lane=runtime._lane(account,symbol)
+                if account not in inventories:
+                    result['blocked_lanes'][lane]=result['account_entry_blocked'][account]
+                    continue
+                try:
+                    normalized,raw,bucket,occupied,bindings,lookups=self._lane(
+                        working,account,symbol,legacy_live[account],inventories[account],
+                        observation_cache=cache,observation_end_ms=now,historical=cold[account].get(symbol))
+                    historical=cold[account].get(symbol)
+                    if historical:
+                        facts={f['fill_id']:f for f in historical['evidence']['snapshot']['fills']}
+                        ids={oid for b in historical['bindings'] for values in b['orders'].values() for oid in values}
+                        for fill in raw['fills']:
+                            if fill['oid'] in ids and facts.get(fill['fill_id'])!=fill:
+                                raise ProviderError('IMMUTABLE_FINAL_FILL_CHANGED')
+                        # _lane normally rejects unknown OIDs before this point;
+                        # immutable overlap is handled in its scoped cold input.
+                        bucket=_merge_bucket(bucket,historical)
+                        buckets[account]=[b for b in buckets[account] if b['symbol']!=symbol]
+                    result['collector_checkpoints'][lane]=bucket['evidence']['snapshot']
+                    raw_snapshots[lane]=bucket['evidence']['snapshot'];lookup_facts[lane]=lookups
+                    buckets[account].append(bucket)
+                    for binding in bindings:owners[binding['card_id']]=binding
+                    if occupied:result['blocked_lanes'][lane]='LEGACY_PREDECESSOR_NOT_FINAL'
+                    elif normalized is not None:
+                        for cid,item in retired.items():
+                            t=state['trades'][cid]
+                            if t['account']==account and t['symbol']==symbol:
+                                normalized['orders']+=deepcopy(item['orders'])
+                        result['snapshots'].append(normalized)
+                except (ValueError,KeyError,TypeError) as exc:
+                    result['blocked_lanes'][lane]=_error(exc)
+                    result['account_entry_blocked'].setdefault(account,_error(exc))
+                    remember_retry(exc,[account])
+                    continue
+            current_legacy=self._legacy(state)
+            for role,account in state['routes'].items():
+                if account not in inventories:continue
+                try:
+                    if self._revision({account:current_legacy[account]})!=self._revision({account:legacy[account]}):
+                        raise ProviderError('ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY')
+                    if not 0<=self.now()-result['account_inventory_at_ms'][account]<=15000:
+                        raise ProviderError('ACCOUNT_COLLECTION_EXPIRED')
+                except Exception as exc:
+                    result['inventory_account_errors'][account]=_error(exc)
+                    result['account_entry_blocked'].setdefault(account,_error(exc))
+                    inventories.pop(account,None)
+                    result['snapshots']=[s for s in result['snapshots'] if s['account']!=account]
+                    for lane in [k for k,v in result['collector_checkpoints'].items() if v['account']==account]:
+                        result['collector_checkpoints'].pop(lane)
+                    for a,symbol in lanes:
+                        if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
+                    continue
+                try:
+                    _validate_account_inventory(account,buckets[account],inventories[account]['orders'],inventories[account]['positions'],role=role)
+                except ValueError as exc:result['account_entry_blocked'].setdefault(account,_error(exc))
+            result['rejected_requests']=[]
+            for rid,request in state['requests'].items():
+                p=request['proposal'];lane=runtime._lane(p['account'],p['symbol'])
+                if (request['phase']!='OUTCOME_UNKNOWN' or p['action']['type'] not in ('order','batchModify','cancel')
+                        or (request.get('reply') or {}).get('state')!='REJECTED'
+                        or request.get('observed_oid') is not None or lane in result['blocked_lanes']):
+                    continue
+                action=p['action'];kind=action['type'];old_oid=None
+                if kind!='cancel':
+                    cloid=wire.requested_order(action)['c']
+                    if lookup_facts.get(lane,{}).get(cloid)!={'status':'unknownOid'}:continue
+                if kind in ('batchModify','cancel'):
+                    old_oid=str(action['modifies'][0]['oid'] if kind=='batchModify' else action['cancels'][0]['o'])
+                    normalized=next((s for s in result['snapshots'] if runtime._lane(s['account'],s['symbol'])==lane),None)
+                    old=next((o for o in (normalized or {}).get('orders',[]) if o['oid']==old_oid),None)
+                    prior=state['trades'][p['card_id']]['orders'].get(old_oid)
+                    if old is None or old['status']!='OPEN' or prior!=old:continue
+                fact=dict(request_id=rid,account=p['account'],symbol=p['symbol'],at_ms=now,
+                    lookup_status='orderStillOpen' if kind=='cancel' else 'unknownOid',reply_digest=life.digest(request['reply']))
+                if old_oid is not None:fact['old_order_id']=old_oid
+                result['rejected_requests'].append(fact)
+            # Reuse the lifecycle's pure reconciliation before deciding whether
+            # optional source reads may run. An old durable STOP can be canceled
+            # or undersized by a newly observed fill. This throwaway projection
+            # never persists state, advances a source cursor or proposes an action.
+            price_state=deepcopy(state)
+            reconciler=object.__new__(runtime.IsolatedExecutionRuntime)
+            source_io_allowed={a:True for a in state['routes'].values()}
+            for snapshot in result['snapshots']:
+                candidate_state=deepcopy(price_state)
+                try:
+                    reconciler._snapshot(candidate_state,snapshot,self.now())
+                except (ValueError,KeyError,TypeError):
+                    source_io_allowed[snapshot['account']]=False
+                    continue
+                price_state=candidate_state
+            for trade in price_state['trades'].values():
+                if _original_stop_needed(price_state,trade):source_io_allowed[trade['account']]=False
+            unresolved={r['proposal']['account'] for r in state['requests'].values()
+                        if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+            # Stable fixed-exit trades consume no live mark: use the CURRENT
+            # reconciled fill/order facts, so newly missing or undersized exits
+            # still request a fresh market before the runtime repairs them.
+            market_lanes=source_lanes & collection_lanes;cancellation_lanes=set()
+            for trade in price_state['trades'].values():
+                if trade['phase'] in runtime.FINAL:continue
+                active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
+                        if order['status']=='OPEN']
+                remaining=runtime._remaining(trade)
+                if remaining==0 and active and not any(leg=='ENTRY' for leg,order in active):
+                    # Closing has already been observed. Cancel the leftover owned
+                    # exit by ID; a price quote cannot change that decision.
+                    cancellation_lanes.add((trade['account'],trade['symbol']))
+                    continue
+                stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
+                    and not any(leg=='ENTRY' for leg,order in active)
+                    and trade['account'] not in unresolved
+                    and all(len([o for own_leg,o in active if own_leg==leg])==1
+                        and all(o['wire_order']['r'] is True
+                            and life.number(o['wire_order']['s'])-sum(
+                                (life.number(f['quantity']) for f in o['fills']),Decimal(0))==remaining
+                            and life.number(o['wire_order']['p'])==life.number(price)
+                            for own_leg,o in active if own_leg==leg)
+                        for leg,price in (('STOP',trade['prices']['stop']),
+                                          ('TAKE_PROFIT',trade['prices']['take_profit']))))
+                if not stable:market_lanes.add((trade['account'],trade['symbol']))
+            market=None;market_error=None
+            if market_lanes:
+                market_at=self.now()
+                try:
+                    cached=self._market
+                    if cached is not None and 0<=market_at-cached[0]<5000:
+                        market_at,market=cached
+                    else:
+                        self._market=None
+                        market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
+                    result['metadata']=market.metadata
+                except Exception as exc:
                     self._market=None
-                    market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
-                result['metadata']=market.metadata
-            except Exception as exc:
-                self._market=None
-                market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
-        if cancellation_lanes and not result['metadata']:
-            try:
-                # Cancellation needs the owned asset index, not a live mark.
-                # Normally the accepted entry supplied this metadata already.
-                result['metadata']=(self._market[1].metadata if self._market is not None
-                    else self.info.read('meta'))
-                for account,symbol in cancellation_lanes:
-                    wire.asset(result['metadata'],symbol)
-            except (ValueError,KeyError,TypeError) as exc:
-                for account,symbol in cancellation_lanes:
-                    result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
-        for account,symbol in sorted(market_lanes):
-            lane=runtime._lane(account,symbol)
-            if account not in inventories or lane in result['blocked_lanes']:continue
-            try:
-                if market is None:raise ProviderError(market_error)
-                result['marks'][lane]=market.mark(account=account,symbol=symbol,now_ms=self.now())
-            except (ValueError,KeyError,TypeError) as exc:
-                result['blocked_lanes'][lane]=_error(exc)
-                market_error=_error(exc)
-        if market is not None:
-            # Share one actual mark across the immediate entry/exit steps.
-            # Preserve its original clock and refresh within the strictest
-            # existing emergency-price window; do not cache malformed prices.
-            self._market=(market_at,market) if market_error is None else None
+                    market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
+            if cancellation_lanes and not result['metadata']:
+                try:
+                    # Cancellation needs the owned asset index, not a live mark.
+                    # Normally the accepted entry supplied this metadata already.
+                    result['metadata']=(self._market[1].metadata if self._market is not None
+                        else self.info.read('meta'))
+                    for account,symbol in cancellation_lanes:
+                        wire.asset(result['metadata'],symbol)
+                except (ValueError,KeyError,TypeError) as exc:
+                    for account,symbol in cancellation_lanes:
+                        result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
+            for account,symbol in sorted(market_lanes):
+                lane=runtime._lane(account,symbol)
+                if account not in inventories or lane in result['blocked_lanes']:continue
+                try:
+                    if market is None:raise ProviderError(market_error)
+                    result['marks'][lane]=market.mark(account=account,symbol=symbol,now_ms=self.now())
+                except (ValueError,KeyError,TypeError) as exc:
+                    result['blocked_lanes'][lane]=_error(exc)
+                    market_error=_error(exc)
+            if market is not None:
+                # Share one actual mark across the immediate entry/exit steps.
+                # Preserve its original clock and refresh within the strictest
+                # existing emergency-price window; do not cache malformed prices.
+                self._market=(market_at,market) if market_error is None else None
+            # Read existing formula maintenance before considering any optional
+            # entry work. Reuse its unchanged candle cursor and failure behavior.
+            for cid,trade in price_state['trades'].items():
+                msg=trade['source'];account=trade['account']
+                if (trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
+                        or not source_io_allowed[account] or cid in result['bars']):
+                    continue
+                try:
+                    cursor=trade.get('condition') or state.get('formula_states',{}).get(cid) or {}
+                    since=getattr(self.prices,'closed_bars_since',None)
+                    result['bars'][cid]=(since(msg,self.now(),cursor.get('cursor_ms'))
+                        if callable(since) else self.prices.closed_bars(msg,self.now()))
+                except Exception:
+                    result['bars'][cid]=[]
+            if candidates and owned_lanes:
+                # The same pure lifecycle decides whether this cycle can actually
+                # protect, close or clean up an owned trade. A blocked lane or an
+                # unresolved outcome with no action must not starve its peer.
+                result.update(inventory_complete=True,inventory_accounts=sorted(inventories),inventory_at_ms=now)
+                maintenance=object.__new__(TestnetExecutionRuntime)._cycle_proposal(
+                    deepcopy(state),deepcopy(result),self.now(),entries_enabled=False)
+                if maintenance is not None:
+                    for cid in candidates:
+                        result['entry_blocked'][cid]='ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION'
+                    candidates.clear()
+                    break
         # Local admission results share a collection clock; remote facts retain
         # their own bounded lifetimes. Existing exposure is still collected
         # while a source-only entry waits for its recorded budget retry.
@@ -798,7 +833,8 @@ class LiveEvidenceProvider:
             # Keep formula stop updates and pending-order cancellation alive
             # during an entry halt. Entry ranges/allowance have no maintenance
             # authority and must never delay protection of an existing fill.
-            if msg['family'] in ('r2732','sol_g65') and (active_trade or candidate) and source_io_allowed[account]:
+            if (msg['family'] in ('r2732','sol_g65') and candidate
+                    and source_io_allowed[account] and cid not in result['bars']):
                 try:
                     cursor=(trade or {}).get('condition') or state.get('formula_states',{}).get(cid) or {}
                     since=getattr(self.prices,'closed_bars_since',None)

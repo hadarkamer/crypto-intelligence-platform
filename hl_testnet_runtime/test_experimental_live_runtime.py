@@ -10,7 +10,7 @@ from decimal import Decimal
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from experimental_execution_fixtures import r2732_message, hype_row71205_message, sol_g65_message
 from . import experimental_execution_runtime as isolated
@@ -31,8 +31,10 @@ class MemoryTransactions:
     def __init__(self, routes, not_before):
         self.value=state.initial(routes,not_before);self.lock=threading.RLock();self.nonces={}
     def load(self):
+        if getattr(self,'delay_clock',None) is not None:self.delay_clock.t+=self.delay_ms
         with self.lock:return deepcopy(self.value)
     def mutate(self,fn):
+        if getattr(self,'delay_clock',None) is not None:self.delay_clock.t+=self.delay_ms
         with self.lock:
             value=deepcopy(self.value);result=fn(value);value['revision']+=1
             state.checked(value,life.digest(value));self.value=value
@@ -66,6 +68,8 @@ class RuntimeContract:
                 conn.execute(f'DELETE FROM {LEGACY_SCHEMA}.nonces WHERE agent=ANY(%s)',([v['agent'] for v in LIVE_ROUTES.values()],))
             self.store.initialize(LIVE_ROUTES,not_before_ms=not_before)
         else:
+            from .test_journal_connection_scope import Connection
+            self.journal._connect=Mock(side_effect=Connection)
             self.memory=MemoryTransactions(LIVE_ROUTES,not_before)
             self.store.load=self.memory.load;self.store.mutate=self.memory.mutate
             self.store.commit_attempt=self.memory.commit_attempt
@@ -80,8 +84,16 @@ class RuntimeContract:
         def reserve(proposal):
             self.reservations.append(deepcopy(proposal))
             return wire.TransportAdmission(proposal,isolated._Permit(self.venue.now,self.venue.now()))
-        def send(request,*,admission):
+        def send(request,*,admission=None):
             claimed=self.store.claim_transport(request,'b'*32)
+            if admission is None:
+                from .experimental_live_dispatch import DefinitelyNotSubmitted
+                from .request_budget import BudgetError
+                try:
+                    admission=self.port.reserve_transport(request['proposal'])
+                    admission.bind(claimed)
+                except BudgetError as exc:
+                    raise DefinitelyNotSubmitted(claimed,exc) from None
             return self.venue.send(claimed,admission=admission)
         self.port.reserve_transport=reserve;self.port.send=send
         self.worker=runtime.TestnetExecutionRuntime(self.store,self.provider,self.port,
@@ -147,9 +159,32 @@ class RuntimeContract:
     def test_shared_budget_denial_cannot_leave_trade_or_attempt(self):
         from .request_budget import BudgetError
         msg=r2732_message(entry=2.3,decision_ms=T-60000);self.worker.receive([msg])
-        with patch.object(self.port,'reserve_transport',side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')):
-            with self.assertRaises(BudgetError):self.cycle()
-        self.assertFalse(self.store.load()['trades']);self.assertFalse(self.store.load()['requests'])
+        # Late admission preserves a durable definitely-unsent attempt, never
+        # an unresolved phantom order, and respects the quota's retry horizon.
+        for reason in ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY'):
+            with self.subTest(reason=reason):
+                self.make_worker(not_before=T-60000);self.worker.receive([msg])
+                denied=BudgetError(reason,retry_after_ms=7000)
+                with patch.object(self.port,'reserve_transport',side_effect=denied):
+                    result=self.cycle()
+                self.assertEqual(result['status'],'DEFINITELY_NOT_SUBMITTED_REOBSERVE')
+                value=self.store.load();request=next(iter(value['requests'].values()))
+                self.assertEqual(request['phase'],'ABORTED_UNSENT')
+                self.assertEqual(request['unsent_reason'],reason)
+                trade=value['trades'][msg['occurrence_id']]
+                self.assertEqual(trade['entry_retry']['after_ms'],self.venue.now()+7000)
+                self.assertFalse(runtime.entry_retry_ready(value,msg['occurrence_id'],self.venue.now()+6999))
+                self.assertFalse(self.venue.requests)
+                self.cycle()
+                self.assertEqual(len(self.store.load()['requests']),1)
+                for _ in range(runtime.MAX_ENTRY_ATTEMPTS-1):
+                    self.venue.t+=7000
+                    with patch.object(self.port,'reserve_transport',side_effect=denied):self.cycle()
+                value=self.store.load()
+                self.assertEqual(len(value['requests']),runtime.MAX_ENTRY_ATTEMPTS)
+                self.assertEqual(value['trades'][msg['occurrence_id']]['phase'],'CANCELED_WITHOUT_FILL')
+                self.cycle();self.assertEqual(len(self.store.load()['requests']),runtime.MAX_ENTRY_ATTEMPTS)
+                self.assertFalse(self.venue.requests)
 
     def test_release_halt_between_reservation_and_send_aborts_never_sent_entry(self):
         def halt(*args,**kwargs):
@@ -221,7 +256,7 @@ class RuntimeContract:
 
     def test_durable_wire_claim_is_one_use_including_new_worker(self):
         captured=[]
-        def hold(request,*,admission):captured.append(deepcopy(request));raise TimeoutError()
+        def hold(request,*,admission=None):captured.append(deepcopy(request));raise TimeoutError()
         with patch.object(self.port,'send',side_effect=hold):self.start()
         request=captured[0];claimed=self.store.claim_transport(request,'d'*32)
         self.restart()
@@ -233,7 +268,7 @@ class RuntimeContract:
         from .experimental_live_dispatch import DefinitelyNotSubmitted, LiveDispatchError
         self.venue.instant_fraction=Decimal('.5');msg,_=self.start()
         original=self.port.send
-        def no_wire(request,*,admission):
+        def no_wire(request,*,admission=None):
             claimed=self.store.claim_transport(request,'c'*32)
             raise DefinitelyNotSubmitted(claimed,LiveDispatchError('FINAL_EVIDENCE_EXPIRED'))
         with patch.object(self.port,'send',side_effect=no_wire):result=self.cycle(False)
@@ -260,7 +295,7 @@ class RuntimeContract:
         self.provider.collect=collect
 
     def test_exact_rejected_no_order_entry_retires_without_replay(self):
-        def reject(request,*,admission):
+        def reject(request,*,admission=None):
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
         with patch.object(self.port,'send',side_effect=reject):msg,_=self.start()
@@ -271,7 +306,7 @@ class RuntimeContract:
 
     def test_rejected_initial_exit_reconciles_then_can_restore_protection(self):
         msg,_=self.start()
-        def reject(request,*,admission):
+        def reject(request,*,admission=None):
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
         with patch.object(self.port,'send',side_effect=reject):self.cycle(False)
@@ -285,7 +320,7 @@ class RuntimeContract:
         with patch.object(self.port,'send',side_effect=TimeoutError()):self.start()
         self.rejection_context();self.cycle()
         self.assertEqual(next(iter(self.store.load()['requests'].values()))['phase'],'OUTCOME_UNKNOWN')
-        self.assertEqual(len(self.reservations),1)
+        self.assertEqual(len(self.reservations),0)
 
     def test_unproven_peer_lane_does_not_block_proven_filled_lane_protection(self):
         self.venue.t=ARM+10000;self.make_worker(not_before=CREATED-60000)
@@ -307,7 +342,7 @@ class RuntimeContract:
     def test_certified_unsent_emergency_does_not_create_phantom_order_fence(self):
         from .experimental_live_dispatch import DefinitelyNotSubmitted, LiveDispatchError
         msg,_=self.start();self.venue.mark[isolated._lane(LIVE_ROUTES['short_account']['account'],'XRP')]='2.4'
-        def no_wire(request,*,admission):
+        def no_wire(request,*,admission=None):
             self.assertEqual(request['proposal']['operation'],'EMERGENCY_CLOSE')
             claimed=self.store.claim_transport(request,'c'*32)
             raise DefinitelyNotSubmitted(claimed,LiveDispatchError('FINAL_EVIDENCE_EXPIRED'))
@@ -320,7 +355,7 @@ class RuntimeContract:
 
     def test_rejected_no_order_emergency_allows_fresh_owned_close(self):
         msg,_=self.start();self.venue.mark[isolated._lane(LIVE_ROUTES['short_account']['account'],'XRP')]='2.4'
-        def reject(request,*,admission):
+        def reject(request,*,admission=None):
             self.assertEqual(request['proposal']['operation'],'EMERGENCY_CLOSE')
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
@@ -339,7 +374,7 @@ class RuntimeContract:
         msg,_=self.start();self.protect();old=self.venue.oid('STOP')
         self.venue.t=T+60000;self.venue.mark[isolated._lane(LIVE_ROUTES['short_account']['account'],'XRP')]='2.275'
         self.venue.bars[msg['occurrence_id']]=[dict(open_at_ms=T,open='2.3',high='2.305',low='2.27',close='2.275')]
-        def reject(request,*,admission):
+        def reject(request,*,admission=None):
             self.assertEqual(request['proposal']['operation'],'AMEND_EXIT')
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
@@ -357,7 +392,7 @@ class RuntimeContract:
     def test_rejected_cancel_does_not_storm_or_invent_finality(self):
         msg,_=self.start();self.protect();trade=self.store.load()['trades'][msg['occurrence_id']]
         self.venue.fill(self.venue.oid('TAKE_PROFIT'),trade['quantity']);old=self.venue.oid('STOP')
-        def reject(request,*,admission):
+        def reject(request,*,admission=None):
             self.assertEqual(request['proposal']['operation'],'CANCEL')
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)

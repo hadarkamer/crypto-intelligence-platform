@@ -3,13 +3,13 @@
 Not registered in startup, and never activated by importing this module. Only
 concrete Testnet state/evidence/transport ports are accepted. Observations are
 prepared without I/O inside transactions, then compared and committed under the
-state revision lock. The shared IP request budget is acquired before commit;
+state revision lock. The shared IP request budget is acquired before final dispatch checks;
 nonces use the existing per-agent dispatch allocator in that same transaction.
 """
 from copy import deepcopy
 import threading
 
-from . import card_lifecycle as life, filled_quantity_dispatch as wire
+from . import card_lifecycle as life, filled_quantity_dispatch as wire, request_budget
 from .experimental_execution_runtime import (
     IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining, FINAL, TERMINAL,
 )
@@ -38,6 +38,7 @@ LOCAL_ENTRY_REFUSALS = frozenset((
 ))
 RETRYABLE_UNSENT = frozenset((
     'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED', 'FINAL_EVIDENCE_EXPIRED',
+    'TESTNET_REQUEST_BUDGET_EXHAUSTED', 'TESTNET_REQUEST_BUDGET_BUSY',
     'DURABLE_ATTEMPT_EXPIRED', 'FRESH_COLLECTOR_CHECKPOINT_REQUIRED_BEFORE_DISPATCH',
     'EXPERIMENTAL_OWNERSHIP_CHANGED_RECONCILE_FIRST',
     'LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST', 'DISPATCH_CONTEXT_CHANGED_RECONCILE_FIRST',
@@ -195,7 +196,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             _entry_decision(state, cid, context, now, state['entry_blocked'][cid])
         return proposal
 
-    def _abort_entry_unsent(self, state, request, now, reason):
+    def _abort_entry_unsent(self, state, request, now, reason, *, retry_after_ms=None):
         """Called only before send or after an exact transport certificate."""
         request.update(phase='ABORTED_UNSENT', unsent_reason=reason, certified_unsent=True)
         cid = request['proposal']['card_id']
@@ -209,13 +210,15 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 and all(r['phase'] == 'ABORTED_UNSENT' and r.get('certified_unsent') is True
                     and r.get('unsent_reason') in RETRYABLE_UNSENT for r in attempts))
             trade['phase'] = 'RETRY_WAIT_UNSENT' if retry else 'CANCELED_WITHOUT_FILL'
+            delay = (max(ENTRY_RETRY_DELAY_MS, min(request_budget.WINDOW_MS, retry_after_ms))
+                if type(retry_after_ms) is int and retry_after_ms >= 0 else ENTRY_RETRY_DELAY_MS)
             if retry:
-                trade['entry_retry'] = dict(after_ms=now+ENTRY_RETRY_DELAY_MS,
+                trade['entry_retry'] = dict(after_ms=now+delay,
                     reason=reason, attempts=len(attempts))
             else:
                 trade.pop('entry_retry', None)
             _entry_decision(state, cid, {}, now, reason,
-                retry_after_ms=now+ENTRY_RETRY_DELAY_MS if retry else None)
+                retry_after_ms=now+delay if retry else None)
         state['events'].append(dict(at_ms=now, kind='DEFINITELY_NOT_SUBMITTED',
             request_id=request['request_id'], occurrence_id=cid, reason=reason))
 
@@ -479,80 +482,86 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         collect_entries = (entries_enabled is True and history_ok
             and releases.entry_enabled(admission_release,self.venue.now()))
         context = self.venue.collect(deepcopy(before), entries_enabled=collect_entries)
-        now = self.venue.now()
-        life.moment(now)
-        release = self._release(before, now)
-        enabled = (collect_entries and release == admission_release and releases.entry_enabled(release,now))
-        # No persistence or I/O in this simulation: the exact same pure
-        # transition is checked again after budget admission under SQL lock.
-        prepared_state = deepcopy(before)
-        proposal = self._cycle_proposal(prepared_state, context, now, entries_enabled=enabled)
-        admission = self.dispatch.reserve_transport(proposal) if proposal is not None else None
+        # Optional history maintenance and collection keep their independent
+        # recovery paths. Warm the shared socket before the short permit;
+        # each subsequent state operation still commits separately.
+        with self.store.journal.reuse_connection():
+            now = self.venue.now()
+            life.moment(now)
+            release = self._release(before, now)
+            enabled = (collect_entries and release == admission_release and releases.entry_enabled(release,now))
+            # No persistence or I/O in this simulation: the exact same pure
+            # transition is checked again under the SQL lock. The concrete
+            # sender acquires its short permit only after durable preparation.
+            prepared_state = deepcopy(before)
+            proposal = self._cycle_proposal(prepared_state, context, now, entries_enabled=enabled)
 
-        def transition(state, nonce=None):
-            current = self._cycle_proposal(state, context, now, entries_enabled=enabled)
-            if current != proposal:
-                raise RuntimeError('CONCURRENT_PROPOSAL_RELOAD_REQUIRED')
-            return self._reserve_live(state, current, now, nonce) if current else None
+            def transition(state, nonce=None):
+                current = self._cycle_proposal(state, context, now, entries_enabled=enabled)
+                if current != proposal:
+                    raise RuntimeError('CONCURRENT_PROPOSAL_RELOAD_REQUIRED')
+                return self._reserve_live(state, current, now, nonce) if current else None
 
-        request = (self.store.commit_attempt(transition, role=proposal['role'], now_ms=now)
-            if proposal is not None else self.store.mutate(transition))
-        # A committed inventory checkpoint may release a feed generation;
-        # collection alone never certifies it. Failure closes only admissions.
-        observation_verified = True
-        try:
-            self.venue.observation_committed(context)
-        except Exception:
-            observation_verified = False
-        if request is None:
-            return dict(status='OBSERVED_NO_ACTION' if observation_verified else
-                'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
+            request = (self.store.commit_attempt(transition, role=proposal['role'], now_ms=now)
+                if proposal is not None else self.store.mutate(transition))
+            # A committed inventory checkpoint may release a feed generation;
+            # collection alone never certifies it. Checkpoint refusal closes
+            # admissions; a failed SQL transaction poisons the scope and stops
+            # all dispatch until the committed request is reconciled.
+            observation_verified = True
+            try:
+                self.venue.observation_committed(context)
+            except Exception:
+                observation_verified = False
+            if request is None:
+                return dict(status='OBSERVED_NO_ACTION' if observation_verified else
+                    'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
 
-        # A canceled/expired never-submitted entry keeps a durable tombstone.
-        latest = self.store.load()
-        latest_release = self._release(latest, self.venue.now())
-        def final_check(state):
-            current = state['requests'][request['request_id']]
-            if current != request:
-                raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
-            if (request['proposal']['operation'] == 'ENTRY'
-                    and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
-                        or latest_release != release
-                        or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
-                reason = ('OBSERVED_SAFETY_CHECKPOINT_PENDING' if not observation_verified
-                    and releases.entry_enabled(latest_release, self.venue.now()) and latest_release == release
-                    and _source_active(state['sources'][request['proposal']['card_id']], self.venue.now())
-                    else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
-                self._abort_entry_unsent(state, current, self.venue.now(), reason)
-                return False
-            return True
-        # Successful validation changes no durable state. Only a refusal needs
-        # a transaction, which rechecks the exact request before saving its abort.
-        # The sender independently reloads the request and gates before transport.
-        if not final_check(latest) and not self.store.mutate(final_check):
-            return dict(status='CANCELED_BEFORE_TRANSPORT', **readiness())
-        admission.bind(request)
-        try:
-            reply = wire.send_admitted(self.dispatch, request, admission)
-        except wire.DefinitelyUnsent as certificate:
-            def abort_unsent(state):
+            # A canceled/expired never-submitted entry keeps a durable tombstone.
+            latest = self.store.load()
+            latest_release = self._release(latest, self.venue.now())
+            def final_check(state):
                 current = state['requests'][request['request_id']]
-                if not certificate.matches(current):
-                    raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
-                self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason)
-            self.store.mutate(abort_unsent)
-            return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
-        except Exception:
-            # Includes pre-wire errors without an explicit durable unsent
-            # certificate. Conservatively reconcile; never repeat the request.
-            return dict(status='OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED', **readiness())
-        def receipt(state):
-            current = state['requests'][request['request_id']]
-            if current['phase'] == 'OUTCOME_UNKNOWN':
-                current['reply'] = deepcopy(reply)
-        self.store.mutate(receipt)
-        return dict(status='TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',
-            operation=request['proposal']['operation'], **readiness())
+                if current != request:
+                    raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
+                if (request['proposal']['operation'] == 'ENTRY'
+                        and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
+                            or latest_release != release
+                            or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
+                    reason = ('OBSERVED_SAFETY_CHECKPOINT_PENDING' if not observation_verified
+                        and releases.entry_enabled(latest_release, self.venue.now()) and latest_release == release
+                        and _source_active(state['sources'][request['proposal']['card_id']], self.venue.now())
+                        else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
+                    self._abort_entry_unsent(state, current, self.venue.now(), reason)
+                    return False
+                return True
+            # Successful validation changes no durable state. Only a refusal needs
+            # a transaction, which rechecks the exact request before saving its abort.
+            # The sender independently reloads the request and gates before transport.
+            if not final_check(latest) and not self.store.mutate(final_check):
+                return dict(status='CANCELED_BEFORE_TRANSPORT', **readiness())
+            try:
+                reply = wire.send_admitted(self.dispatch, request, None)
+            except wire.DefinitelyUnsent as certificate:
+                def abort_unsent(state):
+                    current = state['requests'][request['request_id']]
+                    if not certificate.matches(current):
+                        raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
+                    self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason,
+                        retry_after_ms=getattr(certificate, 'retry_after_ms', None))
+                self.store.mutate(abort_unsent)
+                return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
+            except Exception:
+                # Includes pre-wire errors without an explicit durable unsent
+                # certificate. Conservatively reconcile; never repeat the request.
+                return dict(status='OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED', **readiness())
+            def receipt(state):
+                current = state['requests'][request['request_id']]
+                if current['phase'] == 'OUTCOME_UNKNOWN':
+                    current['reply'] = deepcopy(reply)
+            self.store.mutate(receipt)
+            return dict(status='TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',
+                operation=request['proposal']['operation'], **readiness())
 
     def report(self):
         """Domain-correct operational status, never a software P/L projection."""

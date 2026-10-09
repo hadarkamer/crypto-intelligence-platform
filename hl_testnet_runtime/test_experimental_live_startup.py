@@ -75,6 +75,21 @@ class HandoverTests(unittest.TestCase):
         self.assertEqual(receipt['routes'], self.service.store.load()['routes'])
         self.coordinator.pass_once()
         self.assertEqual(self.service.started, 1); self.assertEqual(len(self.calls), 16)
+        before = self.service.store.load()
+        self.service.last_cycle_error_code = None
+        for status in ('DEFINITELY_NOT_SUBMITTED_REOBSERVE',
+                       'OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED',
+                       'OBSERVED_IDLE_REUSED'):
+            self.service.last_status = status
+            self.assertEqual(self.coordinator.health()['last_cycle_error_code'],
+                None if status == 'OBSERVED_IDLE_REUSED' else status)
+            self.assertIsNone(self.service.last_cycle_error_code)
+        self.service.last_status = 'DEFINITELY_NOT_SUBMITTED_REOBSERVE'
+        self.service.last_cycle_error_code = 'TESTNET_REQUEST_BUDGET_BUSY'
+        self.assertEqual(self.coordinator.health()['last_cycle_error_code'],
+            'TESTNET_REQUEST_BUDGET_BUSY')
+        self.assertEqual(self.service.store.load(), before)
+        self.assertEqual(len(self.calls), 16)
 
     def test_pending_legacy_keeps_old_protection_without_any_extra_public_read(self):
         account = LIVE_ROUTES['long_account']['account']

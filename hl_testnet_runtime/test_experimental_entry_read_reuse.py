@@ -70,6 +70,58 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(result['entry_accounts'][second]['agent'],
             self.provider.env['HL_TESTNET_SHORT_AGENT_ADDRESS'])
 
+        # A filled short owns the next stop action. A candidate-only long
+        # account must consume neither preparation time nor exchange reads.
+        from .experimental_live_runtime import TestnetExecutionRuntime
+        planner=object.__new__(TestnetExecutionRuntime)
+        for obstruction in ('none','inventory_failure','unknown_entry','rejection_circuit'):
+            with self.subTest(protection_obstruction=obstruction):
+                active=provider_fixtures.ProviderTests.active(self,steps=1)
+                pending=self.candidate(side='LONG',cycle=obstruction)
+                original=deepcopy(self.state['sources'][pending])
+                self.provider._market=None;self.provider._entry_checks.clear()
+                self.raw.calls.clear();self.raw.mutate=None
+                if obstruction=='inventory_failure':
+                    self.raw.mutate=Mock(side_effect=[ProviderError('PUBLIC_READ_UNAVAILABLE')]+[None]*20)
+                elif obstruction=='unknown_entry':
+                    self.exchange.orders.clear()
+                elif obstruction=='rejection_circuit':
+                    context=self.provider.collect(self.state,entries_enabled=False)
+                    projected=deepcopy(self.state)
+                    stop=planner._cycle_proposal(projected,context,self.exchange.t,entries_enabled=False)
+                    self.assertEqual((stop['operation'],stop['leg']),('CREATE_EXIT','STOP'))
+                    projected['trades'][active['occurrence_id']]['rejection_circuit']={
+                        planner._rejection_key(stop):'isolated_rejected_stop'}
+                    self.state.clear();self.state.update(projected)
+                    self.raw.calls.clear()
+                result=self.collect()
+                proposal=planner._cycle_proposal(deepcopy(self.state),result,self.exchange.t,entries_enabled=True)
+                self.assertEqual(self.state['sources'][pending],original)
+                if obstruction=='none':
+                    self.assertEqual((proposal['operation'],proposal['leg'],proposal['role']),
+                        ('CREATE_EXIT','STOP','short_account'))
+                    self.assertNotIn(pending,result['entry_accounts'])
+                    self.assertEqual(result['entry_blocked'][pending],
+                        'ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION')
+                    self.assertEqual([row[0] for row in self.raw.calls],
+                        ['frontendOpenOrders','clearinghouseState','lookup','userFillsByTime','metaAndAssetCtxs'])
+                    self.assertFalse(any(row[1]==self.state['routes']['long_account']
+                        for row in self.raw.calls))
+                else:
+                    self.assertIn(pending,result['entry_accounts'])
+                    self.assertEqual((proposal['operation'],proposal['role']),('ENTRY','long_account'))
+                if obstruction=='inventory_failure':
+                    # A previously blocked lane is reconsidered from fresh
+                    # evidence and immediately regains protection priority.
+                    self.state['blocked_lanes']=deepcopy(result['blocked_lanes'])
+                    self.raw.mutate=None;self.raw.calls.clear()
+                    result=self.collect()
+                    proposal=planner._cycle_proposal(deepcopy(self.state),result,self.exchange.t,entries_enabled=True)
+                    self.assertEqual((proposal['operation'],proposal['leg']),('CREATE_EXIT','STOP'))
+                    self.assertNotIn(pending,result['entry_accounts'])
+                    self.assertFalse(any(row[1]==self.state['routes']['long_account']
+                        for row in self.raw.calls))
+
     def test_continuous_release_unapproved_source_cannot_defer_later_approved_alert(self):
         from experimental_execution_fixtures import maxpain_message
         from .experimental_live_release import CONTINUOUS_ENTRY

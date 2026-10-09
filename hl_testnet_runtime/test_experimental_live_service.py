@@ -11,7 +11,7 @@ import json
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import experimental_execution_contract as contract
 from experimental_execution_fixtures import r2732_message, hype_row71205_message, sol_g65_message
@@ -100,6 +100,8 @@ class FullConnectionTests(unittest.TestCase):
     def build(self, not_before):
         self.memory = MemoryTransactions(LIVE_ROUTES, not_before)
         journal = PostgresJournal.for_ci('postgresql://fixture:unused@127.0.0.1:5432/hl_journal_ci')
+        from .test_journal_connection_scope import Connection
+        journal._connect = Mock(side_effect=Connection)
         self.store = TestnetExecutionState.for_ci(journal)
         self.store.load = self.memory.load; self.store.mutate = self.memory.mutate
         self.store.commit_attempt = self.memory.commit_attempt

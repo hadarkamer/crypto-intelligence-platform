@@ -40,6 +40,8 @@ class DefinitelyNotSubmitted(wire.DefinitelyUnsent):
         self._claim = request['transport_claim']
         code = str(cause)
         self.reason = code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,99}', code) else 'LOCAL_PRETRANSPORT_VALIDATION_FAILED'
+        delay = getattr(cause, 'retry_after_ms', None)
+        self.retry_after_ms = delay if type(delay) is int and 0 <= delay <= request_budget.WINDOW_MS else None
         wire.DispatchError.__init__(self, self.reason)
 
     def matches(self, request):
@@ -107,7 +109,7 @@ class LiveDispatchPort:
         return value
 
     def reserve_transport(self, proposal):
-        """Before durable begin: acquire the unchanged shared budget allowance."""
+        """Acquire the unchanged one-use shared budget immediately before final checks."""
         self._release(proposal)
         action = wire.canonical_wire_action(proposal['action'])
         roles.route_for(self.env, proposal['role'], proposal['account'])
@@ -158,13 +160,14 @@ class LiveDispatchPort:
         self._durable(value)
         if value.get('transport_claim') is not None:
             raise LiveDispatchError('DURABLE_TRANSPORT_ATTEMPT_ALREADY_CLAIMED')
-        if type(admission) is not wire.TransportAdmission:
-            raise LiveDispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
-        with self._guard:
-            if admission not in self._admissions or self._admissions[admission]:
-                raise LiveDispatchError('EXACT_SINGLE_USE_SHARED_BUDGET_ADMISSION_REQUIRED')
-            self._admissions[admission] = True
-        admission.validate(value)
+        if admission is not None:
+            if type(admission) is not wire.TransportAdmission:
+                raise LiveDispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
+            with self._guard:
+                if admission not in self._admissions or self._admissions[admission]:
+                    raise LiveDispatchError('EXACT_SINGLE_USE_SHARED_BUDGET_ADMISSION_REQUIRED')
+                self._admissions[admission] = True
+            admission.validate(value)
         claim = uuid.uuid4().hex
         try:
             claimed = self.claim_transport(deepcopy(value), claim)
@@ -196,8 +199,15 @@ class LiveDispatchPort:
                 expiresAfter=expires), allow_nan=False, separators=(',', ':')).encode()
             if len(body) > 16384:
                 raise LiveDispatchError('REQUEST_TOO_LARGE')
-            # No HTTP here: the trusted cached proof preserves original clocks,
-            # while its provider reloads durable source, state and safety gates.
+            # Preparation and the durable one-use claim precede the short permit.
+            # Budget denial is still definitely unsent; final source, ownership
+            # and release checks run AFTER admission, retaining original clocks.
+            if admission is None:
+                admission = self.reserve_transport(p)
+                admission.bind(value)
+                with self._guard:
+                    self._admissions[admission] = True
+                admission.validate(value)
             self._durable(value)
             latest_release = self._release(p)
             latest_context = self._context(value, latest_release)

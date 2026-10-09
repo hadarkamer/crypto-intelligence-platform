@@ -34,7 +34,10 @@ class LiveDispatchTests(unittest.TestCase):
         self.raw = json.dumps(dict(status='ok', response=dict(type='order',
             data=dict(statuses=[dict(resting=dict(oid=10))])))).encode()
         def acquire(_budget, path, body, **kw):
-            self.acquisitions.append((path, deepcopy(body), kw)); return Permit()
+            self.acquisitions.append((path, deepcopy(body), kw))
+            self.t += getattr(self,'budget_delay_ms',0)
+            if getattr(self,'halt_during_budget',False):self.release['entries_enabled']=False
+            return Permit()
         p = patch.object(request_budget.Budget, 'acquire', acquire)
         p.start(); self.addCleanup(p.stop)
         self.wallet = SimpleNamespace(address=D)
@@ -80,7 +83,7 @@ class LiveDispatchTests(unittest.TestCase):
         return value
 
     def send(self, admission=None):
-        return self.port.send(self.request, admission=admission or self.admission())
+        return self.port.send(self.request, admission=admission)
 
     def exit(self):
         p = self.request['proposal']; source = self.context['source']
@@ -136,9 +139,16 @@ class LiveDispatchTests(unittest.TestCase):
         self.assertEqual(self.acquisitions[0][2], dict(host=live.HOST, priority='background'))
 
     def test_missing_admission_cannot_mint_transport(self):
-        with self.assertRaisesRegex(live.LiveDispatchError, 'SINGLE_USE'):
+        # The sender now acquires internally after its durable claim/signature,
+        # while a repeated durable attempt still cannot mint another permit.
+        self.port.send(self.request)
+        self.assertEqual(len(self.acquisitions),1)
+        self.assertEqual(len(self.http),1)
+        self.assertIsNotNone(self.persisted.get('transport_claim'))
+        with self.assertRaisesRegex(live.LiveDispatchError,'EXACT_DURABLE'):
             self.port.send(self.request)
-        self.assertEqual(self.acquisitions, []); self.key_loader.assert_not_called()
+        self.assertEqual(len(self.acquisitions),1)
+        self.assertEqual(len(self.http),1)
 
     def test_software_or_foreign_admission_cannot_reach_signer(self):
         admission = wire.TransportAdmission(self.request['proposal'], Permit()); admission.bind(self.request)
@@ -185,10 +195,15 @@ class LiveDispatchTests(unittest.TestCase):
 
     def test_entry_halt_or_expiry_does_not_reserve_request(self):
         self.release['entries_enabled'] = False
-        with self.assertRaisesRegex(live.LiveDispatchError, 'ENTRY_RELEASE_CLOSED'): self.send()
+        with self.assertRaisesRegex(live.DefinitelyNotSubmitted, 'ENTRY_RELEASE_CLOSED'): self.send()
+        self.persisted=deepcopy(self.request)
         self.release['entries_enabled'] = True; self.t += 60000
-        with self.assertRaisesRegex(live.LiveDispatchError, 'ENTRY_RELEASE_CLOSED'): self.send()
+        with self.assertRaisesRegex(live.DefinitelyNotSubmitted, 'ENTRY_RELEASE_CLOSED'): self.send()
         self.assertEqual(self.acquisitions, [])
+        self.persisted=deepcopy(self.request);self.t-=60000
+        self.halt_during_budget=True
+        with self.assertRaisesRegex(live.DefinitelyNotSubmitted,'ENTRY_RELEASE_CLOSED'):self.send()
+        self.assertEqual(self.http,[])
 
     def test_protective_exit_works_while_entry_release_is_closed(self):
         self.exit(); self.release['entries_enabled'] = False
@@ -207,17 +222,18 @@ class LiveDispatchTests(unittest.TestCase):
     def test_unbounded_entry_requires_explicit_continuous_policy(self):
         for policy in (None,'bounded_v1','typo'):
             with self.subTest(policy=policy):
+                self.persisted=deepcopy(self.request)
                 self.release['entry_expires_at_ms']=None
                 if policy is None:self.release.pop('entry_policy',None)
                 else:self.release['entry_policy']=policy
-                with self.assertRaisesRegex(live.LiveDispatchError,'CURRENT_TESTNET_RELEASE'):
+                with self.assertRaisesRegex(live.DefinitelyNotSubmitted,'CURRENT_TESTNET_RELEASE'):
                     self.send()
         self.assertEqual(self.acquisitions,[])
         self.key_loader.assert_not_called()
 
     def test_continuous_entry_halt_does_not_disable_protection(self):
         self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None,entries_enabled=False)
-        with self.assertRaisesRegex(live.LiveDispatchError,'ENTRY_RELEASE_CLOSED'):
+        with self.assertRaisesRegex(live.DefinitelyNotSubmitted,'ENTRY_RELEASE_CLOSED'):
             self.send()
         self.exit();self.send()
         self.assertEqual(len(self.http),1)
@@ -269,9 +285,14 @@ class LiveDispatchTests(unittest.TestCase):
         self.assertEqual(self.http, [])
 
     def test_slow_signing_cannot_extend_evidence_or_attempt_lifetime(self):
-        self.sign_hook = lambda _: setattr(self, 't', self.t+5001)
-        with self.assertRaisesRegex(live.DefinitelyNotSubmitted, 'DURABLE_ATTEMPT_EXPIRED'): self.send()
-        self.assertEqual(self.http, [])
+        start=self.t
+        for slow in ('signing','budget'):
+            with self.subTest(slow=slow):
+                self.persisted=deepcopy(self.request);self.t=start
+                self.sign_hook = lambda _: setattr(self, 't', self.t+(5001 if slow=='signing' else 0))
+                self.budget_delay_ms=5001 if slow=='budget' else 0
+                with self.assertRaisesRegex(live.DefinitelyNotSubmitted, 'DURABLE_ATTEMPT_EXPIRED'): self.send()
+                self.assertEqual(self.http, [])
 
     def test_response_loss_keeps_unknown_and_cannot_retry_same_admission(self):
         self.http_error = TimeoutError('untrusted-secret-response')

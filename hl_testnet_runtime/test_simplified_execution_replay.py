@@ -408,6 +408,26 @@ class ReductionReplay(unittest.TestCase):
         self.assertIsNotNone(result['submitted_ms'],result)
         self.assertLess(result['submitted_ms'],90000)
         self.assertIsNotNone(result['lifecycle']['closed_ms'],result)
+        # Regression: preparation can exceed the one-second permit lifetime.
+        # Simulate 100 ms per journal read/transaction, with no real sleeps/SQL.
+        for target in ('ENTRY','STOP'):
+            with self.subTest(journal_delay_ms=100,target=target):
+                fixture,ledger=self.fixture();fx=fixture.fx
+                fixture.supervisor.pass_once(force_collect=True)
+                msg=sol_alert((fx.oracle.now()//60000)*60000,cycle='delayed-journal-'+target)
+                fx.oracle.mark[core._lane(fx.release['routes']['long_account'],'SOL')]=msg['entry']
+                fx.worker.receive([msg])
+                if target=='STOP':
+                    self.assertEqual(fx.worker.run_once(entries_enabled=True)['operation'],'ENTRY')
+                    trade=fx.store.load()['trades'][msg['occurrence_id']]
+                    fx.oracle.fill(fx.oracle.oid('ENTRY'),trade['quantity'])
+                fx.memory.delay_clock=fx.oracle;fx.memory.delay_ms=100
+                before=len(fx.http);started=fx.oracle.now()
+                answer=fx.worker.run_once(entries_enabled=target=='ENTRY')
+                self.assertGreater(fx.oracle.now()-started,quota.PERMIT_MS)
+                self.assertEqual(answer['status'],'TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',answer)
+                self.assertEqual(len(fx.http)-before,1)
+                self.assertEqual(fx.oracle.requests[-1]['proposal']['leg'],target)
 
     def test_partial_fill_lost_reply_stop_and_cancel_complete_without_duplicate_entry(self):
         result=self.replay(latency_ms=50,lifecycle=True,partial=True,lost_response=True,finish_leg='STOP')

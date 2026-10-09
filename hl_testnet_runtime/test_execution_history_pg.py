@@ -11,7 +11,7 @@ from decimal import Decimal
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from approved_alert_fixtures import BASE
 from . import experimental_execution_runtime as core
@@ -88,7 +88,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.port.reserve_transport = lambda proposal: wire.TransportAdmission(
             proposal, core._Permit(self.oracle.now, self.oracle.now()))
 
-        def send(request, *, admission):
+        def send(request, *, admission=None):
             try:
                 calls = len(self.raw.calls)
                 context = self.provider.dispatch_context(request)
@@ -98,6 +98,9 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
                 if request['proposal']['operation'] == 'ENTRY':
                     self.replayed_entries.append(request['request_id'])
                 claimed = self.store.claim_transport(request, 'b' * 32)
+                if admission is None:
+                    admission = self.port.reserve_transport(claimed['proposal'])
+                    admission.bind(claimed)
                 self.oracle_requests[claimed['request_id']] = deepcopy(claimed)
                 return self.oracle.send(claimed, admission=admission)
             except Exception as error:
@@ -324,6 +327,8 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
             blocker.start(); self.addCleanup(blocker.stop)
         memory = MemoryTransactions(LIVE_ROUTES, BASE - 60000)
         store = live_state.TestnetExecutionState.for_ci(PostgresJournal.for_ci(fixture_dsn))
+        from .test_journal_connection_scope import Connection
+        store.journal._connect = Mock(side_effect=Connection)
         store.load = memory.load
         store.mutate = memory.mutate
         store.commit_attempt = memory.commit_attempt

@@ -37,7 +37,7 @@ class BlockerAcceptanceTests(unittest.TestCase):
         return [r for r in self.venue.requests if r['proposal']['operation'] == 'ENTRY']
 
     def never_sent(self, reason='DISPATCH_CONTEXT_CHANGED_RECONCILE_FIRST'):
-        def fail(request, *, admission):
+        def fail(request, *, admission=None):
             claimed = self.store.claim_transport(request, 'c' * 32)
             raise DefinitelyNotSubmitted(claimed, LiveDispatchError(reason))
         return patch.object(self.port, 'send', side_effect=fail)
