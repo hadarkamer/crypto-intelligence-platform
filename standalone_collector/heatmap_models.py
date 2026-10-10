@@ -16,6 +16,7 @@ def select_visible_control(page,label):
         for index in range(min(matches.count(),8)):
             control=matches.first if index==0 else matches.nth(index)
             if control.is_visible():
+                if role=='tab' and control.get_attribute('aria-selected')=='true':return True
                 control.click(timeout=2000)
                 page.wait_for_timeout(500)
                 return True

@@ -22,7 +22,8 @@ PHASES=frozenset({'capture','select_12h','select_24h','select_48h','model_select
     'symbol_selection','wait_for_chart','screenshot','navigation','browser_launch',
     'browser_context','source_session_setup','page_creation','overlay_dismissal',
     'timeframe_selection','legend_preparation','chart_geometry','render_settle',
-    'context_close','browser_close','render_readiness'})
+    'context_close','browser_close','render_readiness','timeframe_trigger_lookup',
+    'timeframe_open','timeframe_option_lookup','timeframe_select','timeframe_confirmation'})
 KINDS=frozenset({'TimeoutError','TargetClosedError','Error','RuntimeError','ValueError',
     'MemoryError','OSError','FileNotFoundError','ReadTimeout','ConnectTimeout'})
 AD_HOSTS=re.compile(r'^https?://(?:[a-zA-Z0-9-]+\.)*(?:doubleclick\.net|googlesyndication\.com|google-analytics\.com|googletagmanager\.com)/')
