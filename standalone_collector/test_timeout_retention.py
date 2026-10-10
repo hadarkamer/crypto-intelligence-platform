@@ -36,7 +36,7 @@ def scanner_function(store):
 
 
 class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self,*,image=PNG,sidecar=True,kill=False,store_error=False,invalid_sidecar=False):
+    async def exercise(self,*,image=PNG,sidecar=True,kill=False,store_error=False,invalid_sidecar=False,progress=False):
         events=[];directories=[];saved=[];timeouts=[]
         class Process:
             returncode=None
@@ -60,6 +60,11 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         async def launch(*args,**kwargs):
             root=Path(args[4]);directories.append(str(root));capture=root/'capture';capture.mkdir()
             if image is not None:(capture/'coinglass_btc_heatmap_12h.png').write_bytes(image)
+            if progress:
+                (root/'execution_progress.json').write_text(json.dumps({
+                    'format_version':'execution-progress.v1','stage':'capture','capture_phase':'navigation',
+                    'elapsed_seconds':299,'heatmap_model':3,'timeframe':'12H','token':'PRIVATE',
+                    'capture_operations':[{'phase':'browser_launch','status':'completed','duration_seconds':1}]}))
             if sidecar:
                 data={'source_readiness':{'ready':False,'reason':'loading-indicator','label':'12 hour',
                     'login_link_visible':True,'account_link_present':False,'cookie':'PRIVATE'},
@@ -101,6 +106,18 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(saved[0][1]);self.assertFalse(saved[0][2]['image_retained'])
         self.assertEqual(saved[0][2]['failure_code'],'scan_timeout')
         self.assertFalse(json.loads(output.split('MODEL1_EVIDENCE ')[1])['image_retained'])
+
+    async def test_timeout_before_png_retains_active_stage_after_reaping_child(self):
+        saved,output=await self.exercise(image=None,sidecar=False,progress=True)
+        self.assertIsNone(saved[0][1]);diagnostic=saved[0][2]
+        self.assertFalse(diagnostic['assessment_validated'])
+        self.assertEqual(diagnostic['failure_code'],'scan_timeout')
+        self.assertEqual(diagnostic['timeout_seconds'],300)
+        progress=diagnostic['execution_progress']
+        self.assertEqual((progress['stage'],progress['capture_phase']),('capture','navigation'))
+        self.assertEqual((progress['heatmap_model'],progress['timeframe']),(3,'12H'))
+        self.assertEqual(progress['capture_operations'][0]['phase'],'browser_launch')
+        self.assertNotIn('PRIVATE',json.dumps(diagnostic)+output)
 
     async def test_uncooperative_child_is_killed_and_reaped_before_retention(self):await self.exercise(kill=True)
 

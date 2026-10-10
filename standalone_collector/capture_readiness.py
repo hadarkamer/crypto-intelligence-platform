@@ -5,6 +5,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 LABELS={'12h':'12 hour','24h':'24 hour','48h':'48 hour'}
+# Model 3's legacy URL now redirects to this observed public heatmap route.
+# Models 1 and 2 still use their original routes; do not infer other aliases.
+SOURCE_PATH_ALIASES={3:frozenset({'/liquidation-heatmap-model3'})}
 REASONS=frozenset({'render-checks-passed','loading-indicator','blur','no-chart',
     'visible-dialog','login-required','wrong-label','invalid-source','unverified'})
 NETWORK_KINDS=frozenset({'timeout','connection','cancelled','blocked','other'})
@@ -79,7 +82,8 @@ def valid_source(url,heatmap_model):
         query=parse_qs(value.query,keep_blank_values=True)
         return (value.scheme=='https' and value.hostname in ('coinglass.com','www.coinglass.com')
             and not value.username and not value.password and value.port in (None,443)
-            and value.path==expected.path and query.get('coin')==['BTC']
+            and value.path in ({expected.path}|SOURCE_PATH_ALIASES.get(heatmap_model,frozenset()))
+            and query.get('coin')==['BTC']
             and query.get('type')==['symbol'])
     except (ValueError,TypeError):return False
 

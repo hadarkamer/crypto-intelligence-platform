@@ -1,10 +1,25 @@
 """App-owned heatmap identity. Never contains credentials or arbitrary URLs."""
 from __future__ import annotations
 import os
+import re
 
 MODELS=(1,2,3)
 TIMEFRAMES=('12H','24H','48H')
 PATHS={1:'LiquidationHeatMap',2:'LiquidationHeatMapNew',3:'LiquidationHeatMapModel3'}
+
+
+def select_visible_control(page,label):
+    """Use the source's exact visible button, or its current ARIA tab."""
+    wanted=re.compile(r'^'+re.escape(label)+r'$',re.I)
+    for role in ('button','tab'):
+        matches=page.get_by_role(role,name=wanted)
+        for index in range(min(matches.count(),8)):
+            control=matches.first if index==0 else matches.nth(index)
+            if control.is_visible():
+                control.click(timeout=2000)
+                page.wait_for_timeout(500)
+                return True
+    return False
 
 
 def model_number(value):
