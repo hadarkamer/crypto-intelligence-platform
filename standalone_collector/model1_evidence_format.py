@@ -107,6 +107,17 @@ def evidence_payload(directory,timeframe):
     image_path=root/'capture'/f'coinglass_btc_heatmap_{timeframe.lower()}.png'
     image=None
     diagnostic={'timeframe':timeframe,'assessment_validated':False,'image_retained':False}
+    error=root/'error.json'
+    if error.is_file() and not error.is_symlink() and error.stat().st_size<=4096:
+        try:value=json.loads(error.read_text(encoding='utf-8'))
+        except (ValueError,OSError):value={}
+        if isinstance(value,dict) and isinstance(value.get('source_capture_state'),dict):
+            from capture_failure_observer import safe_failure_state,CLICK_FAILURES
+            from capture_readiness import safe_network
+            diagnostic['source_capture_state']=safe_failure_state(value['source_capture_state'])
+            diagnostic['source_network']=safe_network(value.get('source_network'))
+            click=value.get('click_failure')
+            if isinstance(click,str) and click in CLICK_FAILURES:diagnostic['click_failure']=click
     progress=root/'execution_progress.json'
     if progress.is_file() and not progress.is_symlink() and progress.stat().st_size<=8192:
         try:

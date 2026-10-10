@@ -34,9 +34,21 @@ def expand_capture_readiness(text):
             return node
     capture.body=[Gate().visit(n) for n in capture.body]
     if inserted!={'page':1,'shot':1}:raise RuntimeError('Capture readiness insertion points changed')
+    driver=next(n for n in capture.body if isinstance(n,ast.With)
+        and ast.unparse(n.items[0].context_expr)=='sync_playwright()')
+    start=next(i for i,n in enumerate(driver.body) if isinstance(n,ast.With)
+        and ast.unparse(n.items[0].context_expr)=="capture_operation('navigation')")
+    finish=next(i for i,n in enumerate(driver.body) if isinstance(n,ast.With)
+        and ast.unparse(n.items[0].context_expr)=="capture_operation('context_close')")
+    if start>=finish:raise RuntimeError('Capture failure observation insertion point changed')
+    handler=ast.ExceptHandler(type=ast.Name(id='Exception',ctx=ast.Load()),name='exc',body=ast.parse(
+        'try:\n    observe_capture_failure(page, HEATMAP_MODEL, source_diagnostics, exc)\nexcept Exception:\n    pass\nraise').body)
+    driver.body[start:finish]=[ast.Try(body=driver.body[start:finish],handlers=[handler],orelse=[],finalbody=[])]
     index=next(i+1 for i,n in enumerate(tree.body) if isinstance(n,ast.ImportFrom) and n.module=='__future__')
     tree.body.insert(index,ast.ImportFrom(module='capture_readiness',names=[ast.alias(name=n)
         for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source')],level=0))
+    tree.body.insert(index+1,ast.ImportFrom(module='capture_failure_observer',
+        names=[ast.alias(name='observe_capture_failure')],level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'
 
 

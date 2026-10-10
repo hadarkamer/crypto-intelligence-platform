@@ -179,6 +179,16 @@ def failure_detail(exc):
     phase=getattr(exc,'_model1_capture_phase','capture')
     detail={'exception_kind':kind if kind in KINDS else 'other',
             'capture_phase':phase if phase in PHASES else 'capture'}
+    capture_state=getattr(exc,'_model1_source_capture_state',None)
+    if capture_state is not None:
+        from capture_failure_observer import safe_failure_state,CLICK_FAILURES
+        detail['source_capture_state']=safe_failure_state(capture_state)
+        click=getattr(exc,'_model1_click_failure',None)
+        if isinstance(click,str) and click in CLICK_FAILURES:detail['click_failure']=click
+    network=getattr(exc,'_model1_source_network',None)
+    if network is not None:
+        from capture_readiness import safe_network
+        detail['source_network']=safe_network(network)
     readiness=getattr(exc,'_model1_source_readiness',None)
     if readiness is not None:
         from capture_readiness import safe_readiness,safe_network
@@ -257,6 +267,13 @@ def read_failure(path,job_id,returncode):
                     from capture_readiness import safe_readiness,safe_network
                     report['source_readiness']=safe_readiness(raw['source_readiness'])
                     report['source_network']=safe_network(raw.get('source_network'))
+                if isinstance(raw.get('source_capture_state'),dict):
+                    from capture_failure_observer import safe_failure_state,CLICK_FAILURES
+                    from capture_readiness import safe_network
+                    report['source_capture_state']=safe_failure_state(raw['source_capture_state'])
+                    report['source_network']=safe_network(raw.get('source_network'))
+                    click=raw.get('click_failure')
+                    if isinstance(click,str) and click in CLICK_FAILURES:report['click_failure']=click
                 events=raw.get('capture_operations')
                 if isinstance(events,list):
                     report['capture_operations']=[]

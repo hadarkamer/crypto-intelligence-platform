@@ -58,7 +58,7 @@ def prepare():
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
-                 'capture_readiness.py','store_diagnostics.py'):
+                 'capture_readiness.py','capture_failure_observer.py','store_diagnostics.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -97,7 +97,8 @@ def prepare():
     install_store_diagnostics(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
         'test_capture_diagnostics','test_capture_readiness','test_source_login_required','test_timeout_retention',
-        'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency','-v'],
+        'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency',
+        'test_capture_failure_observer','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
