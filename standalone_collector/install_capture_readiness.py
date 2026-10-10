@@ -10,6 +10,11 @@ def expand_capture_readiness(text):
     # Observe the source's actual data gate before a normal overlay dismissal
     # can remove the explanatory dialog and leave a blurred/loading chart.
     dismiss.body[:0]=ast.parse("require_unblocked_source(page, HEATMAP_MODEL, phase='overlay_dismissal')").body
+    common=[i for i,node in enumerate(dismiss.body) if isinstance(node,ast.Expr)
+        and isinstance(node.value,ast.Call) and ast.unparse(node.value.func)=='_dismiss_common_overlays']
+    if len(common)!=1:raise RuntimeError('Common overlay guard insertion point changed')
+    dismiss.body[common[0]+1:common[0]+1]=ast.parse(
+        "require_unblocked_source(page, HEATMAP_MODEL, phase='overlay_dismissal')").body
     inserted={'page':0,'shot':0}
     class Gate(ast.NodeTransformer):
         def visit_Assign(self,node):
