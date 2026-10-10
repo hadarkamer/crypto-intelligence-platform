@@ -1,0 +1,61 @@
+name: Registered Research Worker Image Check
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches:
+      - main
+      - research/no-horizon-runtime-20261004
+      - research/registered-runner-20261008
+    paths:
+      - 'deploy/research-worker/**'
+      - 'research_no_horizon_*.py'
+      - 'tools/no_horizon_guarded_node.py'
+      - '.github/workflows/research-worker-image-check.yml'
+
+jobs:
+  worker-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the exact image without private research inputs
+        run: docker build --file deploy/research-worker/Dockerfile --tag registered-research-worker:test .
+      - name: Verify disabled startup and graceful stop on a mounted volume
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/research-worker-data"
+          docker run --detach --name registered-research-worker \
+            --volume "$RUNNER_TEMP/research-worker-data:/var/data/no-horizon" \
+            registered-research-worker:test
+          python - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          heartbeat = Path(os.environ['RUNNER_TEMP']) / 'research-worker-data/supervisor/heartbeat.json'
+          for attempt in range(30):
+              if heartbeat.is_file():
+                  data = json.loads(heartbeat.read_text())
+                  assert data['state'] == 'DISABLED', data['state']
+                  assert data['child_pid'] is None
+                  assert data['deployment_verified'] is False
+                  break
+              time.sleep(1)
+          else:
+              raise AssertionError('Disabled worker heartbeat absent')
+          PY
+          docker stop --time 10 registered-research-worker
+          test "$(docker inspect --format '{{.State.ExitCode}}' registered-research-worker)" = 0
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'research-worker-data'
+          heartbeat = json.loads((root / 'supervisor/heartbeat.json').read_text())
+          assert heartbeat['state'] == 'STOPPED'
+          assert not (root / 'inputs').exists()
+          assert not (root / 'work').exists()
+          PY
+      - name: Capture image and supervisor diagnostics
+        if: always()
+        run: docker logs registered-research-worker || true

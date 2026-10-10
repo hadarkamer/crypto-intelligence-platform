@@ -16,6 +16,7 @@ on:
     branches:
       - main
       - research/no-horizon-runtime-20261004
+      - research/registered-runner-20261008
 
 jobs:
   selftests:

@@ -1,5 +1,17 @@
 # Original eight-request standalone runner
 
+Active scope (2026-10-10): follow the
+[formula-discovery-only plan](FORMULA_DISCOVERY_ONLY_PLAN_2026-10-09.md).
+The active plan prefers the existing Oct6 connector bridge and bounded manual
+commands. Native `tick` is an optional alternative after a dedicated read-only
+source is configured, using separate compatible state. Never switch transport
+after accepting proof. The continuous runner is retained as optional preparation;
+new automatic-worker development, hosting and enablement are outside the active
+plan, superseding the temporary scope expansion at 21:17 UTC on 2026-10-10.
+This restriction concerns the research work plan, not the existing independent
+Hyperliquid Testnet bot or its workers. Their operation and settings, and the
+original registration, evidence and checkpoint contracts below, are unchanged.
+
 This runner closes the manual orchestration gap for the October 2026 registered
 discovery experiment. It does not create a new population, change a registration,
 install Production migrations, send notifications, place orders or automatically
