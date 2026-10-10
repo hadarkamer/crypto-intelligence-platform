@@ -48,7 +48,8 @@ SOURCE_START = datetime(2026, 9, 3, 21, 0, tzinfo=timezone.utc)
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, default=report._json_default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(value, sort_keys=True, default=report._json_default,
+        separators=(",", ":"), allow_nan=False, ensure_ascii=True)
 
 
 def digest(value):
@@ -388,7 +389,9 @@ class ResearchBTCWaveReportWorker:
                     # publish the original frozen job source below.
                     del current_source
                     source_json = canonical(job["source"])
-                    if len(source_json.encode()) > _MAX_SOURCE_JSON_BYTES:
+                    # canonical() emits ASCII, so characters equal UTF-8 bytes.
+                    # Avoid allocating a second full payload just to count it.
+                    if len(source_json) > _MAX_SOURCE_JSON_BYTES:
                         raise ValueError("FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION")
                     staged = research_sheet_outbox.stage_upserts(conn, sheet_upserts(completed, evaluated_at=now, previous_report=state["report"]))
                     conn.execute("""UPDATE research_btc_wave_report_state SET pending_job=NULL,
