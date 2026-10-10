@@ -331,6 +331,49 @@ class InverseLoadingPostgreSQLTests(unittest.TestCase):
                     self.assertTrue(after[1])
                     self.assertEqual([row["event_id"] for row in after[0]], expected_ids)
 
+    def test_source_filters_preserve_all_and_single_coin_cohorts(self):
+        # Earlier valid-parent decoys would replace the simultaneous first
+        # cohort if either source candidate/direction predicate were lost.
+        for offset, (candidate, direction) in enumerate(
+                ((self.normal_key, "LONG"), (self.inverse_key, "SHORT"))):
+            for index, (key, side) in enumerate((
+                    (candidate, {"LONG": "SHORT", "SHORT": "LONG"}[direction]),
+                    (candidate + ":UNRELATED", direction),
+                    (candidate, None))):
+                event_id = 20 + offset * 3 + index
+                self.conn.execute("""
+                    INSERT INTO research_ordered_formula_matches
+                    VALUES(%s,%s,'BTC',%s,%s,%s,%s::jsonb)
+                """, (key, event_id, side, CUTOFF + timedelta(minutes=90),
+                      "decoy-" + str(event_id), '{"synthetic_decoy":true}'))
+                self.conn.execute("""
+                    INSERT INTO research_event_btc_movements VALUES(%s,%s,'inside','LIVE')
+                """, (event_id, store.PARENT_POLICY))
+            # ALL admits an unknown symbol, while a specific coin does not.
+            self.conn.execute("""
+                INSERT INTO research_ordered_formula_matches
+                VALUES(%s,40,NULL,%s,%s,'null-symbol','{}'::jsonb)
+            """, (candidate, direction, CUTOFF + timedelta(hours=2)))
+        self.conn.execute("""
+            INSERT INTO research_event_btc_movements VALUES(40,%s,'inside','LIVE')
+        """, (store.PARENT_POLICY,))
+
+        for inverse in (False, True):
+            for period in store.PERIODS:
+                prefix = [1] if period == "ALL_COMPATIBLE_SINCE_20260816" else []
+                for symbol, expected_ids in (
+                        ("ALL", prefix + [6, 3, 4, 40, 8, 9]),
+                        ("BTC", prefix + [6, 4, 8, 9]),
+                        ("ETH", [3])):
+                    with self.subTest(inverse=inverse, period=period, symbol=symbol):
+                        scope = {**self.scope(inverse=inverse, period=period),
+                                 "symbol": symbol}
+                        before = legacy_load_scope_rows(self.conn, scope, now=NOW)
+                        after = store.load_scope_rows(self.conn, scope, now=NOW)
+                        self.assert_parity(scope, before, after)
+                        self.assertFalse(after[1])
+                        self.assertEqual([row["event_id"] for row in after[0]], expected_ids)
+
     def test_reenabling_forward_join_is_detected_by_decoder_guard(self):
         class ReenabledJoin:
             def __init__(self, connection):
@@ -338,7 +381,7 @@ class InverseLoadingPostgreSQLTests(unittest.TestCase):
 
             def execute(self, sql, params=None):
                 if "FROM representatives m LEFT JOIN research_ordered_first_touch_outcomes o" in sql:
-                    if len(params) != 21 or params[-1] is not False:
+                    if len(params) != 17 or params[-1] is not False:
                         raise AssertionError("Inverse join gate was not reached")
                     params = (*params[:-1], True)
                     self.mutations += 1
