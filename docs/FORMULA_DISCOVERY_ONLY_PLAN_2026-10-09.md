@@ -1,11 +1,14 @@
 # Active plan: formula discovery and validation only
 
-Effective 2026-10-09. This is the active scope, superseding the older roadmap's
-activation stages and worker-hosting preparation as project objectives. The
-deliverable is a complete formula-and-evidence report. Retain the existing
-source collector; no collector, runtime or scientific-policy change is made by
-this plan. Alert delivery, exchange connections, order execution and new
-unattended infrastructure are outside the active work.
+Reaffirmed 2026-10-10. This active scope supersedes the temporary restoration of
+trading and automatic-worker objectives at 21:17 UTC that day, as well as the
+older roadmap's activation stages. The deliverable is a complete formula-and-
+evidence report: discovery, fixed prospective validation and documented limits.
+Trade lifecycle development, alert/exchange activation and development or
+deployment of a new automatic worker are outside the active work.
+Retain the existing source collector and existing parallel Hyperliquid Testnet
+bot as independent systems. This planning change does not stop or reconfigure
+them, their existing workers, runtime flags or scientific policies.
 
 ## Preserve the registered experiment
 

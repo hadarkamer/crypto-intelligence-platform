@@ -1,6 +1,6 @@
 # Formula Discovery Roadmap
 
-## Active scope override — 2026-10-09
+## Active scope override — 2026-10-10
 
 The authoritative current plan is
 [formula discovery and validation only](FORMULA_DISCOVERY_ONLY_PLAN_2026-10-09.md).
@@ -8,8 +8,12 @@ Finish the eight original registered requests, select exact candidate scopes,
 validate them on a separately registered fixed future population, and report
 the full evidence. Retain the existing collector and reuse bounded,
 human-initiated research passes through the existing connector path.
-Trading/alert activation and new unattended worker deployment are not remaining
-objectives of this plan.
+Trade lifecycle development, trading/alert activation and new automatic-worker
+development or deployment are outside this plan. This supersedes the temporary
+restoration of those objectives at 21:17 UTC on 2026-10-10.
+The existing parallel Hyperliquid Testnet bot and its workers remain independent
+and unchanged; this research scope does not authorize stopping or reconfiguring
+them.
 
 ## Historical roadmap below
 
