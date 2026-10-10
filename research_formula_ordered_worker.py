@@ -290,6 +290,9 @@ class ResearchFormulaOrderedWorker:
                     if time.monotonic()-evaluation_started>=_PASS_SECONDS:
                         summary['evaluation_budget_exhausted']=True
                         break
+                    # Release prior scope payloads before loading the next scope.
+                    # Unchanged-input scopes can otherwise retain an older result.
+                    rows=common_rows=result=validated=None
                     population_complete=period_population[scope['period_key']]
                     self.metrics['last_stage']='EVALUATE_SCOPE:'+scope['scope_key']
                     _timing_phase(timing, 'feature_coverage')
