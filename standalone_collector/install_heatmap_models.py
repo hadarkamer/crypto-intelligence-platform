@@ -7,7 +7,7 @@ remain the existing implementation. Defaults preserve the Model1 contract.
 from pathlib import Path
 import ast
 
-IMPORT='from heatmap_models import HEATMAP_MODEL, MODEL_LABEL, SOURCE_URL, SCHEMA_VERSION\n'
+IMPORT='from heatmap_models import HEATMAP_MODEL, MODEL_LABEL, SOURCE_URL, SCHEMA_VERSION, select_visible_control\n'
 URL='https://www.coinglass.com/pro/futures/LiquidationHeatMap?coin=BTC&type=symbol'
 
 
@@ -56,7 +56,18 @@ def install(runtime:Path):
     for name in ('market_vision/coinglass_heatmap_capture.py','collection_model1_task.py','model1_price_range.py'):
         path=runtime/name;text=path.read_text()
         if name.endswith('coinglass_heatmap_capture.py'):
-            text=once(text,'re.compile(r"^Model 1$", re.I)','re.compile(rf"^Model {HEATMAP_MODEL}$", re.I)')
+            text=once(text,
+                '        model = page.get_by_role("button", name=re.compile(r"^Model 1$", re.I))\n'
+                '        if model.count() and model.first.is_visible():\n'
+                '            model.first.click(timeout=2000)\n'
+                '            page.wait_for_timeout(500)',
+                '        select_visible_control(page, f"Model {HEATMAP_MODEL}")')
+            text=once(text,
+                '        symbol = page.get_by_role("button", name=re.compile(r"^Symbol$", re.I))\n'
+                '        if symbol.count() and symbol.first.is_visible():\n'
+                '            symbol.first.click(timeout=2000)\n'
+                '            page.wait_for_timeout(500)',
+                '        select_visible_control(page, "Symbol")')
             # Do not claim Model1's threshold for other model displays.
             text=once(text,'"liquidity_threshold": 0.85','"liquidity_threshold": (0.85 if HEATMAP_MODEL == 1 else None)')
         save(path,identity_module(text))

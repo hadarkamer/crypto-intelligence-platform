@@ -137,7 +137,8 @@ def normalize_prominent(raw,*,timeframe,run_id,captured_at,image):
         'price_axis_range':{'low':axis_low,'high':axis_high,'price_evidence':axis_text},
         'omitted_ambiguous_zones':omitted,'zones':zones,
         'evidence':{'sha256':hashlib.sha256(image).hexdigest(),'artifact_id':run_id,'content_type':'image/png'},
-        'summary':str(scan.get('short_summary',''))[:1000],'quality':'visual_estimate'}
+        'summary':str(scan.get('short_summary',''))[:1000],'quality':'visual_estimate',
+        'quantity_status':'unavailable','quantity_reason':'source_usd_unverified'}
 
 LEVEL_SCHEMA={'type':'object','additionalProperties':False,'properties':{
     'side':{'type':'string','enum':['above','below']},

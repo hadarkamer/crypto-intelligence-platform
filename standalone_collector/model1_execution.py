@@ -30,12 +30,58 @@ _current_stage='startup'
 _usage=None
 _analysis_facts={}
 _capture_events=[]
+_progress_path=None
+_progress_started=None
+_active_capture_phase=None
+_progress_identity={}
+
+
+def safe_progress(value):
+    if not isinstance(value,dict) or value.get('format_version')!='execution-progress.v1':return None
+    if not isinstance(value.get('stage'),str) or value['stage'] not in STAGES:return None
+    elapsed=value.get('elapsed_seconds')
+    if type(elapsed) not in (int,float) or not math.isfinite(elapsed) or not 0<=elapsed<=360:return None
+    phase=value.get('capture_phase')
+    out={'format_version':'execution-progress.v1','stage':value['stage'],
+        'elapsed_seconds':elapsed,'capture_phase':phase if isinstance(phase,str) and phase in PHASES else None,
+        'capture_operations':[]}
+    if type(value.get('heatmap_model')) is int and value['heatmap_model'] in (1,2,3):
+        out['heatmap_model']=value['heatmap_model']
+    if isinstance(value.get('timeframe'),str) and value['timeframe'] in ('12H','24H','48H'):
+        out['timeframe']=value['timeframe']
+    events=value.get('capture_operations')
+    for event in events[-24:] if isinstance(events,list) else ():
+        if not isinstance(event,dict):continue
+        duration=event.get('duration_seconds')
+        if (isinstance(event.get('phase'),str) and event['phase'] in PHASES
+            and isinstance(event.get('status'),str) and event['status'] in ('completed','failed')
+            and type(duration) in (int,float) and math.isfinite(duration) and 0<=duration<=360):
+            out['capture_operations'].append({key:event[key] for key in ('phase','status','duration_seconds')})
+    return out
+
+
+def _write_progress():
+    if _progress_path is None or _progress_started is None:return
+    payload=safe_progress({'format_version':'execution-progress.v1','stage':_current_stage,
+        'elapsed_seconds':round(time.monotonic()-_progress_started,2),
+        'capture_phase':_active_capture_phase,'capture_operations':list(_capture_events),**_progress_identity})
+    if payload is None:return
+    try:
+        _progress_path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=_progress_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(payload,allow_nan=False),encoding='utf-8')
+        temporary.chmod(0o600);temporary.replace(_progress_path)
+    except (OSError,ValueError):
+        # Diagnostics cannot replace the original capture result or error.
+        pass
 
 @contextmanager
 def capture_operation(phase):
     """Observe one existing operation; never change its call, timeout or pixels."""
     if phase not in PHASES:raise ValueError('Unknown capture phase')
+    global _active_capture_phase
     started=time.monotonic();status='completed'
+    previous_phase=_active_capture_phase;_active_capture_phase=phase;_write_progress()
     try:
         yield
     except Exception as exc:
@@ -46,6 +92,7 @@ def capture_operation(phase):
         _capture_events.append({'phase':phase,'status':status,
             'duration_seconds':round(time.monotonic()-started,2)})
         del _capture_events[:-24]
+        _active_capture_phase=previous_phase;_write_progress()
 
 class StageFailure(RuntimeError):
     def __init__(self,code):
@@ -82,6 +129,7 @@ def control(function,page,*args):
 def stage(value):
     global _current_stage
     _current_stage=value if value in STAGES else 'startup'
+    _write_progress()
 
 def numeric_usage(raw):
     if not isinstance(raw,dict):return None
@@ -162,9 +210,13 @@ def classify(exc):
     return 'worker_crashed'
 
 def run_task(main,timeframe,job_id,output):
-    global _current_stage,_usage,_analysis_facts,_capture_events
+    global _current_stage,_usage,_analysis_facts,_capture_events,_progress_path,_progress_started,_active_capture_phase,_progress_identity
     _current_stage='startup';_usage=None;_analysis_facts={};_capture_events=[]
     started=time.monotonic();root=Path(output)
+    from heatmap_models import HEATMAP_MODEL
+    _progress_identity={'heatmap_model':HEATMAP_MODEL,'timeframe':timeframe}
+    _progress_path=root/'execution_progress.json';_progress_started=started;_active_capture_phase=None
+    _write_progress()
     try:
         main(timeframe,job_id,output);return 0
     except Exception as exc:
@@ -174,6 +226,8 @@ def run_task(main,timeframe,job_id,output):
         root.mkdir(parents=True,exist_ok=True);path=root/'error.json'
         path.write_text(json.dumps(report),encoding='utf-8');path.chmod(0o600)
         return 1
+    finally:
+        _progress_path=None;_progress_started=None;_active_capture_phase=None;_progress_identity={}
 
 def read_failure(path,job_id,returncode):
     report={'code':'worker_crashed','stage':'startup'}

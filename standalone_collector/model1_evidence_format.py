@@ -107,6 +107,13 @@ def evidence_payload(directory,timeframe):
     image_path=root/'capture'/f'coinglass_btc_heatmap_{timeframe.lower()}.png'
     image=None
     diagnostic={'timeframe':timeframe,'assessment_validated':False,'image_retained':False}
+    progress=root/'execution_progress.json'
+    if progress.is_file() and not progress.is_symlink() and progress.stat().st_size<=8192:
+        try:
+            from model1_execution import safe_progress
+            value=safe_progress(json.loads(progress.read_text(encoding='utf-8')))
+        except (ValueError,OSError):value=None
+        if value is not None:diagnostic['execution_progress']=value
     if image_path.is_file() and not image_path.is_symlink() and image_path.stat().st_size<=MAX_IMAGE:
         data=image_path.read_bytes()
         if data.startswith(b'\x89PNG\r\n\x1a\n'):

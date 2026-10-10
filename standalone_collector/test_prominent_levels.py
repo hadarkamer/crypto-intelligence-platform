@@ -69,6 +69,8 @@ class ProminentTests(unittest.TestCase):
         self.assertEqual(z['price_precision'],'axis_estimate');self.assertEqual(z['uncertainty_usd'],.25)
         self.assertEqual(z['price_low'],109.75);self.assertEqual(z['price_high'],110.25)
         self.assertEqual(len(result['evidence']['sha256']),64)
+        self.assertEqual((result['quantity_status'],result['quantity_reason']),('unavailable','source_usd_unverified'))
+        self.assertNotIn('side_totals_usd',result);self.assertNotIn('liquidity_usd',z)
     def test_adjacent_yellow_rows_stay_individual(self):
         raw=sample();raw['scans'][0]['prominent_levels']=[level(110),level(110.5)]
         self.assertEqual([z['prices'] for z in normalized(raw)['zones']],[[110],[110.5]])
