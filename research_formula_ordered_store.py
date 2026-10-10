@@ -539,12 +539,13 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
                     'validation_limitation':'Read separate fixed-window and prospective contracts; acceptance requires documented compatible policy.'})
     summary.update(period)
     evidence_sha=digest({'scope':dict(scope)|{'last_evaluated_at_utc':None,'result':None},'episodes':episodes,'summary':summary})
-    conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(canonical(summary),now,scope['scope_key']))
-    if canonical(summary)==canonical(scope.get('result') or {}):
+    summary_json=canonical(summary)
+    conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(summary_json,now,scope['scope_key']))
+    if summary_json==canonical(scope.get('result') or {}):
         return {'episodes':0,'upserts':publication.seed_missing_scope(conn,scope,formula_version)}
     conn.execute('''INSERT INTO research_ordered_formula_trials(trial_id,scope_key,evidence_sha256,result,evaluated_at_utc)
         VALUES(%s,%s,%s,%s::jsonb,%s) ON CONFLICT(scope_key,evidence_sha256) DO NOTHING''',
-        (digest([scope['scope_key'],evidence_sha]),scope['scope_key'],evidence_sha,canonical(summary),now))
+        (digest([scope['scope_key'],evidence_sha]),scope['scope_key'],evidence_sha,summary_json,now))
     upserts=[]
     for episode in episodes:
         episode_id=digest([scope['scope_key'],episode['btc_parent_movement_id']])
@@ -586,7 +587,7 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
         'opposite_indicator_test':'INVERSE_CANDIDATE' if candidate.get('research_orientation')=='INVERSE' else 'SEPARATE_VERSIONED_CANDIDATE','current_period_hit_rate':'','prior_period_hit_rate':'','change_pp':'',
         'strongest_failure_pattern':'NOT_TESTED','status':'INCOMPLETE_DECISION_POPULATION' if not complete else summary['validation_status'] if summary['count_eligible'] else 'INSUFFICIENT_INDEPENDENT_EVIDENCE',
         'meets_min_5':complete and summary['independent_waves']>=5,'last_evaluated_at':now.isoformat(),'chat_summary':detail,'formula_version':formula_version}
-    if canonical(summary) != canonical(scope.get('result') or {}):
+    if summary_json != canonical(scope.get('result') or {}):
         projected=publication.project_formula_row(formula_row)
         if projected is not None:
             upserts.append(projected)
