@@ -243,6 +243,65 @@ def run():
             assert observed["staged_rows"] == expected_rows
             assert observed["verified"] == 1 and observed["source_serializations"] == 1
             assert observed["revised_serializations"] == 0
+    # ASCII canonical JSON has one UTF-8 byte per character, including escaped
+    # Unicode. Exercise the actual publication gate at all three boundaries.
+    cap_source = json.loads(real_canonical(ready_job["source"]))
+    cap_source["events"][0]["code_version"] = "מקור-é-🙂"
+    cap_job = real_prepare(cap_source, now)
+    assert real_advance(cap_job, fetcher=fetch)["completed"]
+    legacy_source_json = json.dumps(cap_job["source"], sort_keys=True,
+        default=report._json_default, separators=(",", ":"), allow_nan=False)
+    assert real_canonical(cap_job["source"]) == legacy_source_json
+    assert legacy_source_json.isascii()
+    payload_bytes = len(legacy_source_json.encode("utf-8"))
+    assert len(legacy_source_json) == payload_bytes
+    cap_expected = worker.finish_job(json.loads(real_canonical(cap_job)))
+    cap_expected_rows = real_canonical(worker.sheet_upserts(cap_expected,
+        evaluated_at=invocation_time, previous_report=completed))
+    class SourceTextWithoutEncode(str):
+        def encode(self, *args, **kwargs):
+            raise AssertionError("Source size gate allocated an encoded copy")
+    for cap in (payload_bytes-1, payload_bytes, payload_bytes+1):
+        observed_cap = {"source_id": None, "staged_rows": None}
+        connection = WaitingConnection(acknowledgments, cap_job, allow_deferred=True)
+        service = worker.ResearchBTCWaveReportWorker()
+        def cap_advance(value, **kwargs):
+            observed_cap["source_id"] = id(value["source"])
+            return real_advance(value, **kwargs)
+        def cap_canonical(value):
+            text = real_canonical(value)
+            if id(value) == observed_cap["source_id"]:
+                return SourceTextWithoutEncode(text)
+            return text
+        def cap_recheck(conn, observed_at):
+            assert observed_at == now
+            return json.loads(legacy_source_json)
+        def cap_stage(conn, items):
+            observed_cap["staged_rows"] = real_canonical(items)
+            return len(items)
+        with patch.object(worker, "_connect", lambda url: connection), \
+             patch.object(worker, "load_job_source", cap_recheck), \
+             patch.object(worker, "advance_job", cap_advance), \
+             patch.object(worker, "canonical", cap_canonical), \
+             patch.object(worker, "_MAX_SOURCE_JSON_BYTES", cap), \
+             patch.object(worker.research_sheet_outbox, "stage_upserts", cap_stage):
+            if cap < payload_bytes:
+                try:
+                    service.run_once(now=invocation_time)
+                except ValueError as exc:
+                    assert str(exc) == "FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION"
+                else:
+                    raise AssertionError("Oversized canonical source was published")
+                assert not connection.writes and observed_cap["staged_rows"] is None
+            else:
+                result = service.run_once(now=invocation_time)
+                assert result["published"] and result["staged_rows"] == len(rows)
+                assert len(connection.writes) == 1
+                saved = connection.writes[0][1]
+                assert saved[0] == real_canonical(cap_expected)
+                assert saved[1] == legacy_source_json
+                assert observed_cap["staged_rows"] == cap_expected_rows
+        assert connection.deferred_reads == 1 and connection.unlocked
     # Another writer ignoring the advisory lock cannot combine a new source
     # or checkpoint with the old report header. Both due-new and resume paths
     # must stop before source loading, calculation, publication, or any write.
