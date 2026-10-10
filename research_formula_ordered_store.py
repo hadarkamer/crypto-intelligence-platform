@@ -450,6 +450,9 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
     # matching cards/coins are retained, so missing labels cannot select winners.
     cutoff=period_contract(scope)['period_start_utc']
     now=now or datetime.now(timezone.utc)
+    # Inverse scopes replace forward labels below; do not hydrate discarded
+    # outcome payloads while loading the same outcome-blind representatives.
+    is_inverse=str(scope['candidate_key']).startswith(questions.VERSION+':INVERSE:')
     candidate_count=conn.execute("SELECT COUNT(*) AS n FROM (SELECT event_id FROM research_ordered_formula_matches WHERE candidate_key=%s AND direction=%s AND (%s='ALL' OR symbol=%s) AND alert_time_utc>=%s AND alert_time_utc<=%s LIMIT 10001) bounded",(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now)).fetchone()['n']
     rows=conn.execute('''
         WITH source_matches AS MATERIALIZED (
@@ -479,16 +482,16 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
                     ELSE to_jsonb(o)-'calculation_audit'-'threshold_policy' END AS ordered_outcome
         FROM representatives m LEFT JOIN research_ordered_first_touch_outcomes o
           ON o.event_id=m.event_id AND o.window_minutes=%s AND o.threshold_bps=%s
-             AND o.method_version='ordered-first-touch-v7'
+             AND o.method_version='ordered-first-touch-v7' AND %s
         ORDER BY m.alert_time_utc,m.event_id
     ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],row_limit+1,
-         scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'])).fetchall()
+         scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],not is_inverse)).fetchall()
     truncated=len(rows)>row_limit or candidate_count>10000
     if len(rows)>row_limit:
         # Never describe a partial simultaneous cohort at the row-budget edge.
         last_parent=rows[row_limit]['btc_parent_movement_id']
         rows=[row for row in rows[:row_limit] if row['btc_parent_movement_id']!=last_parent]
-    if str(scope['candidate_key']).startswith(questions.VERSION+':INVERSE:'):
+    if is_inverse:
         import research_ordered_inverse_store as inverse_store
         present=inverse_store.available(conn)
         labels=inverse_store.load_inverse_outcomes(conn,[row['event_id'] for row in rows],scope['window_minutes'],scope['threshold_bps']) if present else {}
