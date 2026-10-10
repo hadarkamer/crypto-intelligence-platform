@@ -470,7 +470,7 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
             JOIN research_btc_parent_movements parent ON parent.btc_parent_movement_id=membership.btc_parent_movement_id
               AND parent.episode_policy_version=%s AND parent.evidence_eligible IS TRUE
               AND parent.start_time_utc>=%s
-            WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s)
+            -- source_matches already applies candidate, direction and symbol filters.
         ), representatives AS MATERIALIZED (
             SELECT * FROM matched WHERE alert_time_utc=first_match_time
             ORDER BY alert_time_utc,btc_parent_movement_id,event_id LIMIT %s
@@ -484,7 +484,7 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
           ON o.event_id=m.event_id AND o.window_minutes=%s AND o.threshold_bps=%s
              AND o.method_version='ordered-first-touch-v7' AND %s
         ORDER BY m.alert_time_utc,m.event_id
-    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],row_limit+1,
+    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,row_limit+1,
          scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],not is_inverse)).fetchall()
     truncated=len(rows)>row_limit or candidate_count>10000
     if len(rows)>row_limit:
