@@ -1,6 +1,7 @@
 """Recurring descriptive Formula evidence over ordered v7 and causal BTC parents."""
 from __future__ import annotations
 import asyncio
+import json
 from datetime import datetime,timezone
 import os
 import time
@@ -31,6 +32,110 @@ _STATEMENT_TIMEOUT_MS=max(15000,min(60000,int(os.getenv('RESEARCH_ORDERED_FORMUL
 _LOCK_ID=588794583090203387
 
 
+_TIMING_PREFIX = '[ORDERED_FORMULA_TIMING]'
+_TIMING_MAX_INTEGER = (1 << 63) - 1
+_TIMING_PHASES = (
+    'connect_lock', 'catalog', 'intake', 'inverse', 'queue',
+    'feature_coverage', 'scope_rows', 'membership', 'common_windows',
+    'input_hash', 'summary_and_period', 'validation',
+    'persist_changed', 'persist_unchanged', 'cleanup',
+)
+
+
+class _PassTiming:
+    """Fixed scalar wall-time receipt; counts are phase entries, not queries."""
+    def __init__(self):
+        self.complete = True
+        self.overflow = False
+        self.started_at_utc = datetime.now(timezone.utc).isoformat()
+        self.phases = {name: {'count': 0, 'total_us': 0, 'max_us': 0}
+                       for name in _TIMING_PHASES}
+        self.active = None
+        self.active_started = None
+        self.last_clock = None
+        self.started = self._clock()
+
+    def _clock(self):
+        try:
+            value = time.perf_counter_ns()
+            if type(value) is int and value >= 0:
+                if self.last_clock is None or value >= self.last_clock:
+                    self.last_clock = value
+                    return value
+        except Exception:
+            pass
+        self.complete = False
+        return None
+
+    def _bounded(self, value):
+        if value > _TIMING_MAX_INTEGER:
+            self.complete = False
+            self.overflow = True
+            return _TIMING_MAX_INTEGER
+        return value
+
+    def _duration(self, started, ended):
+        if started is None or ended is None or ended < started:
+            self.complete = False
+            return None
+        return self._bounded((ended - started) // 1000)
+
+    def _transition(self, name, tick):
+        if self.active is not None:
+            duration = self._duration(self.active_started, tick)
+            if duration is not None:
+                item = self.phases[self.active]
+                item['total_us'] = self._bounded(item['total_us'] + duration)
+                item['max_us'] = max(item['max_us'], duration)
+        self.active = name
+        self.active_started = tick
+        if name is not None:
+            item = self.phases[name]
+            item['count'] = self._bounded(item['count'] + 1)
+
+    def phase(self, name):
+        if name is not None and name not in self.phases:
+            self.complete = False
+            return
+        self._transition(name, self._clock())
+
+    def finish(self, outcome):
+        ended = self._clock()
+        self._transition(None, ended)
+        elapsed = self._duration(self.started, ended)
+        return {
+            'version': 'ordered-formula-timing-v1',
+            'outcome': outcome,
+            'started_at_utc': self.started_at_utc,
+            'finished_at_utc': datetime.now(timezone.utc).isoformat(),
+            'timing_complete': self.complete,
+            'overflow': self.overflow,
+            'elapsed_us': elapsed,
+            'phases': {name: dict(values) for name, values in self.phases.items()},
+        }
+
+
+def _timing_phase(timing, name):
+    try:
+        if timing is not None:
+            timing.phase(name)
+    except Exception:
+        try:
+            timing.complete = False
+        except Exception:
+            pass
+
+
+def _publish_timing(metrics, timing, outcome):
+    if timing is None:
+        return
+    receipt = timing.finish(outcome)
+    encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    # The retained value is immutable, and exactly matches the one log record.
+    metrics['last_timing_receipt_json'] = encoded
+    print(_TIMING_PREFIX + ' ' + encoded, flush=True)
+
+
 def _database_url()->str:
     dedicated=os.getenv('RESEARCH_DATABASE_URL','').strip()
     return dedicated or (os.getenv('DATABASE_URL','').strip() if os.getenv('RESEARCH_USE_PRIMARY_DATABASE','').strip().lower() in _TRUE else '')
@@ -45,7 +150,7 @@ class ResearchFormulaOrderedWorker:
         self._task=None
         self._stopping=False
         self._schema_ready=False
-        self.metrics={'runs':0,'failures':0,'last_run_utc':None,'last_error':None,'last_stage':None,'last_summary':None}
+        self.metrics={'runs':0,'failures':0,'last_run_utc':None,'last_error':None,'last_stage':None,'last_summary':None,'last_timing_receipt_json':None}
 
     def status(self)->dict[str,Any]:
         return {'enabled':_ENABLED,'configured':bool(_database_url()),'running':bool(self._task and not self._task.done()),
@@ -104,12 +209,33 @@ class ResearchFormulaOrderedWorker:
             await asyncio.sleep(_POLL)
 
     def run_once(self,*,now:datetime|None=None)->dict[str,Any]:
+        timing = None
+        try:
+            # Never present an older successful receipt as this invocation.
+            self.metrics['last_timing_receipt_json'] = None
+            timing = _PassTiming()
+        except Exception:
+            pass
+        outcome = 'failed'
+        try:
+            summary = self._run_once(now=now, timing=timing)
+            # This point is after the original cleanup and connection exit.
+            outcome = 'locked' if summary.get('locked') else 'completed'
+            return summary
+        finally:
+            try:
+                _publish_timing(self.metrics, timing, outcome)
+            except Exception:
+                pass
+
+    def _run_once(self,*,now:datetime|None=None,timing=None)->dict[str,Any]:
         now=now or datetime.now(timezone.utc)
         started=time.monotonic()
         summary={'scopes_evaluated':0,'unchanged_scopes_skipped':0,'episodes':0,'upserts':0,'truncated_scopes':0,'locked':False}
         url=_database_url()
         if not url or psycopg is None:
             raise RuntimeError('Ordered Formula research database is unavailable')
+        _timing_phase(timing, 'connect_lock')
         with _connect(url) as conn:
             acquired=conn.execute('SELECT pg_try_advisory_lock(%s) AS acquired',(_LOCK_ID,)).fetchone()['acquired']
             conn.commit()
@@ -117,10 +243,13 @@ class ResearchFormulaOrderedWorker:
                 summary['locked']=True
                 return summary
             try:
+                _timing_phase(timing, 'catalog')
                 self.metrics['last_stage']='REGISTER_CATALOG'
                 catalog=store.register_catalog(conn)
+                _timing_phase(timing, 'intake')
                 self.metrics['last_stage']='INGEST_MATCHES'
                 summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
+                _timing_phase(timing, 'inverse')
                 self.metrics['last_stage']='INVERSE_RECONCILIATION'
                 inverse_available=inverse_store.available(conn)
                 if inverse_available:
@@ -129,6 +258,7 @@ class ResearchFormulaOrderedWorker:
                 else:
                     summary['inverse_status']='BLOCKED_MISSING_MIGRATION_033'
                 conn.commit()
+                _timing_phase(timing, 'queue')
                 self.metrics['last_stage']='PREPARE_SCOPE_QUEUE'
                 validation_available=validation_store.schema_status(conn)['schema_present']
                 experimental_available=experimental_worker.enabled() and experimental_store.available(conn)
@@ -146,6 +276,7 @@ class ResearchFormulaOrderedWorker:
                     scopes=store.interleave_experimental_refresh(scopes,priority,limit=_SCOPE_LIMIT)
                 feature_coverage_cache={}
                 conn.commit()
+                _timing_phase(timing, None)
                 # Intake and reconciliation have separate row/query bounds.
                 # Their latency must not consume the scope-evaluation budget.
                 evaluation_started=time.monotonic()
@@ -161,16 +292,22 @@ class ResearchFormulaOrderedWorker:
                         break
                     population_complete=period_population[scope['period_key']]
                     self.metrics['last_stage']='EVALUATE_SCOPE:'+scope['scope_key']
+                    _timing_phase(timing, 'feature_coverage')
                     feature_key=(scope['candidate_key'],scope['symbol'],scope['direction'],scope['period_key'])
                     if feature_key not in feature_coverage_cache:
                         feature_coverage_cache[feature_key]=store.candidate_feature_coverage_complete(conn,scope,candidates[scope['candidate_key']],now=now)
                     feature_coverage=feature_coverage_cache[feature_key]
                     candidate_population_complete=bool(population_complete and feature_coverage['complete'])
+                    _timing_phase(timing, 'scope_rows')
                     rows,truncated=store.load_scope_rows(conn,scope,row_limit=_ROW_LIMIT,now=now)
+                    _timing_phase(timing, 'membership')
                     mappings_complete=store.membership_complete(conn,scope,now=now)
+                    _timing_phase(timing, 'common_windows')
                     common_rows=store.common_window_rows(conn,scope,rows)
+                    _timing_phase(timing, 'input_hash')
                     input_sha=question_store.evaluation_input(scope,[{**row,'common_window_record':common_rows.get(row['event_id'])} for row in rows],now=now,population_complete=candidate_population_complete,membership_complete=mappings_complete)
                     input_sha=store.digest({'input':input_sha,'validation_available':validation_available,'registered_attempts':attempts})
+                    _timing_phase(timing, None)
                     # A still-active grant may coexist with a newer OPEN-wave
                     # result whose research_ready is false. Recheck selected
                     # grants even when the frozen input hash did not change,
@@ -179,11 +316,14 @@ class ResearchFormulaOrderedWorker:
                         scope['scope_key'] in priority_scope_ids
                         or (scope.get('result') or {}).get('research_ready')))
                     if scope.get('evaluation_input_sha256')==input_sha and not refresh_qualification:
+                        _timing_phase(timing, 'persist_unchanged')
                         conn.execute('UPDATE research_ordered_formula_scopes SET last_evaluated_at_utc=%s WHERE scope_key=%s',(now,scope['scope_key']))
                         summary['upserts']+=store.publication.seed_missing_scope(conn,scope,store.scope_formula_version(scope))
                         conn.commit()
                         summary['unchanged_scopes_skipped']+=1
+                        _timing_phase(timing, None)
                         continue
+                    _timing_phase(timing, 'summary_and_period')
                     result=evaluator.summarize_scope(rows,analysis_as_of_utc=now,truncated=truncated,source_coverage_complete=bool(candidate_population_complete and mappings_complete))
                     result['candidate_feature_coverage']=feature_coverage
                     result['past_price_coverage']={'representative_events':len(rows),
@@ -200,6 +340,7 @@ class ResearchFormulaOrderedWorker:
                     if not feature_coverage['complete']:
                         result['exclusion_reasons']['REQUIRED_PAST_FEATURES_UNKNOWN_FOR_POSSIBLE_EARLIER_MATCH']=1
                     if validation_available:
+                        _timing_phase(timing, 'validation')
                         contract={**scope,**store.period_contract(scope),'parent_policy_version':store.PARENT_POLICY}
                         # One exact definition enters policy registration and
                         # freeze. v2 added direction_mode only to the latter,
@@ -218,6 +359,7 @@ class ResearchFormulaOrderedWorker:
                             experimental_store.publish_evaluation(conn,scope,validated,now=now,rows=rows,common_window_rows=common_rows)
                         if 'all_period_metrics' in validated:
                             question_store.apply_validation_cohorts(result,validated)
+                    _timing_phase(timing, 'persist_changed')
                     counts=store.persist_scope(conn,scope,rows,result,now=now)
                     question_store.record_scope_trial(conn,candidates[scope['candidate_key']],scope,result,input_sha=input_sha,now=now)
                     conn.execute('UPDATE research_ordered_formula_scopes SET evaluation_input_sha256=%s WHERE scope_key=%s',(input_sha,scope['scope_key']))
@@ -226,11 +368,15 @@ class ResearchFormulaOrderedWorker:
                     summary['truncated_scopes']+=int(truncated)
                     for name in ('episodes','upserts'):
                         summary[name]+=counts[name]
+                    _timing_phase(timing, None)
                 summary['evaluation_seconds']=round(time.monotonic()-evaluation_started,3)
             finally:
+                _timing_phase(timing, None)
+                _timing_phase(timing, 'cleanup')
                 conn.rollback()
                 conn.execute('SELECT pg_advisory_unlock(%s)',(_LOCK_ID,))
                 conn.commit()
+        _timing_phase(timing, None)
         summary['elapsed_seconds']=round(time.monotonic()-started,3)
         self.metrics['runs']+=1
         self.metrics['last_run_utc']=now.isoformat()
