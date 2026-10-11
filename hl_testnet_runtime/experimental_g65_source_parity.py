@@ -54,6 +54,7 @@ def compare(producer_root, *, seed=65, cases=4000):
         Decimal=Decimal, InvalidOperation=InvalidOperation, uuid4=uuid4,
         MINUTE=timedelta(minutes=1), SIGNAL_TTL=timedelta(seconds=90),
         _connect=lambda _: contextlib.nullcontext(None), key_for=lambda _: 'offline-parity',
+        source_transaction=lambda *_args: contextlib.nullcontext((None, set())),
         _save=lambda *args: None, _maintain=lambda *args: None)
     exec(compile(selected, 'frozen_producer_g65_decision_ast', 'exec'), namespace)
     rng = random.Random(seed)
