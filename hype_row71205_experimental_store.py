@@ -17,6 +17,7 @@ import re
 from uuid import uuid4
 
 from watch_transition_store import _connect
+from approved_alert_outbox import source_transaction, synchronize_source
 
 STORE_VERSION = 'hype-row71205-experimental-cap1-v1'
 CONFIG_VERSION = 'hype-row71205-short-sl005-tp02-corrected-closed1m-v1'
@@ -181,8 +182,9 @@ def _locked(conn, key, config_sha256=None):
     return state
 
 
-def _save(conn, key, state):
+def _save(conn, key, state, now, execution_changes):
     conn.execute('UPDATE bot_settings SET value=%s WHERE key=%s', (_encode(state), key))
+    synchronize_source(conn, key, state, now, execution_changes)
 
 
 def _count(state, name):
@@ -230,7 +232,7 @@ def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None,
     if migrate_from_config_sha256 is not None:
         _validate_source_migration_request(config_sha256, migrate_from_config_sha256)
     key = key_for(scope)
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         _lock(conn, key)
         moment = utc(now or conn.execute('SELECT clock_timestamp() AS now').fetchone()['now'])
         conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING',
@@ -244,13 +246,13 @@ def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None,
         else:
             _validate(state, config_sha256)
             _maintain(state, moment)
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return deepcopy(state)
 
 
 def snapshot(scope, *, database_url=None):
     """Read-only snapshot; missing scopes are not implicitly activated."""
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         row = conn.execute('SELECT value FROM bot_settings WHERE key=%s', (key_for(scope),)).fetchone()
         if row is None:
             return None
@@ -274,7 +276,7 @@ def _decision_status(state, decision, now):
 def record_no_signal(scope, decision_at, now, *, reason='NO_MATCH', config_sha256=None, database_url=None):
     """Freeze the decision once, including unavailable/stale/blocked slots."""
     decision, moment = utc(decision_at), utc(now)
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
@@ -284,7 +286,7 @@ def record_no_signal(scope, decision_at, now, *, reason='NO_MATCH', config_sha25
             state['last_decision'] = {'decision_at': iso(decision), 'status': str(reason), 'observed_at': iso(moment)}
             _count(state, 'decisions')
             status = str(reason)
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return {'status': status, 'decision_cursor': state['decision_cursor']}
 
 
@@ -304,17 +306,17 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
         raise ValueError('Frozen features must be an object')
     # Freeze/validate before touching the state, including finite JSON numbers.
     frozen_features = json.loads(json.dumps(features, allow_nan=False))
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
         status = _decision_status(state, decision, moment)
         if status is not None:
-            _save(conn, key, state)
+            _save(conn, key, state, moment, execution_changes)
             return {'status': status, 'position': deepcopy(state['active']), 'intent': None}
         if entry > moment:
             # Unlike stale/occupied decisions this slot has not matured yet.
-            _save(conn, key, state)
+            _save(conn, key, state, moment, execution_changes)
             return {'status': 'ENTRY_NOT_AVAILABLE', 'position': deepcopy(state['active']), 'intent': None}
         state['decision_cursor'] = iso(decision)
         _count(state, 'decisions')
@@ -329,7 +331,7 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
         state['last_decision'] = {'decision_at': iso(decision), 'status': status, 'observed_at': iso(moment)}
         if status != 'RESERVED':
             _count(state, 'suppressed_' + status.lower())
-            _save(conn, key, state)
+            _save(conn, key, state, moment, execution_changes)
             return {'status': status, 'position': deepcopy(state['active']), 'intent': None}
         position = {'position_id': uuid4().hex, 'rule_id': 'HYPE_ROW71205_SHORT', 'symbol': 'HYPE', 'direction': 'SHORT',
                 'price_source': PRICE_SOURCE, 'source_contract_version': SOURCE_CONTRACT_VERSION,
@@ -348,7 +350,7 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
         state['intents'].append(intent)
         _maintain(state, moment)
         _count(state, 'reserved')
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return {'status': status, 'position': deepcopy(position), 'intent': deepcopy(intent)}
 
 
@@ -376,16 +378,16 @@ def advance_position(scope, closedbars, now, *, position_id=None, config_sha256=
     bars = [_bar(raw) for raw in closedbars]
     if any(bars[i][0] >= bars[i+1][0] for i in range(len(bars)-1)):
         raise ValueError('Closed bars must be unique and ascending')
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
         active = state['active']
         if active is None or (position_id is not None and active['position_id'] != position_id):
-            _save(conn, key, state)
+            _save(conn, key, state, moment, execution_changes)
             return {'status': 'NO_ACTIVE_POSITION' if active is None else 'POSITION_CHANGED', 'processed_bars': 0}
         if active.get('monitor_status') == 'AMBIGUOUS':
-            _save(conn, key, state)
+            _save(conn, key, state, moment, execution_changes)
             return {'status': 'AMBIGUOUS', 'processed_bars': 0, 'position': deepcopy(active)}
         processed = 0
         status = 'NO_NEW_CLOSED_BARS'
@@ -415,7 +417,7 @@ def advance_position(scope, closedbars, now, *, position_id=None, config_sha256=
                 active.update(monitor_status='AMBIGUOUS', ambiguous_at=iso(when+MINUTE),
                               ambiguous_bar={k: float(v) for k, v in prices.items()})
                 _count(state, 'ambiguous')
-                _save(conn, key, state)
+                _save(conn, key, state, moment, execution_changes)
                 return {'status': 'AMBIGUOUS', 'processed_bars': processed, 'position': deepcopy(active)}
             elif prices['high'] >= stop:
                 outcome, exit_price = 'SL', stop
@@ -435,19 +437,19 @@ def advance_position(scope, closedbars, now, *, position_id=None, config_sha256=
                         _count(state, 'cancelled')
                 _count(state, outcome.lower())
                 _maintain(state, moment)
-                _save(conn, key, state)
+                _save(conn, key, state, moment, execution_changes)
                 return {'status': 'CLOSED', 'processed_bars': processed, 'position': finished}
             status = 'OPEN'
         if not bars:
             active['monitor_status'] = 'NO_PRICE_DATA'
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return {'status': status, 'processed_bars': processed, 'position': deepcopy(active)}
 
 
 def claim_pending(scope, now, *, expected_position_id=None, config_sha256=None, database_url=None):
     """Commit the unique attempt token before the caller contacts Telegram."""
     moment = utc(now)
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
@@ -469,7 +471,7 @@ def claim_pending(scope, now, *, expected_position_id=None, config_sha256=None, 
             result = deepcopy(intent)
             _count(state, 'attempted')
             break
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return result
 
 
@@ -481,7 +483,7 @@ def cancel_pending(scope, position_id, now, *, reason='PRE_SEND_VETO', config_sh
     completed-bar oracle can do so. Claimed/ambiguous deliveries cannot be reset.
     """
     moment = utc(now)
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
@@ -491,7 +493,7 @@ def cancel_pending(scope, position_id, now, *, reason='PRE_SEND_VETO', config_sh
                 intent.update(status='CANCELLED', acknowledged_at=iso(moment), error_type=str(reason)[:160])
                 _count(state, 'cancelled')
                 changed += 1
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return changed
 
 
@@ -502,7 +504,7 @@ def finish_attempt(scope, intent_id, attempt_token, status, now, *, message_id=N
     if status == 'DELIVERED' and (type(message_id) is not int or message_id <= 0):
         raise ValueError('Positive Telegram message id required')
     moment = utc(now)
-    with _connect(database_url) as conn:
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
         _maintain(state, moment)
@@ -511,7 +513,7 @@ def finish_attempt(scope, intent_id, attempt_token, status, now, *, message_id=N
                 intent.update(status=status, acknowledged_at=iso(moment), message_id=message_id,
                               error_type=str(error_type)[:160] if error_type else None)
                 _count(state, status.lower())
-                _save(conn, key, state)
+                _save(conn, key, state, moment, execution_changes)
                 return True
-        _save(conn, key, state)
+        _save(conn, key, state, moment, execution_changes)
         return False

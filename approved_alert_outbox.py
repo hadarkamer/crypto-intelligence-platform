@@ -6,9 +6,10 @@ cancellations compact into permanent identity tombstones, so notification
 history pruning and process restarts cannot recreate an old occurrence.
 """
 import json
+from contextlib import contextmanager
 
 import approved_alert_contract as contract
-from approved_alert_producer import isolated_records
+from approved_alert_producer import isolated_records, source_positions, source_open, source_end_ms
 
 TABLE = 'approved_alert_execution_outbox'
 MAX_PENDING = 8192
@@ -20,7 +21,7 @@ def synchronize(conn, source_key, state, now_ms):
         'SELECT occurrence_id,source_position_id,payload_json,source_sequence,canceled '
         'FROM approved_alert_execution_outbox WHERE source_key=%s AND NOT canceled',
         (source_key,)).fetchall()
-    positions = {p['position_id']: p for p in state.get('active', []) + state.get('history', [])}
+    positions = {p['position_id']: p for p in source_positions(state)}
     records, ids, errors = isolated_records(state, now_ms=now_ms, fence_ms=1)
     if errors:
         print(f'[approved-execution] isolated invalid source occurrences count={len(errors)}', flush=True)
@@ -38,11 +39,9 @@ def synchronize(conn, source_key, state, now_ms):
                 ids.pop(identity, None)
                 raise contract.ContractError('APPROVED_OUTBOX_CONFLICT')
             observed = positions.get(row['source_position_id'])
-            if observed is not None and observed.get('status') == 'OPEN':
+            if source_open(state, observed):
                 continue
-            as_of = max(contract.moment_ms(value['approved_at']),
-                        ((observed or {}).get('terminal_ms') or (observed or {}).get('unknown_ms')
-                         or state['bar_cursor_ms']) + 60_000)
+            as_of = source_end_ms(state, observed, value)
             if as_of > now_ms:
                 raise contract.ContractError('FUTURE_SOURCE_STATE')
             value.update(kind='CANCEL', source_state='CANCELED', source_as_of=contract.iso_ms(as_of),
@@ -146,3 +145,32 @@ def acknowledge(conn, source_keys, value):
         'WHERE source_key=ANY(%s) AND occurrence_id=%s AND source_sequence=%s '
         'AND acknowledged_sequence<source_sequence',
         (value['source_sequence'], list(source_keys), value['occurrence_id'], value['source_sequence']))
+
+
+@contextmanager
+def source_transaction(connect, database_url):
+    """Existing source commit, then wake the existing sender only on outbox work."""
+    changed = set()
+    with connect(database_url) as conn:
+        yield conn, changed
+    for key in changed:
+        try:
+            from experimental_execution_forwarder import notify_source_commit
+            notify_source_commit(key)
+        except Exception:
+            print('[approved-execution] wake unavailable; durable recovery pending', flush=True)
+
+
+def synchronize_source(conn, key, state, now, changed):
+    from experimental_execution_bridge import approved_enabled
+    if not approved_enabled():
+        return
+    conn.execute('SAVEPOINT approved_execution_outbox')
+    try:
+        if synchronize(conn, key, state, contract.moment_ms(now.isoformat())):
+            changed.add(key)
+    except Exception:
+        conn.execute('ROLLBACK TO SAVEPOINT approved_execution_outbox')
+        print('[approved-execution] outbox unavailable; source decision preserved', flush=True)
+    finally:
+        conn.execute('RELEASE SAVEPOINT approved_execution_outbox')
