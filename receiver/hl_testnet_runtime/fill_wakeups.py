@@ -1,6 +1,6 @@
-"""Bounded Testnet notifications that wake authoritative REST reconciliation.
+"""Bounded Testnet notifications and pending fills for durable reconciliation.
 
-No websocket value becomes trade evidence, an order, or an execution decision.
+Callbacks only validate and stage fills; the runtime must commit their reduction.
 Each account has its own socket because ``orderUpdates`` omits its user. Startup,
 disconnect, malformed data and a notification invalidate the entry gate until a
 complete current REST observation has been saved for the same generation/revision.
@@ -9,6 +9,7 @@ Protocol: Hyperliquid's official websocket, subscriptions and heartbeat docs.
 The pinned hyperliquid-python-sdk 0.24.0 already depends on websocket-client.
 """
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import re
@@ -16,6 +17,7 @@ import threading
 import time
 
 from . import passive_timing
+from .card_sync_evidence import normalize_fill
 
 
 TESTNET_WS = 'wss://api.hyperliquid-testnet.xyz/ws'
@@ -24,6 +26,7 @@ MAX_FRAME_BYTES = 1024 * 1024
 MAX_BATCH_ROWS = 10000
 MAX_SYMBOLS = 64
 MAX_SEEN = 256
+MAX_PENDING_FILLS = 4096
 PING_INTERVAL = 25.0
 PONG_TIMEOUT = 10.0
 BOOTSTRAP_TIMEOUT = 15.0
@@ -43,6 +46,22 @@ class ReconciliationToken:
     generation: int
     revision: int
     started: float
+
+
+@dataclass(frozen=True)
+class PendingFillBatch:
+    """Detached, non-destructive sample; acknowledge only after durable commit.
+
+    Sequence numbers never reset at a socket reconnect. They identify precisely
+    the sampled rows, so an old acknowledgement cannot remove a later arrival.
+    Fills are individual facts, never proof of complete account history.
+    """
+    account: str
+    items: tuple
+
+    @property
+    def fills(self):
+        return tuple(deepcopy(fill) for _, fill in self.items)
 
 
 def _address(value):
@@ -94,7 +113,8 @@ observation is durably saved. Events concurrent with that observation prevent
         self._sockets = {}
         self._states = {account: dict(generation=0, revision=0, connected=False,
             acknowledged=set(), snapshot=False, reconciled=False, dirty_all=True,
-            dirty_symbols=set(), seen=OrderedDict(), last_receive=None,
+            dirty_symbols=set(), seen=OrderedDict(), pending_fills=OrderedDict(),
+            fill_sequence=0, last_receive=None,
             opened=None, ping_at=None, last_ping=None, last_rest=None,
             protocol_failure=None,
             status='STARTUP_RECONCILIATION_REQUIRED')
@@ -210,6 +230,51 @@ observation is durably saved. Events concurrent with that observation prevent
             return tuple(account for account, state in self._states.items()
                          if not state['reconciled'])
 
+    def pending_fills(self, account=None):
+        """Peek at buffered individual facts without consuming or clearing gates.
+
+        Without an account, return batches only for accounts with pending fills.
+        An explicit account returns its batch, including an empty batch.
+        """
+        account = self._account(account) if account is not None else None
+        with self._lock:
+            def batch(key):
+                return PendingFillBatch(key, tuple(deepcopy(value)
+                    for value in self._states[key]['pending_fills'].values()))
+            if account is not None:
+                return batch(account)
+            return tuple(batch(key) for key, state in self._states.items()
+                         if state['pending_fills'])
+
+    def acknowledge_fills(self, batch):
+        """Remove only captured unchanged rows after the runtime commits them.
+
+        This acknowledges buffer delivery only, never continuity, current
+        positions, order status or complete-history coverage.
+        """
+        if (not isinstance(batch, PendingFillBatch)
+                or not isinstance(batch.account, str) or not isinstance(batch.items, tuple)):
+            return False
+        with self._lock:
+            state = self._states.get(batch.account)
+            if state is None:
+                return False
+            captured = set()
+            for item in batch.items:
+                if (not isinstance(item, tuple) or len(item) != 2
+                        or type(item[0]) is not int or not isinstance(item[1], dict)):
+                    return False
+                sequence, fill = item
+                fid = fill.get('fill_id')
+                if not isinstance(fid, str):
+                    return False
+                current = state['pending_fills'].get(fid)
+                if current is not None and current == (sequence, fill):
+                    captured.add(fid)
+            for fid in captured:
+                del state['pending_fills'][fid]
+            return True
+
     def dirty_symbols(self, account):
         """None means reconcile the entire account; otherwise a bounded tuple."""
         account = self._account(account)
@@ -228,12 +293,13 @@ observation is durably saved. Events concurrent with that observation prevent
                 subscriptions_acknowledged=len(self._states[account]['acknowledged']),
                 reconciliation_required=not self._states[account]['reconciled'],
                 entry_allowed=self.entry_allowed(account),
+                pending_fill_count=len(self._states[account]['pending_fills']),
                 pending_symbols=len(self._states[account]['dirty_symbols']),
                 all_symbols=self._states[account]['dirty_all'])
                 for role, account in self._routes.items()}
 
     def _receive(self, account, generation, raw):
-        # Stage bounded scalar identities only; the diagnostic sink is never
+        # Stage bounded scalar diagnostic identities; the diagnostic sink is never
         # called while holding the feed lock. Snapshots/duplicates are excluded.
         received = passive_timing.stamp()
         events = [] if received is not None else None
@@ -264,7 +330,7 @@ observation is durably saved. Events concurrent with that observation prevent
         return accepted
 
     def _receive_message(self, account, generation, raw, *, timing_events=None, timing_gaps=None):
-        """Consume only notification identities/symbols; retain no wire evidence."""
+        """Validate a whole frame, then stage canonical fills and bounded hints."""
         try:
             if not isinstance(raw, (str, bytes)) or len(raw) > MAX_FRAME_BYTES:
                 raise ValueError()
@@ -341,6 +407,9 @@ observation is durably saved. Events concurrent with that observation prevent
                         raise ValueError()
                     hints = set()
                     identities = []
+                    incoming_fills = OrderedDict()
+                    fill_fingerprints = {}
+                    fill_identities = {}
                     for row in rows:
                         if channel == 'userFills':
                             reason='INVALID_FILL_IDENTITY'
@@ -349,6 +418,23 @@ observation is durably saved. Events concurrent with that observation prevent
                                 raise ValueError()
                             symbol = row['coin']
                             identity = (channel, symbol, row['time'], row['tid'], row['oid'])
+                            # Historical identity-only fixtures remain wake-only.
+                            # Any attempted economic payload must fully validate;
+                            # no partial price/quantity can become fill evidence.
+                            if set(row) - {'coin', 'time', 'tid', 'oid'}:
+                                reason = 'INVALID_FILL_FACT'
+                                value = normalize_fill(row, account, symbol, 1, 10**15-1)
+                                fid = value['fill_id']
+                                reason = 'FILL_FACT_CHANGED'
+                                known = state['pending_fills'].get(fid)
+                                seen_fact = state['seen'].get(identity)
+                                if ((known is not None and known[1] != value)
+                                        or (seen_fact is not None and seen_fact != value)
+                                        or (fid in incoming_fills and incoming_fills[fid] != value)):
+                                    raise ValueError()
+                                incoming_fills[fid] = value
+                                fill_fingerprints[identity] = value
+                                fill_identities[fid] = identity
                         else:
                             reason='INVALID_ORDER_HINT'
                             order = row.get('order') if isinstance(row, dict) else None
@@ -364,10 +450,28 @@ observation is durably saved. Events concurrent with that observation prevent
                             hints.add(symbol)
                             identities.append(identity)
                     # Validate the whole bounded batch before mutating readiness.
+                    # Reuse the existing bounded notification cache: after
+                    # commit, an identical same-session replay should neither
+                    # restage the fact nor cause another REST wakeup. Eviction
+                    # or reconnect can replay it; the durable reducer still
+                    # deduplicates against the committed lifecycle facts.
+                    fresh_fills = [(fid, value) for fid, value in incoming_fills.items()
+                                   if fid not in state['pending_fills']
+                                   and state['seen'].get(fill_identities[fid]) != value]
+                    reason = 'PENDING_FILL_BUFFER_FULL'
+                    if len(state['pending_fills']) + len(fresh_fills) > MAX_PENDING_FILLS:
+                        raise ValueError()
+                    for fid, value in fresh_fills:
+                        state['fill_sequence'] += 1
+                        state['pending_fills'][fid] = (state['fill_sequence'], value)
+                        hints.add(value['symbol'])
                     for identity in identities:
-                        state['seen'][identity] = None
+                        state['seen'][identity] = fill_fingerprints.get(identity)
                         if len(state['seen']) > MAX_SEEN:
                             state['seen'].popitem(last=False)
+                    for identity, value in fill_fingerprints.items():
+                        if identity in state['seen']:
+                            state['seen'][identity] = value
                     if snapshot:
                         state['snapshot'] = True
                         state['status'] = 'SNAPSHOT_RECONCILIATION_REQUIRED'
@@ -428,8 +532,11 @@ observation is durably saved. Events concurrent with that observation prevent
                     self._sockets[account] = socket
                 generation = self._opened(account)
                 for channel in sorted(CHANNELS):
+                    subscription = dict(type=channel, user=account)
+                    if channel == 'userFills':
+                        subscription['aggregateByTime'] = False
                     socket.send(json.dumps(dict(method='subscribe',
-                        subscription=dict(type=channel, user=account))))
+                        subscription=subscription)))
                 while not self._stop.is_set():
                     heartbeat = self._heartbeat(account, generation)
                     if heartbeat == 'CLOSE':

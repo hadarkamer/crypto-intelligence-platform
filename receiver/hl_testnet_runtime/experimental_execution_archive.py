@@ -20,7 +20,7 @@ MAX_BATCH = 32
 MAX_SCAN = 128
 MAX_BATCH_BYTES = 2*1024*1024
 MAX_RECORD_BYTES = 16*1024*1024
-FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
+FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
 TERMINAL = frozenset(('FILLED', 'CANCELED', 'REJECTED'))
 EXTRAS = ('formula_states', 'source_condition_errors', 'entry_blocked', 'entry_decisions')
 
@@ -96,6 +96,9 @@ def _eligible(state, cid, now):
         return deadline is not None and now >= contract.moment_ms(deadline)
     if trade['phase'] not in FINAL or trade.get('pending_notifications') or trade.get('pending_actions'):
         return False
+    if trade['phase']=='MANUALLY_CLOSED':
+        from .experimental_external_activity import closure_verified
+        return closure_verified(trade) and all(r['phase'] in ('OBSERVED','ABORTED_UNSENT') for r in requests)
     lane = _lane(trade['account'], trade['symbol'])
     if state.get('blocked_lanes', {}).get(lane):
         return False
@@ -138,6 +141,9 @@ def _bundle(state, cid, now):
         for key in ('snapshots', 'collector_checkpoints'):
             if lane in state.get(key, {}):
                 result['snapshots'][key] = deepcopy(state[key][lane])
+    if trade and trade['phase']=='MANUALLY_CLOSED':
+        result['snapshots']['collector_checkpoints']=deepcopy(trade['manual_closure_snapshot'])
+        result['snapshots'].pop('snapshots',None)
     return result
 
 
@@ -219,6 +225,51 @@ class _SQL:
 
 class HistoryMixin:
     """Store-specific fields below select the existing transaction and validator."""
+    @contextmanager
+    def _history_snapshot(self):
+        """One checked read snapshot, without the trading writer lock.
+
+        PostgreSQL needs REPEATABLE READ because the card spans state, archive
+        and source updates. Use a separate connection: the journal's normal
+        transaction has already queried the database before yielding, and a
+        leased writer connection must not be borrowed for presentation reads.
+        SQLite keeps its configured journal mode; query_only is connection-local.
+        """
+        from .experimental_execution_state import checked as software_checked
+        if hasattr(self, 'path'):
+            with closing(self._connect()) as conn:
+                try:
+                    conn.execute('PRAGMA query_only=ON')
+                    conn.execute('BEGIN')
+                    row = conn.execute('SELECT value,checksum FROM experimental_state WHERE singleton=1').fetchone()
+                    if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
+                    yield _SQL(conn), software_checked(*row)
+                finally:
+                    conn.rollback()
+            return
+        if self.domain == 'testnet':
+            from .experimental_live_state import checked, PG_SCHEMA
+        else:
+            from .experimental_execution_state import PG_SCHEMA
+            checked = software_checked
+        from .postgres_journal import JournalError
+        # Keep the journal's identity and redacted failure policy, but configure
+        # the transaction before its first SELECT establishes a snapshot.
+        try:
+            with self.journal._connect() as conn:
+                conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+                actual = conn.execute('SELECT current_database()').fetchone()[0]
+                if actual != self.journal._parameters['dbname']:
+                    raise JournalError('WRONG_DATABASE')
+                if self.domain == 'testnet': self._ready(conn)
+                row = conn.execute(f'SELECT value,checksum FROM {PG_SCHEMA}.state WHERE singleton').fetchone()
+                if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
+                yield _SQL(conn, PG_SCHEMA), checked(*row)
+        except JournalError:
+            raise
+        except Exception:
+            raise JournalError('PERSISTENCE_UNAVAILABLE_NO_SEND') from None
+
     @contextmanager
     def _history_transaction(self):
         from .experimental_execution_state import checked as software_checked, encode
@@ -315,8 +366,14 @@ class HistoryMixin:
         life.moment(now_ms)
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH or type(scan_limit) is not int or not 1 <= scan_limit <= MAX_SCAN:
             raise _error('BOUNDED_HISTORY_BATCH_REQUIRED')
-        if not self.load().get('history'):
+        history = self.load().get('history')
+        if not history:
             return dict(status='EXPLICIT_HISTORY_INITIALIZATION_REQUIRED', archived=0)
+        prior = history['last_maintenance_ms']
+        if prior is not None and now_ms < prior:
+            raise _error('HISTORY_CLOCK_REGRESSION')
+        if not force and prior is not None and now_ms-prior < INTERVAL_MS:
+            return dict(status='HISTORY_INTERVAL_NOT_DUE', archived=0)
         with self._history_transaction() as (db, state, save):
             history = state.get('history')
             if not history:
@@ -345,7 +402,7 @@ class HistoryMixin:
                 db.insert(record); _prune(state, record)
                 history['archived_count'] += 1
                 history['archived_trades'] += int(record['trade'] is not None)
-                history['archived_closed'] += int(record['trade'] is not None and record['trade']['phase'] == 'CLOSED')
+                history['archived_closed'] += int(record['trade'] is not None and record['trade']['phase'] in ('CLOSED','MANUALLY_CLOSED'))
                 archived += 1; total_bytes += size
                 if archived >= batch_size or total_bytes >= MAX_BATCH_BYTES: break
             history['last_maintenance_ms'] = now_ms
@@ -371,7 +428,7 @@ class HistoryMixin:
         if (type(after_update_revision) is not int or after_update_revision < 0
                 or type(update_limit) is not int or not 1 <= update_limit <= 100):
             raise _error('BOUNDED_HISTORY_PAGE_REQUIRED')
-        with self._history_transaction() as (db, state, _save):
+        with self._history_snapshot() as (db, state):
             if cid in state['trades']:
                 return dict(card=_card(state, cid), location='active',
                     snapshot_revision=state['revision'],

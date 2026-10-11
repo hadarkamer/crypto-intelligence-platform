@@ -9,7 +9,7 @@ history can be reconstructed from this archive.
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, parse_qsl
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life
 
 MINUTE_MS = 60000

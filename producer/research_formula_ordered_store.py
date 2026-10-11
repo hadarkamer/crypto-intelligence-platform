@@ -349,14 +349,17 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         features_by_id[event['event_id']]=features
         if not any(name.endswith('.aligned_score') and value is not None for name,value in features.items()):
             missing_features += 1
+        features_json = None
         for candidate in catalog:
             if evaluator.matches(candidate,features,event['direction']):
                 snapshot = event.get('engine_snapshot') or {}
                 inverse=candidate.get('research_orientation')=='INVERSE'
                 if inverse: inverse_requests.add(event['event_id'])
                 direction=({'LONG':'SHORT','SHORT':'LONG'}[event['direction']] if inverse else event['direction'])
+                if features_json is None:
+                    features_json = canonical(features)
                 records.append((candidate['formula_id'],event['event_id'],event['symbol'],direction,event['alert_time_utc'],
-                                snapshot.get('sheet_snapshot_id') or event['event_fingerprint'],event['current_price'],canonical(features)))
+                                snapshot.get('sheet_snapshot_id') or event['event_fingerprint'],event['current_price'],features_json))
     screens=question_store.record_screens(conn,changed,features_by_id,catalog,now=now,inverse_requested=inverse_requests)
     for refresh in past_refresh:
         # ACK is conditional on the captured version and commits atomically
@@ -447,6 +450,9 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
     # matching cards/coins are retained, so missing labels cannot select winners.
     cutoff=period_contract(scope)['period_start_utc']
     now=now or datetime.now(timezone.utc)
+    # Inverse scopes replace forward labels below; do not hydrate discarded
+    # outcome payloads while loading the same outcome-blind representatives.
+    is_inverse=str(scope['candidate_key']).startswith(questions.VERSION+':INVERSE:')
     candidate_count=conn.execute("SELECT COUNT(*) AS n FROM (SELECT event_id FROM research_ordered_formula_matches WHERE candidate_key=%s AND direction=%s AND (%s='ALL' OR symbol=%s) AND alert_time_utc>=%s AND alert_time_utc<=%s LIMIT 10001) bounded",(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now)).fetchone()['n']
     rows=conn.execute('''
         WITH source_matches AS MATERIALIZED (
@@ -464,7 +470,7 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
             JOIN research_btc_parent_movements parent ON parent.btc_parent_movement_id=membership.btc_parent_movement_id
               AND parent.episode_policy_version=%s AND parent.evidence_eligible IS TRUE
               AND parent.start_time_utc>=%s
-            WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s)
+            -- source_matches already applies candidate, direction and symbol filters.
         ), representatives AS MATERIALIZED (
             SELECT * FROM matched WHERE alert_time_utc=first_match_time
             ORDER BY alert_time_utc,btc_parent_movement_id,event_id LIMIT %s
@@ -476,16 +482,16 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
                     ELSE to_jsonb(o)-'calculation_audit'-'threshold_policy' END AS ordered_outcome
         FROM representatives m LEFT JOIN research_ordered_first_touch_outcomes o
           ON o.event_id=m.event_id AND o.window_minutes=%s AND o.threshold_bps=%s
-             AND o.method_version='ordered-first-touch-v7'
+             AND o.method_version='ordered-first-touch-v7' AND %s
         ORDER BY m.alert_time_utc,m.event_id
-    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],row_limit+1,
-         scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'])).fetchall()
+    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,row_limit+1,
+         scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],not is_inverse)).fetchall()
     truncated=len(rows)>row_limit or candidate_count>10000
     if len(rows)>row_limit:
         # Never describe a partial simultaneous cohort at the row-budget edge.
         last_parent=rows[row_limit]['btc_parent_movement_id']
         rows=[row for row in rows[:row_limit] if row['btc_parent_movement_id']!=last_parent]
-    if str(scope['candidate_key']).startswith(questions.VERSION+':INVERSE:'):
+    if is_inverse:
         import research_ordered_inverse_store as inverse_store
         present=inverse_store.available(conn)
         labels=inverse_store.load_inverse_outcomes(conn,[row['event_id'] for row in rows],scope['window_minutes'],scope['threshold_bps']) if present else {}
@@ -533,12 +539,13 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
                     'validation_limitation':'Read separate fixed-window and prospective contracts; acceptance requires documented compatible policy.'})
     summary.update(period)
     evidence_sha=digest({'scope':dict(scope)|{'last_evaluated_at_utc':None,'result':None},'episodes':episodes,'summary':summary})
-    conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(canonical(summary),now,scope['scope_key']))
-    if canonical(summary)==canonical(scope.get('result') or {}):
+    summary_json=canonical(summary)
+    conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(summary_json,now,scope['scope_key']))
+    if summary_json==canonical(scope.get('result') or {}):
         return {'episodes':0,'upserts':publication.seed_missing_scope(conn,scope,formula_version)}
     conn.execute('''INSERT INTO research_ordered_formula_trials(trial_id,scope_key,evidence_sha256,result,evaluated_at_utc)
         VALUES(%s,%s,%s,%s::jsonb,%s) ON CONFLICT(scope_key,evidence_sha256) DO NOTHING''',
-        (digest([scope['scope_key'],evidence_sha]),scope['scope_key'],evidence_sha,canonical(summary),now))
+        (digest([scope['scope_key'],evidence_sha]),scope['scope_key'],evidence_sha,summary_json,now))
     upserts=[]
     for episode in episodes:
         episode_id=digest([scope['scope_key'],episode['btc_parent_movement_id']])
@@ -580,7 +587,7 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
         'opposite_indicator_test':'INVERSE_CANDIDATE' if candidate.get('research_orientation')=='INVERSE' else 'SEPARATE_VERSIONED_CANDIDATE','current_period_hit_rate':'','prior_period_hit_rate':'','change_pp':'',
         'strongest_failure_pattern':'NOT_TESTED','status':'INCOMPLETE_DECISION_POPULATION' if not complete else summary['validation_status'] if summary['count_eligible'] else 'INSUFFICIENT_INDEPENDENT_EVIDENCE',
         'meets_min_5':complete and summary['independent_waves']>=5,'last_evaluated_at':now.isoformat(),'chat_summary':detail,'formula_version':formula_version}
-    if canonical(summary) != canonical(scope.get('result') or {}):
+    if summary_json != canonical(scope.get('result') or {}):
         projected=publication.project_formula_row(formula_row)
         if projected is not None:
             upserts.append(projected)

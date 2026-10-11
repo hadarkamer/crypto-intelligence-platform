@@ -48,11 +48,28 @@ SOURCE_START = datetime(2026, 9, 3, 21, 0, tzinfo=timezone.utc)
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, default=report._json_default, separators=(",", ":"), allow_nan=False)
+    return json.dumps(value, sort_keys=True, default=report._json_default,
+        separators=(",", ":"), allow_nan=False, ensure_ascii=True)
 
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def _compact_source_event(event):
+    from research_outcome_worker import _snapshot_price_provenance
+    row = dict(event)
+    if row.get("engine_snapshot_compacted"):
+        return row
+    frozen = report.snapshot_digest(event.get("engine_snapshot"))
+    if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
+        raise ValueError("Frozen engine snapshot changed")
+    row["engine_snapshot_digest"] = frozen
+    if row.get("symbol") != "HYPE":
+        provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
+        row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
+        row["engine_snapshot_compacted"] = True
+    return row
 
 
 def compact_source(source):
@@ -61,23 +78,7 @@ def compact_source(source):
     HYPE retains its full snapshot because the native derived price contract
     binds the exact original event, including that snapshot.
     """
-    from research_outcome_worker import _snapshot_price_provenance
-    events = []
-    for event in source["events"]:
-        row = dict(event)
-        if row.get("engine_snapshot_compacted"):
-            events.append(row)
-            continue
-        frozen = report.snapshot_digest(event.get("engine_snapshot"))
-        if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
-            raise ValueError("Frozen engine snapshot changed")
-        row["engine_snapshot_digest"] = frozen
-        if row.get("symbol") != "HYPE":
-            provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
-            row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
-            row["engine_snapshot_compacted"] = True
-        events.append(row)
-    return {"waves": source["waves"], "events": events}
+    return {"waves": source["waves"], "events": [_compact_source_event(event) for event in source["events"]]}
 
 
 def compact_job(job):
@@ -103,7 +104,7 @@ def _connect(url):
 
 
 def load_job_source(conn, observed_at):
-    """No newest-N window: exceeding the declared bound stops publication."""
+    """Load compact source; exceeding the full source bound stops publication."""
     parents = conn.execute("""SELECT btc_parent_movement_id FROM research_btc_parent_movements
         WHERE episode_policy_version=%s AND start_time_utc<=%s
           AND (end_time_utc IS NULL OR end_time_utc>=%s)
@@ -113,7 +114,16 @@ def load_job_source(conn, observed_at):
         raise ValueError("FULL_WAVE_POPULATION_EXCEEDS_32_PARENTS; no truncated headline published")
     if not parents:
         return {"waves": [], "events": []}
-    waves, events = report.load_source(conn, [p["btc_parent_movement_id"] for p in parents])
+    def project_event(event, wave):
+        if not SOURCE_START <= report.utc(event["alert_time_utc"]) <= observed_at:
+            return None
+        # The versioned initial warmup parent stays outside the population;
+        # source or price availability never selects the eligible universe.
+        if wave["evidence_eligible"] is not True:
+            return None
+        return _compact_source_event(event)
+    waves, events = report.load_source(conn, [p["btc_parent_movement_id"] for p in parents],
+                                      event_projector=project_event)
     for wave in waves:
         # Freeze only information observable by this report's source cutoff.
         if wave.get("end_time_utc") and report.utc(wave["end_time_utc"]) > observed_at:
@@ -122,11 +132,7 @@ def load_job_source(conn, observed_at):
         if wave.get("observed_through_utc"):
             wave["observed_through_utc"] = min(report.utc(wave["observed_through_utc"]),
                                               report.latest_closed_cutoff(observed_at))
-    events = [event for event in events if SOURCE_START <= report.utc(event["alert_time_utc"]) <= observed_at]
-    # Versioned policy excludes its initial boundary-unverified warmup parent;
-    # no source or price availability condition selects the eligible universe.
-    eligible = {wave["btc_parent_movement_id"] for wave in waves if wave["evidence_eligible"] is True}
-    return {"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]}
+    return {"waves": waves, "events": events}
 
 
 def prepare_job(source, observed_at, *, previous_report=None, previous_source=None):
@@ -299,11 +305,17 @@ class ResearchBTCWaveReportWorker:
             if not held:
                 return {"locked": True}
             try:
-                state = conn.execute("SELECT * FROM research_btc_wave_report_state WHERE worker_key=%s", (VERSION,)).fetchone()
+                # Waiting polls need the exact report for the ACK gate, but
+                # never need to hydrate the much larger source/checkpoint.
+                # Match Python JSON truthiness, including legacy empty values.
+                state = conn.execute("""SELECT report,report_observed_at_utc,next_report_at_utc,
+                    xmin::text AS state_xmin,
+                    COALESCE(pending_job NOT IN ('null'::jsonb,'false'::jsonb,'0'::jsonb,
+                        '\"\"'::jsonb,'[]'::jsonb,'{}'::jsonb),FALSE) AS has_pending_job
+                    FROM research_btc_wave_report_state WHERE worker_key=%s""", (VERSION,)).fetchone()
                 conn.commit()
                 if state is None:
                     raise RuntimeError("Full-wave report migration045 required")
-                job = state["pending_job"]
                 # A previous deployment may already have checkpointed a newer
                 # job while the old report is still being delivered. Preserve
                 # that checkpoint, but never advance it past unACKed evidence.
@@ -314,18 +326,34 @@ class ResearchBTCWaveReportWorker:
                         waiting = {"waiting_for_sheet_delivery": True, "delivery": delivery,
                             "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"]),
                             "earliest_next_report_at_utc": _iso_or_none(state["next_report_at_utc"]),
-                            "pending_job_preserved": bool(job)}
+                            "pending_job_preserved": state["has_pending_job"]}
                         self.metrics.update(last_result=waiting, last_error=None)
                         return waiting
-                if not job:
+                if not state["has_pending_job"]:
                     if state["next_report_at_utc"] and now < state["next_report_at_utc"]:
                         waiting = {"waiting_until": _iso_or_none(state["next_report_at_utc"]),
                                    "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"])}
                         self.metrics.update(last_result=waiting, last_error=None)
                         return waiting
+                # The advisory lock serializes normal workers. Bind this
+                # deferred read to the same committed row if another writer
+                # updates state without taking that lock; never mix generations.
+                # A checkpoint owns its frozen source. Only a new job needs
+                # the prior published source to reuse closed-path results.
+                deferred = conn.execute("""SELECT pending_job,
+                    CASE WHEN %s THEN NULL::jsonb ELSE source END AS source
+                    FROM research_btc_wave_report_state
+                    WHERE worker_key=%s AND xmin::text=%s""",
+                    (state["has_pending_job"], VERSION, state["state_xmin"])).fetchone()
+                conn.commit()
+                if deferred is None:
+                    raise RuntimeError("Full-wave report state changed during deferred read; retry next poll")
+                state.update(deferred)
+                job = state["pending_job"]
+                if not job:
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        source = compact_source(load_job_source(conn, now))
+                        source = load_job_source(conn, now)
                     if not source["waves"]:
                         return {"waiting_for": "BTC_PARENT_POPULATION"}
                     job = prepare_job(source, now, previous_report=state["report"], previous_source=state["source"])
@@ -346,7 +374,7 @@ class ResearchBTCWaveReportWorker:
                     conn.commit()
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        current_source = compact_source(load_job_source(conn, report.utc(job["observed_at"])))
+                        current_source = load_job_source(conn, report.utc(job["observed_at"]))
                     if digest(current_source) != job["source_digest"]:
                         revised = prepare_job(current_source, job["observed_at"],
                             previous_report=completed, previous_source=job["source"])
@@ -357,8 +385,13 @@ class ResearchBTCWaveReportWorker:
                             remaining_paths=len(revised["pending_event_ids"]))
                         self.metrics.update(runs=self.metrics["runs"]+1, last_result=progress, last_error=None)
                         return progress
+                    # The recheck graph is no longer needed after equality;
+                    # publish the original frozen job source below.
+                    del current_source
                     source_json = canonical(job["source"])
-                    if len(source_json.encode()) > _MAX_SOURCE_JSON_BYTES:
+                    # canonical() emits ASCII, so characters equal UTF-8 bytes.
+                    # Avoid allocating a second full payload just to count it.
+                    if len(source_json) > _MAX_SOURCE_JSON_BYTES:
                         raise ValueError("FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION")
                     staged = research_sheet_outbox.stage_upserts(conn, sheet_upserts(completed, evaluated_at=now, previous_report=state["report"]))
                     conn.execute("""UPDATE research_btc_wave_report_state SET pending_job=NULL,

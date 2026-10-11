@@ -13,7 +13,7 @@ from copy import deepcopy
 from decimal import Decimal, ROUND_DOWN
 
 import approved_alert_contract as contract
-from . import card_lifecycle as life, checks, price_precision, request_budget
+from . import card_lifecycle as life, price_precision, request_budget
 from . import filled_quantity_dispatch as wire, r2732_entry, r2732_conditional_stop
 from . import maxpain_execution, experimental_allocations, two_account_execution as roles
 from .experimental_plan_store import reduce_source
@@ -24,7 +24,7 @@ from . import experimental_shared_market as shared_market
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
-FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
+FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
 TERMINAL = frozenset(('FILLED', 'CANCELED', 'REJECTED'))
 
 
@@ -52,6 +52,48 @@ def _sum(fills):
 
 def _remaining(trade):
     return _sum(trade['entry_fills']) - _sum(trade['exit_fills'])
+
+
+def _merge_order_fills(trade, request, oid, rows, at_ms, *, complete):
+    """One idempotent quantity reducer for full observations and fill deltas.
+
+    This does not change order finality, request ownership or coverage clocks.
+    Callers commit the returned facts and quantity dictionaries together.
+    """
+    from .filled_quantity_dispatch import requested_order
+    p = request['proposal']; expected = requested_order(p['action'])
+    prior = trade['orders'].get(oid, {}).get('fills', [])
+    fills = {} if complete else {f['fill_id']:deepcopy(f) for f in prior}
+    seen = set()
+    for fill in rows:
+        if (set(fill) != {'fill_id','quantity','price','at_ms'}
+                or fill['fill_id'] in seen or type(fill['at_ms']) is not int
+                or not request['attempt_at_ms'] <= fill['at_ms'] <= at_ms):
+            raise RuntimeError('EXACT_MONOTONIC_FILL_HISTORY_REQUIRED')
+        life.ident(fill['fill_id']); _number(fill['quantity']); _number(fill['price'])
+        if p['leg'] == 'ENTRY':
+            limit = _number(expected['p'])
+            if _number(fill['price']) > limit if expected['b'] else _number(fill['price']) < limit:
+                raise RuntimeError('ENTRY_FILL_WORSE_THAN_FROZEN_LIMIT')
+        if fill['fill_id'] in fills and fills[fill['fill_id']] != fill:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+        seen.add(fill['fill_id']); fills[fill['fill_id']] = deepcopy(fill)
+    if any(fills.get(f['fill_id']) != f for f in prior):
+        raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    target = trade['entry_fills'] if p['leg'] == 'ENTRY' else trade['exit_fills']
+    other = trade['exit_fills'] if p['leg'] == 'ENTRY' else trade['entry_fills']
+    for fid, saved in target.items():
+        if saved['order_id'] == oid and fills.get(fid) != {k:v for k,v in saved.items() if k!='order_id'}:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    if _sum(fills) > _number(expected['s']):
+        raise RuntimeError('ORDER_FILLED_QUANTITY_MISMATCH')
+    for fid, fill in fills.items():
+        full = {**fill, 'order_id':oid}
+        if fid in other or fid in target and target[fid] != full:
+            raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
+    for fid, fill in fills.items():
+        target[fid] = {**deepcopy(fill), 'order_id':oid}
+    return list(fills.values())
 
 
 def _source_active(source, now):
@@ -179,35 +221,27 @@ class IsolatedExecutionRuntime:
             old = trade['orders'].get(row['oid'])
             if old and old['status'] in TERMINAL and row != old:
                 raise RuntimeError('TERMINAL_ORDER_CHANGED')
-            fills = {}
             for fill in row['fills']:
-                if (set(fill) != {'fill_id','quantity','price','at_ms'} or fill['fill_id'] in fills_seen
-                        or type(fill['at_ms']) is not int or not request['attempt_at_ms'] <= fill['at_ms'] <= snapshot['at_ms']):
+                if fill['fill_id'] in fills_seen:
                     raise RuntimeError('EXACT_MONOTONIC_FILL_HISTORY_REQUIRED')
-                life.ident(fill['fill_id']); _number(fill['quantity']); _number(fill['price'])
-                if p['leg'] == 'ENTRY':
-                    limit = _number(expected['p'])
-                    if _number(fill['price']) > limit if expected['b'] else _number(fill['price']) < limit:
-                        raise RuntimeError('ENTRY_FILL_WORSE_THAN_FROZEN_LIMIT')
-                fills_seen.add(fill['fill_id']); fills[fill['fill_id']] = deepcopy(fill)
+                fills_seen.add(fill['fill_id'])
+            merged = _merge_order_fills(trade, request, row['oid'], row['fills'],
+                                        snapshot['at_ms'], complete=True)
+            fills = {f['fill_id']:f for f in merged}
             total = _sum(fills)
             if total > _number(expected['s']) or row['status'] == 'FILLED' and total != _number(expected['s']):
                 raise RuntimeError('ORDER_FILLED_QUANTITY_MISMATCH')
             if row['status'] == 'REJECTED' and total:
                 raise RuntimeError('REJECTED_ORDER_HAS_FILL')
-            if old and any(fills.get(f['fill_id']) != f for f in old['fills']):
-                raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
-            target = trade['entry_fills'] if p['leg'] == 'ENTRY' else trade['exit_fills']
-            for fid, fill in fills.items():
-                full = {**fill, 'order_id': row['oid']}
-                if fid in target and target[fid] != full:
-                    raise RuntimeError('PREVIOUS_FILL_REMOVED_OR_CHANGED')
-                target[fid] = full
             trade['orders'][row['oid']] = deepcopy(row)
             trade['order_legs'][row['oid']] = p['leg']
             request['phase'], request['observed_oid'] = 'OBSERVED', row['oid']
         for trade in state['trades'].values():
             if trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol']:
+                continue
+            if trade['phase']=='MANUALLY_CLOSED':
+                from .experimental_external_activity import closure_verified
+                if not closure_verified(trade):raise RuntimeError('MANUAL_CLOSURE_NOT_VERIFIED')
                 continue
             if set(trade['orders'])-seen:
                 raise RuntimeError('OWNED_ORDER_MISSING_FROM_COMPLETE_HISTORY')
@@ -231,7 +265,8 @@ class IsolatedExecutionRuntime:
                 if observed and observed['status'] in TERMINAL and snapshot['at_ms'] >= request['attempt_at_ms']:
                     request['phase'], request['observed_oid'] = 'OBSERVED', oid
         expected_position = sum((_remaining(t)*(1 if t['side'] == 'LONG' else -1)
-            for t in state['trades'].values() if t['account'] == snapshot['account'] and t['symbol'] == snapshot['symbol']), Decimal(0))
+            for t in state['trades'].values() if t['account'] == snapshot['account'] and t['symbol'] == snapshot['symbol']
+            and t['phase']!='MANUALLY_CLOSED'), Decimal(0))
         if expected_position != life.number(snapshot['position_quantity'], signed=True):
             raise RuntimeError('POSITION_NOT_RECONCILED_TO_EXACT_OWNED_FILLS')
         self._allocations(state, snapshot, now)
@@ -240,7 +275,8 @@ class IsolatedExecutionRuntime:
     def _allocations(self, state, snapshot, now):
         bindings, rows, fills = [], [], []
         for trade in state['trades'].values():
-            if trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol'] or not trade['orders']:
+            if (trade['account'] != snapshot['account'] or trade['symbol'] != snapshot['symbol']
+                    or not trade['orders'] or trade['phase']=='MANUALLY_CLOSED'):
                 continue
             if not any(trade['order_legs'][oid] == 'ENTRY' for oid in trade['orders']):
                 raise RuntimeError('OBSERVED_ENTRY_OWNERSHIP_REQUIRED')
@@ -278,7 +314,7 @@ class IsolatedExecutionRuntime:
         serial = state.get('archived_request_count', 0) + len(state['requests'])
         c = '0x'+life.digest([VERSION,trade['cid'],leg,serial,price,quantity])[:32]
         order = dict(a=index,b=trade['side']=='LONG' if leg=='ENTRY' else trade['side']=='SHORT',p=price,s=quantity,
-            r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
+            r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if contract.is_approved(trade['source']) or trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
                 if leg=='ENTRY' else dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=c)
         action = dict(type='order',orders=[order],grouping='na') if old_oid is None else dict(type='batchModify',modifies=[dict(oid=int(old_oid),order=order)])
         return self._proposal(state,trade,leg,action,quantity,now,operation='ENTRY' if leg=='ENTRY' else 'CREATE_EXIT' if old_oid is None else 'AMEND_EXIT')
@@ -386,7 +422,7 @@ class IsolatedExecutionRuntime:
                     trade['entry_retired_reason']='APPROVED_ALERT_EXIT_ALREADY_REACHED'
                 if msg['family']=='maxpain' and (mark>=_number(msg['original_target']) if msg['side']=='LONG' else mark<=_number(msg['original_target'])):
                     trade['entry_retired_reason']='TESTNET_TARGET_SAFETY_CANCEL_REMAINDER'
-                if msg['family']=='sol_g65' and mark<=_number(msg['policy']['pending_cancel_price']):
+                if msg['family']=='sol_g65' and not contract.is_approved(msg) and mark<=_number(msg['policy']['pending_cancel_price']):
                     trade['entry_retired_reason']='TESTNET_PENDING_CANCEL_BARRIER'
                 retire=retire or trade.get('entry_retired_reason') is not None
             for oid,o in active:
@@ -401,12 +437,17 @@ class IsolatedExecutionRuntime:
         source = state['sources'][cid]; msg = source['source']
         if not _source_active(source,now) or cid in state['trades'] or cid in state.get('source_condition_errors',{}):
             return None
-        if msg['family']=='sol_g65':
+        if msg['family']=='sol_g65' and not contract.is_approved(msg):
             condition=state.get('formula_states',{}).get(cid)
             if (condition is None or condition['phase']!='PENDING' or condition['outcome'] is not None
                     or condition['status'] in ('PRICE_GAP','AMBIGUOUS','EXIT_RECONCILIATION_REQUIRED')):
                 return None
         role = 'long_account' if msg['side']=='LONG' else 'short_account'; account=state['routes'][role]
+        from . import experimental_external_activity as external
+        release_reason = external.entry_reason(state, account, msg)
+        if release_reason:
+            state.setdefault('entry_blocked', {})[cid] = release_reason
+            return None
         peers = [t for t in state['trades'].values() if t['account']==account and t['phase'] not in FINAL]
         if any(t['symbol']==msg['symbol'] for t in peers):
             state.setdefault('entry_blocked', {})[cid] = shared_market.ENTRY_BLOCK
@@ -427,11 +468,10 @@ class IsolatedExecutionRuntime:
             slo,shi,smark = _range(paths['source'],msg,now)
             dlo,dhi,mark = _range(paths['testnet'],msg,now,account=account)
         metadata=context['metadata']; index,decimals=wire.asset(metadata,msg['symbol'])
-        prepared=prepare_prices(msg,metadata); p=prepared['execution']
+        from .experimental_execution_prices import require_entry_mark
+        prepared=require_entry_mark(msg,metadata,mark); p=prepared['execution']
         prices={k:p[k] for k in ('entry','stop','take_profit')}
         entry,stop,take=(_number(prices[k]) for k in ('entry','stop','take_profit'))
-        if not min(stop,take)<mark<max(stop,take):
-            raise RuntimeError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
         if approved:
             # The producer's approved alert owns formula admission. Do not run
             # another touch/overlap search, or request a pre-touch MARK history.
@@ -474,12 +514,23 @@ class IsolatedExecutionRuntime:
             quantity=life.text((budget()/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
         if _number(quantity)*abs(entry-stop)>budget():
             raise RuntimeError('CURRENT_RISK_BUDGET_EXCEEDED')
-        cap=context['capacity'][cid]
-        if (cap.get('account')!=account or type(cap.get('at_ms')) is not int or not 0<=now-cap['at_ms']<=15000 or cap.get('action_headroom',0)<roles.ENTRY_ACTION_HEADROOM
-                or cap.get('account_mode_verified') is not True):
-            raise RuntimeError('FRESH_EXACT_ACCOUNT_CAPACITY_REQUIRED')
-        checks.plan_check(dict(symbol=msg['symbol'],side=msg['side'],**prices),msg['symbol'],decimals,
-            _number(cap['unheld']),_number(cap['available']),_number(cap['max_size']),active=cap['active'],metadata_max_leverage=cap['max_leverage'])
+        account_check=context['entry_accounts'][cid]
+        if (account_check.get('account')!=account or type(account_check.get('at_ms')) is not int
+                or not 0<=now-account_check['at_ms']<=15000
+                or any(type(account_check.get(field,account_check['at_ms'])) is not int
+                    or not 0<=now-account_check.get(field,account_check['at_ms'])<limit
+                    for field,limit in (('signer_at_ms',300000),('allowance_at_ms',60000)))
+                or type(account_check.get('action_headroom')) is not int
+                or account_check['action_headroom']<roles.ENTRY_ACTION_HEADROOM):
+            raise RuntimeError('FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED')
+        life.address(account_check.get('agent'))
+        # Size comes only from the alert's entry/stop distance and the existing
+        # risk policy. The exchange checks margin when it accepts the order;
+        # no second buying-power/leverage model is required to send it.
+        if not Decimal(10)<=_number(quantity)*entry<=Decimal(5000):
+            raise RuntimeError('OUTSIDE_LAB_SIZE_BOUNDS')
+        if _number(quantity)*mark>Decimal(5000):
+            raise RuntimeError('MARK_NOTIONAL_EXCEEDS_LAB_CAP')
         trade=dict(cid=cid,source=deepcopy(msg),account=account,role=role,symbol=msg['symbol'],side=msg['side'],
             quantity=quantity,prices=prices,asset=dict(index=index,decimals=decimals),phase='OUTCOME_UNKNOWN',
             orders={},order_legs={},entry_fills={},exit_fills={},entry_request=None,condition=None,desired_stop=prices['stop'])

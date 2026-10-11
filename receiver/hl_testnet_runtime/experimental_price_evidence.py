@@ -12,7 +12,7 @@ No collector, scheduler, subscription, database or exchange request is created.
 """
 from copy import deepcopy
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life
 from . import experimental_execution_evidence as execution_evidence
 from . import r2732_conditional_stop as bars

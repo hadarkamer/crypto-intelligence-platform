@@ -11,7 +11,7 @@ from decimal import Decimal
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from approved_alert_fixtures import BASE
 from . import experimental_execution_runtime as core
@@ -88,7 +88,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.port.reserve_transport = lambda proposal: wire.TransportAdmission(
             proposal, core._Permit(self.oracle.now, self.oracle.now()))
 
-        def send(request, *, admission):
+        def send(request, *, admission=None):
             try:
                 calls = len(self.raw.calls)
                 context = self.provider.dispatch_context(request)
@@ -98,6 +98,9 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
                 if request['proposal']['operation'] == 'ENTRY':
                     self.replayed_entries.append(request['request_id'])
                 claimed = self.store.claim_transport(request, 'b' * 32)
+                if admission is None:
+                    admission = self.port.reserve_transport(claimed['proposal'])
+                    admission.bind(claimed)
                 self.oracle_requests[claimed['request_id']] = deepcopy(claimed)
                 return self.oracle.send(claimed, admission=admission)
             except Exception as error:
@@ -242,12 +245,16 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         # reconcile an unfilled owned request, whose normal overlap collection
         # actually observes old facts; only then change one of those facts.
         second = alert(cycle='active-unfilled-history-observer')
+        third = alert(symbol='ETH', cycle='must-block-after-observed-history-change')
+        # The market snapshot includes every listed asset and can be reused by
+        # the next immediate step. Seed ETH before that snapshot so this test
+        # isolates changed archive facts from an unrelated changed-market gate.
+        self.oracle.mark[core._lane(self.release['routes']['long_account'], 'ETH')] = third['entry']
         self.start(second)
         self.cycle()
         current = self.store.load()
         self.assertFalse(current['trades'][second['occurrence_id']]['entry_fills'])
         self.assertTrue(all(r['phase'] == 'OBSERVED' for r in current['requests'].values()))
-        third = alert(symbol='ETH', cycle='must-block-after-observed-history-change')
         self.worker.receive([third])
         old_fill = self.oracle.orders[oid]['view']['fills'][0]
         original_price = old_fill['price']
@@ -320,6 +327,8 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
             blocker.start(); self.addCleanup(blocker.stop)
         memory = MemoryTransactions(LIVE_ROUTES, BASE - 60000)
         store = live_state.TestnetExecutionState.for_ci(PostgresJournal.for_ci(fixture_dsn))
+        from .test_journal_connection_scope import Connection
+        store.journal._connect = Mock(side_effect=Connection)
         store.load = memory.load
         store.mutate = memory.mutate
         store.commit_attempt = memory.commit_attempt

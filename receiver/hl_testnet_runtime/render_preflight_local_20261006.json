@@ -1,0 +1,81 @@
+{
+  "schema": "render_offline_preflight_v1",
+  "status": "PARTIAL",
+  "isolated": true,
+  "exchange": "SYNTHETIC_ONLY",
+  "stages": [
+    {
+      "task": "timing_tests",
+      "exit_code": 0,
+      "duration_seconds": 0.301,
+      "failure_code": null,
+      "artifact_sha256": "122c3eb841604ecefbaadf665935f4ee3303a6d48a9fa383e8c3bffe6bb4df45",
+      "tests_run": 28,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "unexpected_successes": 0,
+      "successful": true,
+      "failure_details": []
+    },
+    {
+      "task": "recorder",
+      "exit_code": 0,
+      "duration_seconds": 0.702,
+      "failure_code": null,
+      "artifact_sha256": "049ed67b5bacb5561f1fd6067ba0e2595c885e9c81d72df5164c6c1da95b7007",
+      "conditions": 14,
+      "measured_calls": 27648,
+      "network_attempts_blocked": 0,
+      "comparisons": [
+        {
+          "payload": "notification",
+          "producers": 1,
+          "added_mean_ns": 8007.712890625
+        },
+        {
+          "payload": "notification",
+          "producers": 2,
+          "added_mean_ns": 8600.259440104166
+        },
+        {
+          "payload": "trade_projection",
+          "producers": 1,
+          "added_mean_ns": 19243.193359375
+        },
+        {
+          "payload": "trade_projection",
+          "producers": 2,
+          "added_mean_ns": 21630.5166015625
+        }
+      ]
+    },
+    {
+      "task": "feed",
+      "exit_code": 0,
+      "duration_seconds": 1.806,
+      "failure_code": null,
+      "artifact_sha256": "93bbcf34b1c81a7cb7c66d344044799d8b6f0ad84128a5e2c2f77af5c0593a35",
+      "exact_feed_state_parity_pairs": 120,
+      "network_attempts_blocked": 0,
+      "single_update_added_mean_ns": [
+        34040.666666666664,
+        30414.5
+      ]
+    }
+  ],
+  "limits": [
+    "Free instance timing is not live-service latency or capacity evidence.",
+    "No live exchange, trading account or existing database is accessed.",
+    "Runtime benchmark uses four rounds; observed tails are not guarantees."
+  ],
+  "candidate": {
+    "sha256": "9fe525cbb2dc74c9678507250acc75d9b8289f3a11d0f4947a4eb36473cd4bc4",
+    "version_base": "3084c5c7cd53b70d0569086ba78a78f8fc53a9ac",
+    "file_count": 446
+  },
+  "current_stage": null,
+  "postgres": "NOT_RUN_POSTGRES_EXPLICITLY_DISABLED",
+  "durable_checks": "NOT_RUN",
+  "duration_seconds": 2.871
+}

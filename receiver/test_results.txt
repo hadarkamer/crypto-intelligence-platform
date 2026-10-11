@@ -1,0 +1,45 @@
+test_available_budget_uses_conservative_side (hl_testnet_runtime.test_runtime.RuntimeTests.test_available_budget_uses_conservative_side) ... ok
+test_capacity_identity_and_symbol (hl_testnet_runtime.test_runtime.RuntimeTests.test_capacity_identity_and_symbol) ... ok
+test_capacity_schema_must_be_complete (hl_testnet_runtime.test_runtime.RuntimeTests.test_capacity_schema_must_be_complete) ... ok
+test_changed_testnet_host_rejected (hl_testnet_runtime.test_runtime.RuntimeTests.test_changed_testnet_host_rejected) ... ok
+test_delisted_asset_blocks_plan (hl_testnet_runtime.test_runtime.RuntimeTests.test_delisted_asset_blocks_plan) ... ok
+test_disabled_other_modes_no_io (hl_testnet_runtime.test_runtime.RuntimeTests.test_disabled_other_modes_no_io) ... ok
+test_duplicate_json_keys_and_nan_rejected (hl_testnet_runtime.test_runtime.RuntimeTests.test_duplicate_json_keys_and_nan_rejected) ... ok
+test_error_does_not_echo_private_info (hl_testnet_runtime.test_runtime.RuntimeTests.test_error_does_not_echo_private_info) ... ok
+test_forbidden_calls_have_no_network (hl_testnet_runtime.test_runtime.RuntimeTests.test_forbidden_calls_have_no_network) ... ok
+test_full_hold_blocks_budget (hl_testnet_runtime.test_runtime.RuntimeTests.test_full_hold_blocks_budget) ... ok
+test_hold_greater_than_total (hl_testnet_runtime.test_runtime.RuntimeTests.test_hold_greater_than_total) ... ok
+test_hold_is_mandatory (hl_testnet_runtime.test_runtime.RuntimeTests.test_hold_is_mandatory) ... ok
+test_invalid_plan_cannot_pass (hl_testnet_runtime.test_runtime.RuntimeTests.test_invalid_plan_cannot_pass) ... ok
+test_invalid_secret_never_imports_sdk (hl_testnet_runtime.test_runtime.RuntimeTests.test_invalid_secret_never_imports_sdk) ... ok
+test_key_in_address_field_rejected_before_network (hl_testnet_runtime.test_runtime.RuntimeTests.test_key_in_address_field_rejected_before_network) ... ok
+test_key_not_required_for_public_check (hl_testnet_runtime.test_runtime.RuntimeTests.test_key_not_required_for_public_check) ... ok
+test_no_prices_are_rounded (hl_testnet_runtime.test_runtime.RuntimeTests.test_no_prices_are_rounded) ... ok
+test_nonfinite_excessive_numbers_rejected (hl_testnet_runtime.test_runtime.RuntimeTests.test_nonfinite_excessive_numbers_rejected) ... ok
+test_optional_key_check_is_local_and_redacted (hl_testnet_runtime.test_runtime.RuntimeTests.test_optional_key_check_is_local_and_redacted) ... ok
+test_other_tokens_not_usdc (hl_testnet_runtime.test_runtime.RuntimeTests.test_other_tokens_not_usdc) ... ok
+test_plan_input_is_unchanged (hl_testnet_runtime.test_runtime.RuntimeTests.test_plan_input_is_unchanged) ... ok
+test_plan_pass_without_signing_or_orders (hl_testnet_runtime.test_runtime.RuntimeTests.test_plan_pass_without_signing_or_orders) ... ok
+test_quantity_cap_not_bypassed (hl_testnet_runtime.test_runtime.RuntimeTests.test_quantity_cap_not_bypassed) ... ok
+test_redirect_is_never_followed (hl_testnet_runtime.test_runtime.RuntimeTests.test_redirect_is_never_followed) ... ok
+test_report_never_contains_addresses_balances_or_plan (hl_testnet_runtime.test_runtime.RuntimeTests.test_report_never_contains_addresses_balances_or_plan) ... ok
+test_same_agent_account_rejected (hl_testnet_runtime.test_runtime.RuntimeTests.test_same_agent_account_rejected) ... ok
+test_short_plan_pass (hl_testnet_runtime.test_runtime.RuntimeTests.test_short_plan_pass) ... ok
+test_stale_sample_cannot_pass (hl_testnet_runtime.test_runtime.RuntimeTests.test_stale_sample_cannot_pass) ... ok
+test_standard_uses_perp_state (hl_testnet_runtime.test_runtime.RuntimeTests.test_standard_uses_perp_state) ... ok
+test_startup_logs_redacted_report_only (hl_testnet_runtime.test_runtime.RuntimeTests.test_startup_logs_redacted_report_only) ... ok
+test_total_balance_not_used_as_buying_power (hl_testnet_runtime.test_runtime.RuntimeTests.test_total_balance_not_used_as_buying_power) ... ok
+test_transport_fixed_url_no_secret_headers (hl_testnet_runtime.test_runtime.RuntimeTests.test_transport_fixed_url_no_secret_headers) ... ok
+test_unified_ignores_zero_perp_equity (hl_testnet_runtime.test_runtime.RuntimeTests.test_unified_ignores_zero_perp_equity) ... ok
+test_unknown_modes_fail_closed (hl_testnet_runtime.test_runtime.RuntimeTests.test_unknown_modes_fail_closed) ... ok
+test_without_addresses_no_io (hl_testnet_runtime.test_runtime.RuntimeTests.test_without_addresses_no_io) ... ok
+test_wrong_agent_mapping (hl_testnet_runtime.test_runtime.RuntimeTests.test_wrong_agent_mapping) ... ok
+test_wrong_key_blocks_readiness (hl_testnet_runtime.test_runtime.RuntimeTests.test_wrong_key_blocks_readiness) ... ok
+test_wrong_or_duplicate_usdc_token (hl_testnet_runtime.test_runtime.RuntimeTests.test_wrong_or_duplicate_usdc_token) ... ok
+test_wsgi_is_static_and_rejects_post_query (hl_testnet_runtime.test_runtime.RuntimeTests.test_wsgi_is_static_and_rejects_post_query) ... ok
+test_zero_usdc_not_fabricated (hl_testnet_runtime.test_runtime.RuntimeTests.test_zero_usdc_not_fabricated) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 0.013s
+
+OK

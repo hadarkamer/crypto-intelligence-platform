@@ -26,6 +26,9 @@ RANK = {'ALERT': 1, 'CANCEL': 3}
 TEMPORAL = legacy.TEMPORAL
 HEX = legacy.HEX
 SPECS = legacy.SPECS
+FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
+    'hype_row71205': ('HYPE_ROW71205_SHORT', 'HYPE'),
+    'sol_g65': ('SOL_G65_K49_PROFIT_LOCK', 'SOL')}
 MAX_BYTES = legacy.MAX_BYTES
 ContractError = legacy.ContractError
 moment_ms = legacy.moment_ms
@@ -64,12 +67,16 @@ def _validate_approved(message):
     legacy._keys(message, FIELDS, 'APPROVED_ALERT_FIELDS')
     value = deepcopy(message)
     require(value['version'] == VERSION and value['kind'] in RANK
-            and value['family'] == 'maxpain', 'APPROVED_ALERT_VERSION')
-    require(value['rule_id'] in SPECS, 'APPROVED_ALERT_RULE')
-    spec = SPECS[value['rule_id']]
-    require(value['symbol'] == spec[0] and value['side'] in ('LONG', 'SHORT')
-            and (spec[-1] == 'BOTH' or value['side'] == spec[-1]),
-            'APPROVED_ALERT_IDENTITY')
+            and value['family'] in ('maxpain', *FORMULAS), 'APPROVED_ALERT_VERSION')
+    if value['family'] == 'maxpain':
+        require(value['rule_id'] in SPECS, 'APPROVED_ALERT_RULE')
+        spec = SPECS[value['rule_id']]
+        require(value['symbol'] == spec[0] and value['side'] in ('LONG', 'SHORT')
+                and (spec[-1] == 'BOTH' or value['side'] == spec[-1]),
+                'APPROVED_ALERT_IDENTITY')
+    else:
+        require((value['rule_id'], value['symbol']) == FORMULAS[value['family']]
+                and value['side'] == 'SHORT', 'APPROVED_ALERT_IDENTITY')
     require(value['source_environment'] == 'mainnet'
             and value['execution_environment'] == 'testnet'
             and value['source_price_kind'] == 'TRADE_1M', 'VENUE_CONTRACT')
@@ -94,21 +101,34 @@ def _validate_approved(message):
                 'APPROVED_ALERT_CANCEL_STATE')
 
     policy, proof = value['policy'], value['proof']
-    legacy._keys(policy, POLICY_FIELDS, 'APPROVED_ALERT_POLICY')
-    require(policy == dict(name='APPROVED_ALERT_LIMIT_GTC_V1',
-            entry_kind='LIMIT_AFTER_ALERT',
-            source_price=f"HYPERLIQUID_{value['symbol']}_PERPETUAL_TRADE_1M"),
-            'APPROVED_ALERT_POLICY')
-    legacy._keys(proof, PROOF_FIELDS, 'APPROVED_ALERT_PROOF')
-    require(proof['source_contract_version'] == SOURCE_CONTRACT
-            and isinstance(proof['source_config_sha256'], str)
-            and HEX.fullmatch(proof['source_config_sha256']) is not None,
-            'SOURCE_PROVENANCE')
-    require(isinstance(proof['cycle_id'], str) and 0 < len(proof['cycle_id']) <= 200
-            and proof['timeframe'] in legacy.TIMEFRAMES, 'APPROVED_ALERT_SOURCE_IDENTITY')
-    target = positive(value['original_target'])
-    require(proof['episode_key'] == format(target.normalize(), 'f'),
-            'APPROVED_ALERT_TARGET_IDENTITY')
+    if value['family'] == 'maxpain':
+        legacy._keys(policy, POLICY_FIELDS, 'APPROVED_ALERT_POLICY')
+        require(policy == dict(name='APPROVED_ALERT_LIMIT_GTC_V1',
+                entry_kind='LIMIT_AFTER_ALERT',
+                source_price=f"HYPERLIQUID_{value['symbol']}_PERPETUAL_TRADE_1M"),
+                'APPROVED_ALERT_POLICY')
+        legacy._keys(proof, PROOF_FIELDS, 'APPROVED_ALERT_PROOF')
+        require(proof['source_contract_version'] == SOURCE_CONTRACT
+                and isinstance(proof['source_config_sha256'], str)
+                and HEX.fullmatch(proof['source_config_sha256']) is not None,
+                'SOURCE_PROVENANCE')
+        require(isinstance(proof['cycle_id'], str) and 0 < len(proof['cycle_id']) <= 200
+                and proof['timeframe'] in legacy.TIMEFRAMES, 'APPROVED_ALERT_SOURCE_IDENTITY')
+        target = positive(value['original_target'])
+        require(proof['episode_key'] == format(target.normalize(), 'f'),
+                'APPROVED_ALERT_TARGET_IDENTITY')
+    else:
+        require(proof['source_contract_version'] == SOURCE_CONTRACT
+                and isinstance(proof['source_config_sha256'], str)
+                and HEX.fullmatch(proof['source_config_sha256']) is not None, 'SOURCE_PROVENANCE')
+        reference = moment_ms(proof['decision_at']) + 60_000
+        original_times = dict(source_at=reference, created_at=reference, arm_at=reference,
+            expires_at=None if value['family'] == 'sol_g65' else reference + LEASE_MS)
+        getattr(legacy, '_validate_' + value['family'])(value, original_times)
+        require(times['source_at'] == times['created_at'] == reference,
+                'APPROVED_FORMULA_REFERENCE')
+        require(times['approved_at'] >= reference + 60_000 if value['family'] == 'sol_g65'
+                else times['approved_at'] == reference, 'APPROVED_FORMULA_TIME')
     entry, stop, take = (positive(value[key]) for key in ('entry', 'stop', 'take_profit'))
     require(stop < entry < take if value['side'] == 'LONG' else take < entry < stop,
             'PRICE_GEOMETRY')

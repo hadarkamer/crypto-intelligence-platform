@@ -13,7 +13,7 @@ from .test_filled_quantity_dispatch import ROUTES2, Venue
 
 
 class Connection:
-    def __init__(self):
+    def __init__(self, *, autocommit=False):
         self.active=False;self.commits=0;self.checks=0;self.closed=False;self.fail_commit=False
     @contextmanager
     def transaction(self):
@@ -34,7 +34,7 @@ class Connection:
 class ScopeTests(unittest.TestCase):
     def journal(self):return PostgresJournal.for_ci('postgresql://fake@localhost/hl_journal_ci')
 
-    def test_each_transaction_commits_and_rechecks_database_on_one_socket(self):
+    def test_each_transaction_commits_with_one_database_check_per_socket(self):
         journal=self.journal();conn=Connection()
         with patch.object(journal,'_connect',return_value=conn) as connect:
             with journal.reuse_connection():
@@ -43,7 +43,7 @@ class ScopeTests(unittest.TestCase):
                     self.assertFalse(conn.active)
                 self.assertFalse(conn.closed)
             connect.assert_called_once_with(autocommit=True)
-        self.assertEqual((conn.commits,conn.checks),(3,3));self.assertTrue(conn.closed)
+        self.assertEqual((conn.commits,conn.checks),(3,1));self.assertTrue(conn.closed)
 
     def test_uncertain_commit_poison_prevents_retry_or_follow_on_transaction(self):
         journal=self.journal();conn=Connection();conn.fail_commit=True
@@ -79,11 +79,14 @@ class ScopeTests(unittest.TestCase):
                             with journal._transaction():self.fail('Untrusted connection yielded')
 
     def test_dispatch_warms_before_permit_and_releases_transactions_before_transport(self):
-        journal=self.journal();conn=Connection();clock=[0]
+        journal=self.journal();conn=Connection();clock=[0];oracle=None
         store=Mock(domain='software',journal=journal)
         venue=Venue();controller=dispatch.Controller(store,venue,ROUTES2)
         state,proposal=plan();record=request(proposal);route=ROUTES2[proposal['role']]
-        def connect(**kwargs):clock[0]+=2_000_000_000;return conn
+        def connect(**kwargs):
+            clock[0]+=2_000_000_000
+            if oracle is not None:oracle.t+=2000
+            return conn
         def transaction():
             with journal._transaction():pass
             self.assertFalse(conn.active)
@@ -107,6 +110,34 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(result['status'],'OUTCOME_UNKNOWN')
         self.assertEqual((dial.call_count,conn.commits),(1,5))
         self.assertTrue(conn.closed)
+        from .test_simplified_execution_replay import ReductionReplay, sol_alert
+        replay=ReductionReplay(methodName='runTest')
+        self.addCleanup(replay.doCleanups)
+        fixture,ledger=replay.fixture();fx=fixture.fx;oracle=fx.oracle
+        fixture.supervisor.pass_once(force_collect=True)
+        message=sol_alert((oracle.now()//60000)*60000,cycle='journal-scope')
+        account=fx.release['routes']['long_account']
+        from .experimental_execution_runtime import _lane
+        oracle.mark[_lane(account,'SOL')]=message['entry']
+        fx.worker.receive([message])
+        for leg in ('ENTRY','STOP'):
+            conn=Connection();before=len(fx.http)
+            with patch.object(fx.store.journal,'_connect',side_effect=connect) as dial:
+                result=fx.worker.run_once(entries_enabled=leg=='ENTRY')
+            self.assertEqual(result['status'],'TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION')
+            self.assertEqual(len(fx.http)-before,1)
+            dial.assert_called_once_with(autocommit=True)
+            self.assertTrue(conn.closed);self.assertFalse(conn.active)
+            self.assertFalse(fx.worker._cycle_lock.locked())
+            if leg=='ENTRY':
+                trade=fx.store.load()['trades'][message['occurrence_id']]
+                oracle.fill(oracle.oid('ENTRY'),trade['quantity'])
+        before=len(fx.http)
+        with patch.object(fx.store.journal,'_connect',side_effect=OSError('PRIVATE_CONNECT_DETAIL')):
+            with self.assertRaisesRegex(JournalError,'PERSISTENCE_UNAVAILABLE_NO_SEND'):
+                fx.worker.run_once(entries_enabled=False)
+        self.assertEqual(len(fx.http),before)
+        self.assertFalse(fx.worker._cycle_lock.locked())
 
 
 @unittest.skipUnless(os.environ.get('HL_JOURNAL_CI_URL'),'Disposable PostgreSQL required')

@@ -62,6 +62,22 @@ class TriggeredTakeAdapterTests(unittest.TestCase):
     def setUp(self):
         self.h = protected_harness(self, self.side)
         self.state = self.h.store.load()
+        # The software venue names executions ``fill1_0``; RawTestnetFixture
+        # exposes that same execution using a deterministic numeric exchange
+        # trade ID. The adapter's saved facts must use the identical raw-domain
+        # identity, rather than presenting every pre-existing fill as replaced.
+        def raw_fill(fill):
+            return {**deepcopy(fill),
+                'fill_id': 'hl:' + str(int(life.digest(fill['fill_id'])[:12], 16))}
+        for trade in self.state['trades'].values():
+            for key in ('entry_fills', 'exit_fills'):
+                rows = [raw_fill(fill) for fill in trade[key].values()]
+                trade[key] = {fill['fill_id']: fill for fill in rows}
+            for order in trade['orders'].values():
+                order['fills'] = [raw_fill(fill) for fill in order['fills']]
+        for snapshot in self.state['snapshots'].values():
+            for order in snapshot['orders']:
+                order['fills'] = [raw_fill(fill) for fill in order['fills']]
         self.trade = self.state['trades'][self.h.msg['occurrence_id']]
         self.partial_quantity = life.text((Decimal(self.trade['quantity'])/2).quantize(Decimal('.01'), rounding=ROUND_DOWN))
         original = next(s for s in self.h.venue.collect(self.state)['snapshots']

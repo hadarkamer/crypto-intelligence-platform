@@ -39,8 +39,9 @@ def project(state):
     return dict(domain='software', real_exchange_activity=False, snapshot_revision=state['revision'],
         history=dict(state.get('history', {})), shared_market=assess(state),
         trades=rows, cards=cards_from_state(state, domain='software'),
-        counts=dict(total=len(rows), closed=sum(r['status']=='CLOSED' for r in rows),
-            open=sum(Decimal(r['remaining_quantity'])>0 for r in rows),
+        counts=dict(total=len(rows), closed=sum(r['status'] in ('CLOSED','MANUALLY_CLOSED') for r in rows),
+            open=sum(r['status'] not in ('CLOSED','MANUALLY_CLOSED','CANCELED_WITHOUT_FILL')
+                     and Decimal(r.get('actual_position_quantity') or r['remaining_quantity'] or '0')!=0 for r in rows),
             unresolved_attempts=sum(r['unresolved_attempts'] for r in rows)))
 
 
@@ -82,6 +83,18 @@ def _project_rows(state):
             net_pnl_status='ACTUAL_FEES_AND_FUNDING_NOT_AVAILABLE',
             submitted_attempts=len(requests), unresolved_attempts=unresolved,
             owned_order_ids=sorted(trade['orders'])))
+        manual=trade.get('manual_management')
+        if manual:
+            row=rows[-1]
+            row.update(management_mode=manual['status'],historical_bot_remaining_quantity=row['remaining_quantity'],
+                remaining_quantity=None,actual_position_quantity=manual.get('actual_position_quantity'),
+                actual_position_observed_at_ms=manual.get('observed_at_ms'),
+                gross_pnl_before_costs=None,net_pnl=None,net_pnl_status='EXTERNAL_ACTIVITY_UNALLOCATED',
+                automatic_position_management=False)
+            if trade['phase']=='MANUALLY_CLOSED':
+                from .experimental_external_activity import closure_verified
+                if not closure_verified(trade):raise ReportError('MANUAL_CLOSURE_NOT_VERIFIED')
+                row['reconciled_closed_at_ms']=trade['manual_closure']['confirmed_at_ms']
     return rows
 
 

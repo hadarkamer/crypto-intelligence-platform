@@ -1,0 +1,63 @@
+name: Testnet Durable Postgres Journal
+on:
+  push:
+    branches: [paper-trading-v1, codex/testnet-pipeline-recovery-20261002]
+    paths:
+      - 'hl_testnet_runtime/**'
+      - 'hyperliquid_testnet_executor*.py'
+      - 'alert_cards_forwarder*.py'
+      - '.github/workflows/testnet-postgres-journal.yml'
+  pull_request:
+    branches: [paper-trading-v1]
+    paths:
+      - 'hl_testnet_runtime/**'
+      - 'hyperliquid_testnet_executor*.py'
+      - 'alert_cards_forwarder*.py'
+      - '.github/workflows/testnet-postgres-journal.yml'
+permissions:
+  contents: read
+concurrency:
+  group: testnet-postgres-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: hl_journal_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hl_journal_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HL_JOURNAL_CI_URL: postgresql://postgres:disposable-ci-password@127.0.0.1:5432/hl_journal_ci
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install the pinned Testnet runtime dependencies
+        run: python3 -m pip install -r hl_testnet_runtime/requirements.txt
+      - name: New durable manual-close, duplicate-event and quota regressions
+        run: >-
+          python3 -m unittest -v
+          hl_testnet_runtime.test_manual_exit_reconciliation
+          hl_testnet_runtime.test_execution_occurrence
+          hl_testnet_runtime.test_continuous_short_scope
+          hl_testnet_runtime.test_request_budget
+          hl_testnet_runtime.test_bounded_entry_trial
+          hl_testnet_runtime.test_history_gap_recovery
+          hl_testnet_runtime.test_history_gap_stream
+          hl_testnet_runtime.test_history_gap_budget
+          hl_testnet_runtime.test_history_gap_fence
+          hl_testnet_runtime.test_emergency_close
+          hl_testnet_runtime.test_long_stream_emergency_gate
+      - name: Existing checks and actual PostgreSQL restart, race, lost-ack and mixed-exit tests
+        run: |
+          python3 -m unittest -v hyperliquid_testnet_executor_selftest alert_cards_forwarder_selftest
+          python3 -m unittest discover -v -s hl_testnet_runtime -t . -p 'test_*.py'

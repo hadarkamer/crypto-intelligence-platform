@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import json
 import os
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
@@ -51,6 +52,49 @@ SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
 
 class BinanceSpotPathError(RuntimeError):
     """Raised when a canonical Binance Spot path cannot be obtained safely."""
+
+
+HTTP_ERROR_BODY_MAX_BYTES = 4096
+
+
+def _http_error_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate JSON object key")
+    return result
+
+
+def _http_failure_diagnostic(
+    response: Any, *, pair: str, start_ms: int, end_ms: int, cursor: int
+) -> Dict[str, Any]:
+    """Retain bounded failure scalars; start is the whole path, cursor this page."""
+    status = None
+    code = None
+    try:
+        value = response.status_code
+        if type(value) is int and 100 <= value <= 599:
+            status = value
+    except Exception:
+        pass
+    try:
+        body = response.content
+        if type(body) is bytes and 0 < len(body) <= HTTP_ERROR_BODY_MAX_BYTES:
+            payload = json.loads(body, object_pairs_hook=_http_error_object)
+            value = payload.get("code") if type(payload) is dict else None
+            if type(value) is int and -(2**31) <= value < 2**31:
+                code = value
+    except Exception:
+        # Optional diagnostics must never replace the original HTTP failure.
+        pass
+    return {
+        "diagnostic_version": 1,
+        "http_status": status,
+        "binance_code": code,
+        "pair": pair,
+        "request_start_ms": start_ms,
+        "request_end_ms": end_ms,
+        "page_cursor_ms": cursor,
+    }
 
 
 @dataclass(frozen=True)
@@ -183,10 +227,18 @@ def fetch_closed_candles(
         try:
             response.raise_for_status()
         except Exception as exc:
-            status = getattr(response, "status_code", "unknown")
-            raise BinanceSpotPathError(
-                f"Binance Spot kline request failed for {pair} (HTTP {status})"
-            ) from exc
+            diagnostic = _http_failure_diagnostic(
+                response, pair=pair, start_ms=start_ms, end_ms=end_ms, cursor=cursor
+            )
+            status = diagnostic["http_status"]
+            status_text = status if status is not None else "unknown"
+            error = BinanceSpotPathError(
+                f"Binance Spot kline request failed for {pair} (HTTP {status_text})"
+                + " diagnostic="
+                + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+            error.diagnostic = diagnostic
+            raise error from exc
         payload = response.json()
         if not isinstance(payload, list):
             raise BinanceSpotPathError(

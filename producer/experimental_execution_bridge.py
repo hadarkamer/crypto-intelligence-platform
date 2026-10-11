@@ -35,6 +35,9 @@ def approved_source_keys(scopes):
         if not isinstance(scope, str) or not contract.HEX.fullmatch(scope):
             raise contract.ContractError('SOURCE_SCOPE_HASH')
         subscription = 'general-watch:' + scope
+        from approved_alert_producer import FORMULA_STORES
+        keys.extend(version + ':' + hashlib.sha256(subscription.encode()).hexdigest()
+                    for version in FORMULA_STORES)
         for rule, spec in contract.SPECS.items():
             source_scope = subscription if spec[0] == 'SOL' else subscription + ':' + rule
             keys.append('sol-proximity-notification-store-v1:' + hashlib.sha256(source_scope.encode()).hexdigest())

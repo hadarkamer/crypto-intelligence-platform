@@ -32,16 +32,3 @@ def project(bindings, snapshot, *, revision, now_ms):
         bucket_issues=deepcopy(report['bucket_issues']), cards=cards)
     # Independent from execution request IDs, addresses and client references.
     return {**body, 'delivery_id': life.digest(body)}
-
-
-def receipt_matches(receipt, delivery_id):
-    """Accept a data-delivery receipt only. Never instructions or market facts.
-
-    A receipt is not trusted to confirm an exchange action or to alter any
-    execution state. Retries belong only to the future display delivery queue.
-    """
-    life.ident(delivery_id, r'[0-9a-f]{64}')
-    life.shape(receipt, 'delivery_id received')
-    if receipt['delivery_id'] != delivery_id or receipt['received'] is not True:
-        raise life.LifecycleError('DISPLAY_RECEIPT_MISMATCH')
-    return True

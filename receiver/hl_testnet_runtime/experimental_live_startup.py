@@ -390,13 +390,21 @@ class HandoverCoordinator:
             pass
         if self.owner_lease is not None and owner_health['held'] is not True:
             enabled = False
+        cycle_error = getattr(self.service,'last_cycle_error_code',None)
+        cycle_status = getattr(self.service,'last_status',None)
+        if cycle_error is None and cycle_status in (
+                'DEFINITELY_NOT_SUBMITTED_REOBSERVE',
+                'OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED'):
+            # Report handled send failures without changing the service's
+            # collection-availability gate or scheduling extra REST scans.
+            cycle_error = cycle_status
         return dict(configured=True, running=self._active and (
                 self.owner_lease is None or owner_health['held'] is True),
             status=self.status, legacy_protection_retained=self._legacy_started,
             new_entries_enabled=bool(enabled),
             predecessor_retirement_operator_attested=attested,
             process_ownership=owner_health,
-            last_cycle_error_code=getattr(self.service,'last_cycle_error_code',None),
+            last_cycle_error_code=cycle_error,
             last_cycle_at_ms=getattr(self.service,'last_cycle_at_ms',None),
             last_entry_decisions=deepcopy(getattr(self.service,'last_entry_decisions',{})),
             cross_process_ownership_verified=False)

@@ -74,6 +74,58 @@ WINDOWS: Dict[str, int] = {
 _REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def reference_cache_memory_counts() -> Dict[str, int]:
+    """Best-effort content-free counts; never fetch, copy samples or alter cache.
+
+    Snapshot at most 64 entry references and eight window references per entry.
+    Totals describe those sampled entries; cache_symbols is the observed cache
+    size. Detected mutation, truncation or malformed state sets incomplete=1.
+    This diagnostic is not an atomic snapshot or a measurement of bytes.
+    """
+    counts = dict(cache_symbols=0, sampled_symbols=0, history_rows=0, windows=0,
+                  price_samples=0, oi_samples=0, incomplete=0)
+
+    def snapshot_values(mapping, limit):
+        values, size = [], 0
+        try:
+            size = len(mapping)
+            if size > limit:
+                counts['incomplete'] = 1
+            iterator = iter(mapping.values())
+            for _ in range(min(size, limit)):
+                values.append(next(iterator))
+            if len(mapping) != size:
+                counts['incomplete'] = 1
+        except Exception:
+            counts['incomplete'] = 1
+        return values, size
+
+    entries, counts['cache_symbols'] = snapshot_values(_REFERENCE_CACHE, 64)
+    counts['sampled_symbols'] = len(entries)
+    for entry in entries:
+        try:
+            rows = entry.get('rows', 0)
+            if type(rows) is int and rows >= 0:
+                counts['history_rows'] += rows
+            else:
+                counts['incomplete'] = 1
+            windows, _ = snapshot_values(entry.get('windows', {}), 8)
+            counts['windows'] += len(windows)
+            for window in windows:
+                for source, target in (('price_composition_samples', 'price_samples'),
+                                       ('oi_composition_samples', 'oi_samples')):
+                    try:
+                        samples = window.get(source, [])
+                        if not isinstance(samples, (list, tuple)):
+                            raise TypeError
+                        counts[target] += len(samples)
+                    except Exception:
+                        counts['incomplete'] = 1
+        except Exception:
+            counts['incomplete'] = 1
+    return counts
+
+
 # Price history is exchange/pair based. For most assets Binance is the first
 # choice. HYPE starts with Hyperliquid. Fallbacks exist only for historical
 # collection and never touch the live price provider.

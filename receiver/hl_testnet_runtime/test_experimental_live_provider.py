@@ -160,6 +160,22 @@ class ProviderTests(unittest.TestCase):
         state=h.store.load()
         self.state.update(deepcopy(state));self.state['domain']='testnet'
         for request in self.state['requests'].values():request['domain']='testnet'
+        # The raw /info oracle maps software IDs to numeric venue tids. The
+        # copied durable testnet fixture must already use those same canonical
+        # identities; a real prior fill may never be renamed during collection.
+        def normalized_fill(value):
+            result=deepcopy(value)
+            result['fill_id']='hl:'+str(int(life.digest(value['fill_id'])[:12],16))
+            return result
+        for trade in self.state['trades'].values():
+            for key in ('entry_fills','exit_fills'):
+                fills=[normalized_fill(f) for f in trade[key].values()]
+                trade[key]={f['fill_id']:f for f in fills}
+            for order in trade['orders'].values():
+                order['fills']=[normalized_fill(f) for f in order['fills']]
+        for snapshot in self.state['snapshots'].values():
+            for order in snapshot['orders']:
+                order['fills']=[normalized_fill(f) for f in order['fills']]
         self.exchange.orders=deepcopy(h.venue.orders);self.exchange.requests=deepcopy(h.venue.requests)
         self.exchange.mark=deepcopy(h.venue.mark)
         self.exchange.t=h.venue.t
@@ -176,13 +192,13 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError,'NO_SOFTWARE_RELABELING'):self.provider.collect(self.state)
         self.assertEqual(self.raw.calls,[])
 
-    def test_missing_mark_history_blocks_entry_with_fresh_both_account_inventory(self):
+    def test_missing_mark_history_blocks_entry_with_fresh_own_account_inventory(self):
         msg=self.pending();value=self.provider.collect(self.state,entries_enabled=True)
         self.assertTrue(value['inventory_complete'])
         self.assertEqual(value['entry_blocked'][msg['occurrence_id']],'CONTINUOUS_REFERENCE_MARK_HISTORY_UNAVAILABLE')
-        self.assertEqual(value['inventory_accounts'],sorted(x['account'] for x in ROUTES.values()))
+        self.assertEqual(value['inventory_accounts'],[ROUTES['short_account']['account']])
         self.assertEqual(len(value['snapshots']),1)
-        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
+        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),1)
 
     def test_approved_entry_collects_actual_account_without_source_history(self):
         msg=self.approved();self.provider.safety=object()
@@ -192,19 +208,58 @@ class ProviderTests(unittest.TestCase):
         source.assert_not_called();history.assert_not_called()
         self.assertEqual(context['entry_blocked'],{})
         self.assertEqual(context['ranges'],{})
-        self.assertIn(msg['occurrence_id'],context['capacity'])
+        self.assertIn(msg['occurrence_id'],context['entry_accounts'])
         self.assertTrue(context['inventory_complete'])
-        self.assertIn('activeAssetData',[c[0] for c in self.raw.calls])
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs','userRole','userRateLimit'])
+        self.assertEqual(context['entry_accounts'][msg['occurrence_id']]['agent'],ENV['HL_TESTNET_LONG_AGENT_ADDRESS'])
 
-    def test_approved_entry_still_requires_supervisor_and_owned_inventory(self):
+    def test_actual_market_is_shared_without_refreshing_its_time_and_expires_after_five_seconds(self):
+        msg=self.approved();self.provider.safety=object()
+        lane=runtime._lane(self.state['routes']['long_account'],msg['symbol'])
+        first=self.provider.collect(self.state,entries_enabled=True)
+        original=deepcopy(first['marks'][lane]);start=self.exchange.t
+        self.exchange.mark[lane]='99';self.exchange.t+=4999;self.raw.calls.clear()
+        reused=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(reused['marks'][lane],original)
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.exchange.t=start+5000;self.raw.calls.clear()
+        refreshed=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(refreshed['marks'][lane]['mark_price'],'99')
+        self.assertEqual(refreshed['marks'][lane]['at_ms'],start+5000)
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
+        # Clock reversal must never renew or reuse a future-dated observation.
+        self.exchange.t=start+4999;self.exchange.mark[lane]='100';self.raw.calls.clear()
+        reversed_clock=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(reversed_clock['marks'][lane]['mark_price'],'100')
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
+
+    def test_invalid_market_response_is_not_cached(self):
+        msg=self.approved();self.provider.safety=object();original=self.raw.read
+        def invalid(kind,*args,**kwargs):
+            value=original(kind,*args,**kwargs)
+            if kind=='metaAndAssetCtxs':
+                index=next(i for i,a in enumerate(value[0]['universe']) if a['name']==msg['symbol'])
+                value[1][index]['markPx']='invalid'
+            return value
+        with patch.object(self.raw,'read',side_effect=invalid):
+            self.provider.collect(self.state,entries_enabled=True)
+        self.assertIsNone(self.provider._market)
+        self.raw.calls.clear();result=self.provider.collect(self.state,entries_enabled=True)
+        self.assertIn(msg['occurrence_id'],result['entry_accounts'])
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
+
+    def test_approved_entry_requires_supervisor_but_external_other_coin_is_separate(self):
         msg=self.approved()
         context=self.provider.collect(self.state,entries_enabled=True)
         self.assertEqual(context['entry_blocked'][msg['occurrence_id']],
             'VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
         self.provider.safety=object();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         context=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(msg['occurrence_id'],context['entry_blocked'])
-        self.assertNotIn(msg['occurrence_id'],context['capacity'])
+        self.assertNotIn(msg['occurrence_id'],context['entry_blocked'])
+        self.assertIn(msg['occurrence_id'],context['entry_accounts'])
+        observed=context['external_observation']['accounts'][self.state['routes']['long_account']]
+        self.assertEqual(observed['orders'][0]['origin'],'EXTERNAL')
 
     def test_approved_dispatch_replays_real_admission_with_no_range_lookup(self):
         from .experimental_live_runtime import TestnetExecutionRuntime
@@ -239,24 +294,22 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn('userAbstraction',kinds);self.assertNotIn('userRole',kinds)
         self.assertNotIn('userRateLimit',kinds)
 
-    def test_foreign_order_on_other_symbol_blocks_account_entry(self):
+    def test_foreign_order_on_other_symbol_is_observed_without_account_block(self):
         msg=self.pending();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         value=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
+        self.assertNotIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
+        self.assertEqual(value['external_observation']['accounts'][ROUTES['short_account']['account']]['orders'][0]['order_id'],'999')
         self.assertIn(msg['occurrence_id'],value['entry_blocked'])
 
-    def test_changed_inventory_between_passes_fences_affected_accounts(self):
-        self.pending();count=[0]
-        def change(kind):
-            if kind=='frontendOpenOrders':
-                count[0]+=1
-                if count[0]==3:self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
-        self.raw.mutate=change
-        value=self.provider.collect(self.state)
-        self.assertEqual(value['inventory_accounts'],[])
-        self.assertEqual(set(value['inventory_account_errors']),set(self.state['routes'].values()))
-        self.assertEqual(set(value['inventory_account_errors'].values()),{'ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY'})
-        self.assertEqual(value['snapshots'],[])
+    def test_next_collection_reads_current_inventory_and_records_external_exposure(self):
+        self.pending()
+        first=self.provider.collect(self.state)
+        self.assertEqual(first['account_entry_blocked'],{})
+        self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
+        second=self.provider.collect(self.state)
+        self.assertEqual(second['account_entry_blocked'],{})
+        self.assertEqual(set(second['external_observation']['accounts']),set(self.state['routes'].values()))
+        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
 
     def test_real_collectors_reconstruct_exact_fill_without_source_history(self):
         msg=self.active();value=self.provider.collect(self.state)
@@ -288,7 +341,8 @@ class ProviderTests(unittest.TestCase):
         value=self.provider.collect(self.state)
         self.assertEqual(len(value['snapshots']),1)
         self.assertEqual(value['snapshots'][0]['orders'][0]['status'],'FILLED')
-        self.assertEqual(set(value['account_entry_blocked']),set(self.state['routes'].values()))
+        self.assertEqual(value['account_entry_blocked'],{})
+        self.assertEqual(value['external_observation']['accounts'][self.state['routes']['short_account']]['positions']['DOGE'],'3')
 
     def test_dispatch_requires_prior_collection_and_native_durable_request(self):
         self.active();request=next(iter(self.state['requests'].values()))
@@ -338,8 +392,19 @@ class ProviderTests(unittest.TestCase):
             self.provider.dispatch_context(request)
 
     def test_collection_timestamp_is_not_refreshed_at_dispatch(self):
+        from .experimental_execution_dispatch import review, BoundaryError
         request=self.cancel_request();self.provider.collect(self.state)
-        self.exchange.t+=5001
+        observed=self.exchange.t
+        self.exchange.t+=6000
+        context=self.provider.dispatch_context(request)
+        self.assertEqual(context['safety']['at_ms'],observed)
+        # The ordinary inventory limit is fifteen seconds. A previously
+        # prepared request still has its independent five-second lifetime.
+        with self.assertRaisesRegex(BoundaryError,'DURABLE_ATTEMPT_EXPIRED'):
+            review(request,context,now_ms=self.exchange.t)
+        request.update(attempt_at_ms=self.exchange.t,prepared_at_ms=self.exchange.t,nonce=self.exchange.t)
+        self.assertTrue(review(request,self.provider.dispatch_context(request),now_ms=self.exchange.t)['reviewed'])
+        self.exchange.t=observed+15001
         with self.assertRaisesRegex(ProviderError,'FRESH_COLLECTOR'):
             self.provider.dispatch_context(request)
 
@@ -396,8 +461,215 @@ class ProviderTests(unittest.TestCase):
             for _ in range(26):p.collect(self.state)
         self.assertEqual(len(public),27);self.assertEqual(len(info),54)
         self.assertEqual(priorities,['protection','background']*27)
-        self.assertGreater(sum(len(r.calls) for r in public),200)
-        self.assertTrue(all(len(r.calls)<=8 for r in public))
+        self.assertEqual(sum(len(r.calls) for r in public),104)
+        self.assertTrue(all(len(r.calls)<=4 for r in public))
+
+    def test_ineligible_source_alone_does_not_fetch_market_or_source_prices(self):
+        self.approved()
+        value=self.provider.collect(self.state,entries_enabled=False)
+        self.assertEqual(value['marks'],{})
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState']*2)
+
+    def test_budget_retry_skips_entry_reads_until_original_retry_time(self):
+        from .request_budget import BudgetError
+        msg=self.approved();cid=msg['occurrence_id'];self.provider.safety=object()
+        failure=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',retry_after_ms=17000)
+        with patch.object(self.provider,'_entry_account',side_effect=failure) as capacity:
+            context=self.provider.collect(self.state,entries_enabled=True)
+        retry=self.exchange.t+17000
+        self.assertEqual(context['entry_retry_after_ms'][cid],retry)
+        self.state['entry_decisions']={cid:dict(reason=context['entry_blocked'][cid],retry_after_ms=retry)}
+        self.raw.calls.clear()
+        with patch.object(self.provider,'_entry_account',side_effect=AssertionError('NO_CAPACITY_UNTIL_DUE')):
+            context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_retry_after_ms'][cid],retry)
+        self.assertEqual(self.raw.calls,[])
+        self.assertEqual(context['inventory_accounts'],[])
+        self.assertEqual(context['entry_accounts'],{})
+
+    def test_insufficient_whole_preflight_budget_stops_before_optional_reads(self):
+        from types import SimpleNamespace
+        msg=self.approved();self.provider.safety=object();requested=[]
+        def capacity(*,requested_weight,priority):
+            requested.append((requested_weight,priority))
+            return dict(eligible=False,used_weight=658,requested_weight=requested_weight,
+                        ceiling=800,retry_after_ms=9000)
+        self.provider.budget=SimpleNamespace(capacity=capacity)
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(requested,[(123,'background')])
+        self.assertEqual(self.raw.calls,[])
+        self.assertEqual(context['inventory_accounts'],[])
+        self.assertEqual(context['account_inventory_at_ms'],{})
+        self.assertEqual(context['entry_retry_after_ms'][msg['occurrence_id']],self.exchange.t+9000)
+
+    def test_source_budget_wait_does_not_skip_existing_fill_protection(self):
+        from types import SimpleNamespace
+        self.active(steps=1)
+        msg=self.approved();self.provider.safety=object()
+        self.provider.budget=SimpleNamespace(capacity=lambda **kw:dict(
+            eligible=False,used_weight=658,requested_weight=kw['requested_weight'],
+            ceiling=800,retry_after_ms=9000))
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][msg['occurrence_id']],
+                         'TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        self.assertTrue(context['snapshots'])
+        self.assertIn(self.state['routes']['short_account'],context['inventory_accounts'])
+        self.assertIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.assertNotIn('userAbstraction',[c[0] for c in self.raw.calls])
+
+    def test_static_protected_trade_skips_mark_but_new_missing_exit_restores_it(self):
+        from types import SimpleNamespace
+        from .test_experimental_live_safety import LiveSafetyTests
+        from .test_simplified_execution_replay import sol_alert
+        h=LiveSafetyTests(methodName='runTest');h.setUp();self.addCleanup(h.doCleanups)
+        h.supervisor._thread=SimpleNamespace(is_alive=lambda:True,join=lambda **kwargs:None)
+        h.ready_feed();h.supervisor.pass_once(force_collect=True);fx=h.fx
+        msg=sol_alert((fx.oracle.now()//60000)*60000)
+        account=fx.release['routes']['long_account']
+        fx.oracle.mark[runtime._lane(account,msg['symbol'])]=msg['entry']
+        fx.worker.receive([msg]);fx.worker.run_once(entries_enabled=True)
+        trade=fx.store.load()['trades'][msg['occurrence_id']]
+        fx.oracle.fill(fx.oracle.oid('ENTRY'),trade['quantity'])
+        for _ in range(3):fx.worker.run_once(entries_enabled=False)
+        fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=False)
+        self.assertEqual(context['marks'],{})
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in fx.raw.calls])
+        # A second same-symbol alert must stop at the unchanged local gate.
+        peer=sol_alert((fx.oracle.now()//60000)*60000,cycle='peer')
+        fx.worker.receive([peer]);fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][peer['occurrence_id']],runtime.shared_market.ENTRY_BLOCK)
+        self.assertEqual(context['entry_accounts'],{})
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in fx.raw.calls])
+        self.assertNotIn('userAbstraction',[c[0] for c in fx.raw.calls])
+        stop=fx.oracle.orders[fx.oracle.oid('STOP')]['view']
+        stop['status']='CANCELED';stop['at_ms']=fx.oracle.now()
+        # Venue/system cancellation retains automatic repair. An unexplained
+        # user cancellation now hands management to the operator separately.
+        raw_status=fx.raw.status
+        def system_cancel(oid):
+            value=raw_status(oid)
+            if str(oid)==fx.oracle.oid('STOP') and value.get('order',{}).get('status')=='canceled':
+                value['order']['status']='marginCanceled'
+            return value
+        fx.raw.status=system_cancel
+        fx.raw.calls.clear()
+        context=fx.provider.collect(fx.store.load(),entries_enabled=False)
+        self.assertIn(runtime._lane(account,msg['symbol']),context['marks'])
+        self.assertEqual([c[0] for c in fx.raw.calls].count('metaAndAssetCtxs'),0)
+        repaired=fx.worker.run_once(entries_enabled=False)
+        self.assertEqual(repaired.get('operation'),'CREATE_EXIT',repaired)
+        self.assertEqual(sum(r['proposal']['leg']=='STOP' and r['proposal']['operation']=='CREATE_EXIT'
+            for r in fx.store.load()['requests'].values()),2)
+
+    def test_nested_preflight_keeps_budget_delay_and_stops_remaining_reads(self):
+        from .request_budget import BudgetError
+        msg=self.approved();self.provider.safety=object();original=self.raw.read
+        def deny_role(kind,*args,**kwargs):
+            if kind=='userRole':
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',retry_after_ms=9000)
+            return original(kind,*args,**kwargs)
+        with patch.object(self.raw,'read',side_effect=deny_role):
+            context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][msg['occurrence_id']],'TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        self.assertEqual(context['entry_retry_after_ms'][msg['occurrence_id']],self.exchange.t+9000)
+        self.assertNotIn('userRateLimit',[c[0] for c in self.raw.calls])
+
+    def test_known_order_identity_and_terminal_status_are_reused_only_with_checkpoint(self):
+        msg=self.active(steps=4);cid=msg['occurrence_id']
+        first=self.provider.collect(self.state)
+        self.assertEqual(first['blocked_lanes'],{})
+        self.assertNotIn('lookup',[c[0] for c in self.raw.calls])
+        lane=runtime._lane(self.state['trades'][cid]['account'],msg['symbol'])
+        snapshot=first['snapshots'][0]
+        # Install the exact normalized raw exchange proof as a durable fixture.
+        self.state['snapshots'][lane]=deepcopy(snapshot)
+        self.state['trades'][cid]['orders']={o['oid']:deepcopy(o) for o in snapshot['orders']}
+        self.state['collector_checkpoints']=deepcopy(first['collector_checkpoints'])
+        self.raw.calls.clear()
+        result=self.provider.collect(self.state)
+        self.assertEqual(result['blocked_lanes'],{})
+        terminal=[o for o in snapshot['orders'] if o['status']!='OPEN']
+        self.assertTrue(terminal)
+        self.assertEqual(sum(c[0]=='orderStatus' for c in self.raw.calls),0)
+        self.assertNotIn('lookup',[c[0] for c in self.raw.calls])
+        self.assertEqual(sum(c[0]=='userFillsByTime' for c in self.raw.calls),1)
+        terminal[0]['wire_order']['s']='1'
+        self.state['trades'][cid]['orders'][terminal[0]['oid']]=terminal[0]
+        result=self.provider.collect(self.state)
+        self.assertIn('PREVIOUSLY_OWNED_ORDER_TERMS_CHANGED',result['blocked_lanes'].values())
+
+    def test_open_inventory_reuses_durable_identity_without_cloid_and_rejects_changed_terms(self):
+        self.active(steps=4);original=self.raw.read
+        changed={}
+        def frontend(kind,*args,**kwargs):
+            result=original(kind,*args,**kwargs)
+            if kind=='frontendOpenOrders':
+                for row in result:
+                    row.pop('cloid',None)
+                    row.update(changed)
+            return result
+        with patch.object(self.raw,'read',side_effect=frontend):
+            result=self.provider.collect(self.state)
+            self.assertEqual(result['blocked_lanes'],{})
+            # The first raw collection still checks the filled entry once;
+            # both already observed open exits use inventory directly.
+            self.assertEqual([c[0] for c in self.raw.calls].count('orderStatus'),1)
+            for invalid in ({'limitPx':'999'},{'cloid':'0x'+'f'*32},
+                            {'timestamp':self.exchange.now()+1},{'reduceOnly':False}):
+                changed.clear();changed.update(invalid)
+                result=self.provider.collect(self.state)
+                self.assertTrue(result['blocked_lanes'],invalid)
+
+    def test_open_inventory_partial_fill_must_match_history_and_current_position(self):
+        self.active(steps=4);original=self.raw.read
+        take=self.exchange.oid('TAKE_PROFIT')
+        quantity=Decimal(self.exchange.orders[take]['view']['wire_order']['s'])/2
+        self.exchange.fill(take,str(quantity))
+        result=self.provider.collect(self.state)
+        self.assertEqual(result['blocked_lanes'],{})
+        self.assertEqual([c[0] for c in self.raw.calls].count('orderStatus'),1)
+        def mismatch(kind,*args,**kwargs):
+            value=original(kind,*args,**kwargs)
+            if kind=='frontendOpenOrders':
+                for row in value:
+                    if str(row['oid'])==take:row['sz']=row['origSz']
+            return value
+        with patch.object(self.raw,'read',side_effect=mismatch):
+            result=self.provider.collect(self.state)
+        self.assertIn('OPEN_ORDER_HISTORY_INCOMPLETE',result['blocked_lanes'].values())
+
+    def test_staged_own_fill_missing_from_rest_cannot_advance_lane_checkpoint(self):
+        msg=self.active(steps=4);trade=self.state['trades'][msg['occurrence_id']]
+        take=self.exchange.oid('TAKE_PROFIT')
+        quantity=Decimal(trade['quantity'])/2
+        stale=deepcopy(self.exchange.orders)
+        self.exchange.fill(take,str(quantity))
+        current=deepcopy(self.exchange.orders)
+        executed=current[take]['view']['fills'][-1]
+        saved=dict(executed,fill_id='hl:'+str(int(life.digest(executed['fill_id'])[:12],16)))
+        # Stream receipt was durably saved, while the coherent REST replica
+        # still reports the earlier order/position/history view.
+        trade['orders'][take]['fills'].append(deepcopy(saved))
+        trade['exit_fills'][saved['fill_id']]=dict(saved,order_id=take)
+        self.exchange.orders=stale
+        before=deepcopy(self.state)
+        lane=runtime._lane(trade['account'],trade['symbol'])
+        refused=self.provider.collect(self.state)
+        self.assertEqual(refused['blocked_lanes'][lane],'PREVIOUS_FILL_REMOVED_OR_CHANGED')
+        self.assertNotIn(lane,refused['collector_checkpoints'])
+        self.assertFalse(refused['snapshots'])
+        self.assertEqual(self.state,before)
+        # Once REST includes the identical execution, ordinary reconciliation
+        # succeeds without renaming, losing or allocating the fill twice.
+        self.exchange.orders=current
+        accepted=self.provider.collect(self.state)
+        self.assertNotIn(lane,accepted['blocked_lanes'])
+        self.assertIn(lane,accepted['collector_checkpoints'])
+        order=next(o for s in accepted['snapshots'] for o in s['orders'] if o['oid']==take)
+        self.assertEqual(order['fills'],[saved])
 
     def legacy_active(self,*,pending=None):
         from .experimental_live_provider import _empty
@@ -439,33 +711,22 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(value['snapshots'],[])
         self.assertTrue(set(value['blocked_lanes'].values()) & {'DUPLICATE_CARD_ID','ORDER_ID_ALREADY_BOUND'})
 
-    def test_default_account_capacity_allows_only_proven_owned_other_market(self):
-        from . import two_account_execution as roles
-        account=roles.PHANTOM;provider=self.provider
-        provider.env={**ENV,'HL_TESTNET_SHORT_ACCOUNT_ADDRESS':account,
-            'HL_TESTNET_RUNTIME_MODE':'experimental_connection_disabled_by_default'}
-        pos=dict(assetPositions=[dict(position=dict(coin='DOGE',szi='-1'))])
-        old=self.raw.read
-        def read(kind,account_arg=None,*,user=None,coin=None,**kw):
-            if kind=='userAbstraction':return 'default'
-            if kind=='userRole':return dict(role='user') if user==account else dict(role='agent',data=dict(user=account))
-            if kind=='clearinghouseState':
-                return dict(**pos,withdrawable='50000',marginSummary=dict(accountValue='50000',totalRawUsd='50000',totalMarginUsed='1',totalNtlPos='1'))
-            return old(kind,account_arg,user=user,coin=coin,**kw)
-        self.raw.read=read
-        msg=r2732_message(entry=2.3,decision_ms=T-60000)
-        bucket=dict(account=account,symbol='DOGE',pending=None,bindings=[],
-            evidence=dict(snapshot=dict(position_quantity='-1',terminal_orders=[])))
-        from .experimental_market_context import MarketSnapshot
-        market=MarketSnapshot(self.raw.read('metaAndAssetCtxs'),observed_at_ms=self.exchange.t)
-        capacity,report=provider._capacity(msg,account,'short_account',META,
-            buckets=[bucket],inventory=dict(orders=[],positions=pos),market=market)
-        self.assertEqual(capacity['account'],account)
-        self.assertEqual(report['account_mode'],'default')
-        self.assertFalse(report['mode_was_renamed'])
-        with self.assertRaisesRegex(ValueError,'UNOWNED_ACCOUNT_POSITION'):
-            provider._capacity(msg,account,'short_account',META,
-                buckets=[],inventory=dict(orders=[],positions=pos),market=market)
+    def test_entry_binds_actual_agent_to_configured_account_without_account_mode(self):
+        account=self.state['routes']['short_account'];original=self.raw.read
+        def read(kind,*args,**kwargs):
+            if kind in ('userAbstraction','activeAssetData','spotClearinghouseState'):
+                raise AssertionError('NO_FINANCIAL_PREFLIGHT')
+            return original(kind,*args,**kwargs)
+        with patch.object(self.raw,'read',side_effect=read):
+            observed=self.provider._entry_account(account,'short_account',state=self.state,legacy_revision='fixture')
+        self.assertEqual(observed['account'],account)
+        self.assertEqual(observed['agent'],ENV['HL_TESTNET_SHORT_AGENT_ADDRESS'])
+        self.assertEqual(observed['action_headroom'],1000)
+        self.exchange.t+=300000
+        wrong=dict(role='agent',data=dict(user=self.state['routes']['long_account']))
+        with patch.object(self.raw,'read',return_value=wrong):
+            with self.assertRaisesRegex(ValueError,'AGENT_ACCOUNT_MISMATCH'):
+                self.provider._entry_account(account,'short_account',state=self.state,legacy_revision='fixture')
 
 
 if __name__=='__main__':unittest.main()

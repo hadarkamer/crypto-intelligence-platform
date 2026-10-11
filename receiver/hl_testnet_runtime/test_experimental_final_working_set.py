@@ -50,14 +50,14 @@ class FinalWorkingSetTests(unittest.TestCase):
         self.assertIn(cid,_retired_experimental(self.state,self.exchange.t))
         result=self.provider.collect(self.state)
         self.assertEqual(result['blocked_lanes'],{});self.assertEqual(result['account_entry_blocked'],{})
-        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(frontendOpenOrders=4,clearinghouseState=4))
+        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(frontendOpenOrders=2,clearinghouseState=2))
         self.assertEqual(self.state,before)
 
     def test_new_candidate_same_lane_keeps_exact_final_orders_and_uses_no_old_history(self):
         cid,trade,lane=self.final_trade();new=self.candidate_same_lane(trade)
         old_orders=deepcopy(trade['orders']);old_raw=deepcopy(self.state['collector_checkpoints'][lane])
         result=self.provider.collect(self.state,entries_enabled=True)
-        self.assertEqual(result['entry_blocked'],{});self.assertIn(new,result['capacity'])
+        self.assertEqual(result['entry_blocked'],{});self.assertIn(new,result['entry_accounts'])
         snapshot=next(s for s in result['snapshots'] if s['account']==trade['account'])
         self.assertEqual({o['oid']:o for o in snapshot['orders']},old_orders)
         self.assertEqual(self.state['collector_checkpoints'][lane],old_raw)
@@ -67,15 +67,17 @@ class FinalWorkingSetTests(unittest.TestCase):
         planner._snapshot(replay,snapshot,self.exchange.t)
         self.assertEqual(replay['trades'][cid]['orders'],old_orders)
 
-    def test_reappearing_final_oid_and_unknown_position_remain_account_fences(self):
+    def test_reappearing_final_oid_fences_account_but_external_position_only_its_coin(self):
         cid,trade,lane=self.final_trade();new=self.candidate_same_lane(trade)
         self.raw.extra_orders=[dict(coin=trade['symbol'],oid=int(next(iter(trade['orders']))))]
         result=self.provider.collect(self.state,entries_enabled=True)
         self.assertIn(trade['account'],result['account_entry_blocked'])
-        self.assertNotIn(new,result['capacity'])
+        self.assertNotIn(new,result['entry_accounts'])
         self.raw.extra_orders=[];self.raw.extra_positions=[dict(position=dict(coin=trade['symbol'],szi='-1'))]
         result=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(trade['account'],result['account_entry_blocked']);self.assertNotIn(new,result['capacity'])
+        self.assertNotIn(trade['account'],result['account_entry_blocked'])
+        self.assertEqual(result['blocked_lanes'][lane],'EXTERNAL_MARKET_OCCUPIED_NO_NEW_ENTRY')
+        self.assertNotIn(new,result['entry_accounts'])
 
     def test_prior_terminal_contradiction_cannot_be_hidden_by_later_flat_inventory(self):
         cid,trade,lane=self.final_trade()

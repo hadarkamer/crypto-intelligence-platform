@@ -91,6 +91,25 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
         from .experimental_live_provider import LiveEvidenceProvider
         from .test_experimental_live_provider import (ENV, LegacyFixture,
             RawTestnetFixture, UnavailablePrices)
+        # This fixture crosses from the software worker to raw REST and then
+        # continues the worker after archiving. Use one canonical fill identity
+        # from its creation onward; the raw boundary must not rename a durable
+        # fill or hash an already canonical ID a second time.
+        software_fill = self.venue.fill
+        def canonical_fill(oid, quantity, price=None):
+            software_fill(oid, quantity, price)
+            row = self.venue.orders[oid]['view']['fills'][-1]
+            row['fill_id'] = 'hl:'+str(int(runtime.life.digest(row['fill_id'])[:12],16))
+        self.venue.fill = canonical_fill
+        class CanonicalRawFixture(RawTestnetFixture):
+            def read(self, kind, *args, **kwargs):
+                result = super().read(kind, *args, **kwargs)
+                if kind == 'userFillsByTime':
+                    tids = {int(runtime.life.digest(f['fill_id'])[:12],16):int(f['fill_id'][3:])
+                            for item in self.exchange.orders.values() for f in item['view']['fills']}
+                    for row in result:
+                        row['tid'] = tids[row['tid']]
+                return result
         first, expected = self.close()
         prior_requests = deepcopy(self.store.load()['requests'])
         def oracle_state():
@@ -98,7 +117,7 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
             value['requests'] = {**prior_requests, **value['requests']}
             return value
         budget = object()
-        raw = RawTestnetFixture(self.venue, oracle_state, budget)
+        raw = CanonicalRawFixture(self.venue, oracle_state, budget)
         provider = LiveEvidenceProvider(ENV, legacy_store=LegacyFixture(),
             experimental_store=self.store, price_evidence=UnavailablePrices(),
             budget=budget, clock=self.venue.now, info_reader=raw,

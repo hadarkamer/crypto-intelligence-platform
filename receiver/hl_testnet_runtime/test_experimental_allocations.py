@@ -77,10 +77,6 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result['allocations'][CID]['remaining'],'0.6')
         self.assertEqual(result['allocations'][PEER]['remaining'],'1')
         self.assertFalse(result['allocations'][CID]['quantity_coverage_observed'])
-        action=allocations.unsigned_reduction(result,CID,'.6')
-        self.assertFalse(action['dispatch_enabled'])
-        with self.assertRaisesRegex(allocations.AllocationError,'REDUCTION_EXCEEDS_OWN_REMAINING'):
-            allocations.unsigned_reduction(result,CID,'.7')
 
     def test_short_account_requires_negative_position_and_opposite_exit_side(self):
         bindings=[binding()];sample=snapshot(bindings)

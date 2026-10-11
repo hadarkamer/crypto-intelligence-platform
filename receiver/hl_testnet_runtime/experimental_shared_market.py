@@ -11,7 +11,7 @@ from decimal import Decimal
 from . import card_lifecycle as life
 
 VERSION = 'experimental-shared-market-safety-v1'
-FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
+FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
 SETTLED = frozenset(('OBSERVED', 'ABORTED_UNSENT'))
 ENTRY_BLOCK = 'SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED'
 
@@ -57,6 +57,11 @@ def assess(state):
     for cid, trade in sorted(state['trades'].items()):
         if cid != trade['cid']:
             raise SharedMarketError('EXACT_SHARED_TRADE_IDENTITY_REQUIRED')
+        if trade['phase']=='MANUALLY_CLOSED':
+            from .experimental_external_activity import closure_verified
+            if not closure_verified(trade) or any(r['phase'] not in SETTLED for r in requests.get(cid,[])):
+                raise SharedMarketError('MANUAL_CLOSURE_NOT_VERIFIED')
+            continue
         entered, exited = (_sum(trade[key].values()) for key in ('entry_fills', 'exit_fills'))
         for kind in ('entry_fills', 'exit_fills'):
             for fid, fill in trade[kind].items():

@@ -12,6 +12,7 @@ import unittest
 import approved_alert_outbox as outbox
 import experimental_execution_transport as transport
 from approved_alert_producer_selftest import approved_fixture, projected
+from approved_alert_formula_selftest import formula_fixture, STORES
 from experimental_execution_transport_selftest import config
 from maxpain_experimental_specs import SPECS
 from hl_testnet_runtime.experimental_execution_gateway import IsolatedGateway
@@ -23,10 +24,10 @@ from hl_testnet_runtime.test_approved_alert_lifecycle import CurrentOnlyExchange
 
 
 class ApprovedPipelineTests(unittest.TestCase):
-    def test_all_five_source_decisions_authenticate_then_submit_once_at_alert_limit(self):
-        for spec in SPECS.values():
-            with self.subTest(symbol=spec.coin), tempfile.TemporaryDirectory() as directory:
-                fixture = approved_fixture(spec, gap=True)
+    def test_all_eight_source_decisions_authenticate_then_submit_once_at_alert_limit(self):
+        for spec in [*SPECS.values(), *STORES]:
+            with self.subTest(formula=str(spec)), tempfile.TemporaryDirectory() as directory:
+                fixture = formula_fixture(spec) if isinstance(spec, str) else approved_fixture(spec, gap=True)
                 message, = projected(fixture)
                 state = ExecutionState(Path(directory) / 'pipeline.isolated-experimental.sqlite3')
                 state.initialize(ROUTES, not_before_ms=fixture['fence_ms'])

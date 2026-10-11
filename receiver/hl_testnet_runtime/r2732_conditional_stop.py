@@ -79,7 +79,7 @@ def initialize(*, card_id, source_event_id, reference_entry, entry_at_ms,
 
 def initialize_from_contract(card_id, contract):
     """Freeze a normalized producer envelope; never substitute execution prices."""
-    from experimental_execution_contract import normalize
+    from approved_alert_contract import normalize
     from .source_window import timestamp
     value = normalize(contract)
     if value['family'] != 'r2732':

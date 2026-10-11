@@ -94,7 +94,7 @@ def _card(state, cid):
             result.append({**deepcopy(row), 'leg': trade['order_legs'][oid]})
         return result
     entry_fills, exit_fills = fills('entry_fills'), fills('exit_fills')
-    return dict(version=VERSION, card_id=cid, domain=state['domain'],
+    value=dict(version=VERSION, card_id=cid, domain=state['domain'],
         account=trade['account'], account_role=trade['role'], symbol=trade['symbol'],
         side=trade['side'], formula_id=msg['rule_id'], family=msg['family'],
         source=deepcopy(msg), source_digest=source.get('plan_digest') if source else None,
@@ -114,6 +114,12 @@ def _card(state, cid):
         wait_reasons=reasons, timeline=events,
         last_exchange_snapshot_at_ms=state.get('snapshots', {}).get(lane, {}).get('at_ms'),
         observation_status='DURABLE_OBSERVED_FACTS_NOT_A_FRESH_EXCHANGE_QUERY')
+    if trade.get('manual_management'):
+        value['manual_management']=deepcopy(trade['manual_management'])
+        value['manual_closure']=deepcopy(trade.get('manual_closure'))
+        value['observation_status']='HISTORIC_BOT_FACTS_WITH_SEPARATE_ACTUAL_ACCOUNT_OBSERVATION'
+        value['protections_status']='HUMAN_MANAGES_EXITS_BOT_DOES_NOT_CERTIFY_CURRENT_COVERAGE'
+    return value
 
 
 def cards_from_state(state, *, domain):

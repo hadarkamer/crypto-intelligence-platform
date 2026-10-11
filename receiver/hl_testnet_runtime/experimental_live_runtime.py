@@ -3,14 +3,16 @@
 Not registered in startup, and never activated by importing this module. Only
 concrete Testnet state/evidence/transport ports are accepted. Observations are
 prepared without I/O inside transactions, then compared and committed under the
-state revision lock. The shared IP request budget is acquired before commit;
+state revision lock. The shared IP request budget is acquired before final dispatch checks;
 nonces use the existing per-agent dispatch allocator in that same transaction.
 """
 from copy import deepcopy
+import threading
 
-from . import card_lifecycle as life, filled_quantity_dispatch as wire
+from . import card_lifecycle as life, filled_quantity_dispatch as wire, request_budget
 from .experimental_execution_runtime import (
-    IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining, FINAL, TERMINAL,
+    IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining,
+    _merge_order_fills, FINAL, TERMINAL,
 )
 from .experimental_live_state import TestnetExecutionState
 from . import r2732_entry
@@ -27,10 +29,8 @@ LOCAL_ENTRY_REFUSALS = frozenset((
     'ASSET_PRECISION_OR_LISTING_INVALID', 'ASSET_UNAVAILABLE',
     'PRICES_COLLAPSED_AFTER_ROUNDING', 'PRICE_PRECISION_NO_ROUNDING',
     'CURRENT_PRICE_OR_SIZE_PRECISION_REJECTED', 'OUTSIDE_LAB_SIZE_BOUNDS',
-    'QUANTITY_EXCEEDS_EXCHANGE_CAP', 'MARK_NOTIONAL_EXCEEDS_LAB_CAP',
-    'ESTIMATED_MARGIN_EXCEEDS_UNHELD_USDC', 'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE',
-    'OUTSIDE_CONSERVATIVE_LAB_BUDGET', 'CURRENT_LEVERAGE_NOT_VERIFIED',
-    'FRESH_EXACT_ACCOUNT_CAPACITY_REQUIRED', 'EXACT_FRESH_TESTNET_MARK_SAMPLE_REQUIRED',
+    'MARK_NOTIONAL_EXCEEDS_LAB_CAP',
+    'FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED', 'EXACT_FRESH_TESTNET_MARK_SAMPLE_REQUIRED',
     'PROSPECTIVE_ENTRY_ALREADY_CONSUMED', 'FORMULA_OVERLAP_NOT_ALLOWED',
     'G65_PENDING_ENTRY_OR_CANCEL_ALREADY_CONSUMED', 'HYPE_ORIGINAL_ENTRY_WINDOW_CONSUMED',
     'R2732_SOURCE_INITIAL_EXIT_ALREADY_REACHED', 'R2732_SOURCE_LOCK_ALREADY_REACHED',
@@ -39,12 +39,12 @@ LOCAL_ENTRY_REFUSALS = frozenset((
 ))
 RETRYABLE_UNSENT = frozenset((
     'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED', 'FINAL_EVIDENCE_EXPIRED',
+    'TESTNET_REQUEST_BUDGET_EXHAUSTED', 'TESTNET_REQUEST_BUDGET_BUSY',
     'DURABLE_ATTEMPT_EXPIRED', 'FRESH_COLLECTOR_CHECKPOINT_REQUIRED_BEFORE_DISPATCH',
     'EXPERIMENTAL_OWNERSHIP_CHANGED_RECONCILE_FIRST',
     'LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST', 'DISPATCH_CONTEXT_CHANGED_RECONCILE_FIRST',
     'OBSERVED_SAFETY_CHECKPOINT_PENDING',
 ))
-MAX_ENTRY_ATTEMPTS = 3
 ENTRY_RETRY_DELAY_MS = 1000
 
 
@@ -57,7 +57,7 @@ def entry_retry_ready(state, cid, now):
             or not _source_active(state['sources'][cid], now)):
         return False
     attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-    if not 0 < len(attempts) < MAX_ENTRY_ATTEMPTS:
+    if not attempts:
         return False
     if any(r['phase'] != 'ABORTED_UNSENT' or r.get('certified_unsent') is not True
             or r.get('observed_oid') is not None or r.get('reply') is not None
@@ -73,6 +73,8 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
     source = state['sources'][cid]['source']
     role = 'long_account' if source['side'] == 'LONG' else 'short_account'
     account = state['routes'][role]
+    if retry_after_ms is None:
+        retry_after_ms = context.get('entry_retry_after_ms', {}).get(cid)
     if scope is None:
         scope = ('account' if account in context.get('account_entry_blocked', {})
             else 'market' if _lane(account, source['symbol']) in context.get('blocked_lanes', {})
@@ -110,6 +112,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 or not callable(release_loader)):
             raise RuntimeError('EXPLICIT_TESTNET_WORKER_REQUIRED')
         self.store, self.venue, self.dispatch = store, provider, dispatch
+        # Source worker and supervisor share one collector/dispatch capability.
+        # The supervisor is a fallback, never a second concurrent REST scan.
+        self._cycle_lock = threading.Lock()
         self.release_loader = release_loader
         state = store.load()
         if state['domain'] != 'testnet':
@@ -191,7 +196,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             _entry_decision(state, cid, context, now, state['entry_blocked'][cid])
         return proposal
 
-    def _abort_entry_unsent(self, state, request, now, reason):
+    def _abort_entry_unsent(self, state, request, now, reason, *, retry_after_ms=None):
         """Called only before send or after an exact transport certificate."""
         request.update(phase='ABORTED_UNSENT', unsent_reason=reason, certified_unsent=True)
         cid = request['proposal']['card_id']
@@ -200,18 +205,19 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if trade['orders'] or trade['entry_fills'] or trade['exit_fills']:
                 raise RuntimeError('UNSENT_ENTRY_CONFLICTS_WITH_OBSERVED_EXPOSURE')
             attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-            retry = (reason in RETRYABLE_UNSENT and len(attempts) < MAX_ENTRY_ATTEMPTS
-                and _source_active(state['sources'][cid], now)
+            retry = (reason in RETRYABLE_UNSENT and _source_active(state['sources'][cid], now)
                 and all(r['phase'] == 'ABORTED_UNSENT' and r.get('certified_unsent') is True
                     and r.get('unsent_reason') in RETRYABLE_UNSENT for r in attempts))
             trade['phase'] = 'RETRY_WAIT_UNSENT' if retry else 'CANCELED_WITHOUT_FILL'
+            delay = (max(ENTRY_RETRY_DELAY_MS, min(request_budget.WINDOW_MS, retry_after_ms))
+                if type(retry_after_ms) is int and retry_after_ms >= 0 else ENTRY_RETRY_DELAY_MS)
             if retry:
-                trade['entry_retry'] = dict(after_ms=now+ENTRY_RETRY_DELAY_MS,
+                trade['entry_retry'] = dict(after_ms=now+delay,
                     reason=reason, attempts=len(attempts))
             else:
                 trade.pop('entry_retry', None)
             _entry_decision(state, cid, {}, now, reason,
-                retry_after_ms=now+ENTRY_RETRY_DELAY_MS if retry else None)
+                retry_after_ms=now+delay if retry else None)
         state['events'].append(dict(at_ms=now, kind='DEFINITELY_NOT_SUBMITTED',
             request_id=request['request_id'], occurrence_id=cid, reason=reason))
 
@@ -298,7 +304,15 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def _maintain_live(self, state, context, now):
         from . import emergency_close
-        for trade in sorted(state['trades'].values(),key=lambda t:t['cid']):
+        # Cover every filled position before preparing another trade's TP.
+        # Stable card identity remains the tie-breaker within each priority.
+        for trade in sorted(state['trades'].values(),key=lambda t:(
+                not (_remaining(t)>0 and sum(
+                    (life.number(o['wire_order']['s'])-sum(
+                        (life.number(f['quantity']) for f in o['fills']),0)
+                     for oid,o in t['orders'].items()
+                     if o['status']=='OPEN' and t['order_legs'][oid]=='STOP'),0)<_remaining(t)),
+                t['cid'])):
             if trade['phase'] in FINAL: continue
             own={**state,'trades':{trade['cid']:trade}}
             view=self._deadline_view(state,trade,context,now) if _remaining(trade)>0 else None
@@ -349,24 +363,35 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         # protection in another lane whose full ownership is proven.
         if context.get('basis_revision') != state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+        from . import experimental_external_activity as external
+        external.apply(state,context.get('external_observation'))
         accounts = context.get('inventory_accounts')
         account_errors = context.get('inventory_account_errors', {})
         if (context.get('inventory_complete') is not True or not isinstance(accounts, list)
                 or accounts != sorted(set(accounts)) or not set(accounts) <= set(state['routes'].values())
                 or not isinstance(account_errors, dict)
-                or set(accounts) | set(account_errors) != set(state['routes'].values())
+                or not (set(accounts) | set(account_errors)) <= set(state['routes'].values())
                 or set(accounts) & set(account_errors)
                 or type(context.get('inventory_at_ms')) is not int
                 or not 0 <= now-context['inventory_at_ms'] <= 15000):
             raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')
         scoped = deepcopy(context)
         scoped.setdefault('account_entry_blocked', {}).update(account_errors)
+        for account in set(state['routes'].values()) - set(accounts) - set(account_errors):
+            scoped['account_entry_blocked'][account] = 'ACCOUNT_INVENTORY_NOT_COLLECTED'
         blocked = scoped.setdefault('blocked_lanes', {})
+        for key,reason in list(blocked.items()):
+            if reason==external.HUMAN and key not in state.get('external_activity',{}).get('human_managed',{}):
+                blocked.pop(key)
+        for key in state.get('external_activity',{}).get('human_managed',{}):
+            blocked[key]=external.HUMAN
         observed = set()
         for snapshot in context['snapshots']:
             if snapshot.get('account') not in accounts:
                 raise RuntimeError('SNAPSHOT_OUTSIDE_VERIFIED_ACCOUNT_INVENTORY')
             lane = _lane(snapshot['account'], snapshot['symbol'])
+            if external.managed(state,snapshot['account'],snapshot['symbol']):
+                continue
             candidate = deepcopy(state)
             try:
                 self._snapshot(candidate, snapshot, now)
@@ -377,8 +402,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             state.clear(); state.update(candidate); observed.add(lane)
         for trade in state['trades'].values():
             lane = _lane(trade['account'], trade['symbol'])
-            if trade['phase'] not in FINAL and lane not in observed:
-                blocked[lane] = 'ACTIVE_MARKET_INVENTORY_UNPROVEN'
+            if trade['phase'] not in FINAL and lane not in observed and not external.managed(state,trade['account'],trade['symbol']):
+                blocked.setdefault(lane, 'ACTIVE_MARKET_INVENTORY_UNPROVEN')
             if trade['phase'] == 'RETRY_WAIT_UNSENT' and not _source_active(state['sources'][trade['cid']], now):
                 trade['phase'] = 'CANCELED_WITHOUT_FILL'
                 trade.pop('entry_retry', None)
@@ -404,7 +429,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         unavailable = {r['proposal']['account'] for r in state['requests'].values()
             if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
         emergency_accounts = {t['account'] for t in state['trades'].values()
-            if t['phase'] not in FINAL and t.get('emergency_reason')}
+            if t['phase'] not in FINAL and t.get('emergency_reason')
+            and not external.managed(state,t['account'],t['symbol'])}
         if proposal is None and entries_enabled:
             for cid in sorted(state['sources'], key=lambda k:(state['sources'][k]['source']['source_at'], k)):
                 source = state['sources'][cid]
@@ -448,85 +474,237 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def run_once(self, *, entries_enabled=False):
         """New entries default off; valid release is independently required."""
+        if not self._cycle_lock.acquire(blocking=False):
+            return dict(status='OBSERVATION_CYCLE_ALREADY_RUNNING', **readiness())
+        try:
+            return self._run_once(entries_enabled=entries_enabled)
+        finally:
+            self._cycle_lock.release()
+
+    def _ingest_pending_fills(self):
+        """Persist feed deltas before REST; acknowledge only a committed batch.
+
+        A fill is never a complete inventory or an order-status certificate.
+        Unbound/ambiguous fills remain account observations for REST attribution.
+        No exchange I/O or feed locks are held inside the state transaction.
+        """
+        from . import experimental_external_activity as external
+        feed = getattr(getattr(self.venue, 'safety', None), 'feed', None)
+        pending = getattr(feed, 'pending_fills', None)
+        if not callable(pending):
+            return {}
+        errors = {}
+        for batch in pending():
+            if not batch.items:
+                continue
+            now = self.venue.now()
+            def transition(state):
+                if batch.account not in state['routes'].values():
+                    raise RuntimeError('STREAM_FILL_ACCOUNT_MISMATCH')
+                rows = []
+                owned = {}
+                completed_fills = {f['fill_id']: f
+                    for checkpoint in state.get('collector_checkpoints', {}).values()
+                    if checkpoint.get('account') == batch.account
+                    and checkpoint.get('history_complete') is True
+                    for f in checkpoint.get('fills', [])}
+                for row in batch.fills:
+                    fill = deepcopy(row)
+                    if fill.get('account') != batch.account:
+                        raise RuntimeError('STREAM_FILL_ACCOUNT_MISMATCH')
+                    # Historical reconnect replay before activation cannot
+                    # belong to this worker. It never moves a recovery cursor.
+                    if type(fill.get('at_ms')) is not int or fill['at_ms'] > now:
+                        raise RuntimeError('STREAM_FILL_TIME_INVALID')
+                    if fill['at_ms'] < state['not_before_ms']:
+                        continue
+                    # Complete checkpoints may retain facts after recent
+                    # account history is pruned. A changed replay must still
+                    # fail before retention or old deferrals can hide it.
+                    prior = completed_fills.get(fill['fill_id'])
+                    if prior is not None and prior != fill:
+                        raise RuntimeError('EXTERNAL_FILL_FACT_CHANGED')
+                    matches = [t for t in state['trades'].values()
+                        if t['account'] == fill['account'] and t['symbol'] == fill['symbol']
+                        and fill['oid'] in t['orders']]
+                    if len(matches) > 1:
+                        raise RuntimeError('EXCHANGE_ORDER_HAS_MULTIPLE_DURABLE_OWNERS')
+                    fill['origin'] = 'BOT' if matches else 'UNATTRIBUTED'
+                    rows.append(fill)
+                    if matches and not external.managed(state,fill['account'],fill['symbol']):
+                        trade = matches[0]
+                        if trade['phase'] not in FINAL:
+                            owned.setdefault(trade['cid'], []).append(fill)
+                # The same existing account records retain complete canonical
+                # facts, including unbound fills. This validates the entire batch
+                # before any attributable quantity can be changed.
+                external.record_fill_deltas(state, rows, now_ms=now)
+                for cid, fills in owned.items():
+                    candidate = deepcopy(state['trades'][cid])
+                    try:
+                        groups = {}
+                        for fill in fills:
+                            groups.setdefault(fill['oid'], []).append(fill)
+                        for oid, deltas in groups.items():
+                            order = candidate['orders'][oid]
+                            requests = [r for r in state['requests'].values()
+                                if r['proposal']['card_id'] == cid
+                                and r['proposal']['account'] == candidate['account']
+                                and r['proposal']['symbol'] == candidate['symbol']
+                                and r['phase'] == 'OBSERVED' and r.get('observed_oid') == oid
+                                and r['proposal']['action']['type'] in ('order','batchModify')
+                                and wire.requested_order(r['proposal']['action'])['c'] == order['cloid']]
+                            if len(requests) != 1:
+                                raise RuntimeError('EXACT_OBSERVED_STREAM_ORDER_REQUIRED')
+                            request = requests[0]
+                            expected = wire.requested_order(request['proposal']['action'])
+                            if (order['wire_order'] != expected
+                                    or candidate['order_legs'].get(oid) != request['proposal']['leg']
+                                    or any(f['side'] != ('B' if expected['b'] else 'A') for f in deltas)):
+                                raise RuntimeError('STREAM_FILL_ORDER_TERMS_MISMATCH')
+                            compact = [{k:f[k] for k in ('fill_id','quantity','price','at_ms')} for f in deltas]
+                            if order['status'] in TERMINAL:
+                                prior = {f['fill_id']:f for f in order['fills']}
+                                if any(prior.get(f['fill_id']) != f for f in compact):
+                                    raise RuntimeError('TERMINAL_ORDER_CHANGED')
+                            merged = _merge_order_fills(candidate,request,oid,compact,now,complete=False)
+                            # Quantity facts change together. Status/phase and
+                            # all coverage timestamps remain independently proven.
+                            candidate['orders'][oid]['fills'] = merged
+                        if _remaining(candidate) < 0:
+                            raise RuntimeError('EXIT_EXCEEDED_OWNED_QUANTITY_PEER_RISK')
+                    except (ValueError,KeyError,TypeError) as exc:
+                        # A sparse/reordered stream is not complete evidence.
+                        # The canonical facts are saved above, but allocation
+                        # waits for complete reconciliation. Persist the reason
+                        # with those facts instead of silently accepting an
+                        # invalid side, quantity, price or terminal transition.
+                        reason = str(exc)
+                        if (not reason or len(reason)>140 or not all(
+                                c.isupper() or c.isdigit() or c=='_' for c in reason)):
+                            reason = 'STREAM_FILL_FACTS_REQUIRE_REVIEW'
+                        fact = dict(kind='STREAM_FILL_ALLOCATION_DEFERRED',
+                            occurrence_id=cid, account=candidate['account'],
+                            symbol=candidate['symbol'], reason=reason,
+                            fill_ids=sorted(f['fill_id'] for f in fills))
+                        if not any(all(event.get(k)==v for k,v in fact.items())
+                                   for event in state['events']):
+                            state['events'].append(dict(at_ms=now, **fact))
+                        state.setdefault('blocked_lanes', {})[_lane(
+                            candidate['account'],candidate['symbol'])] = 'STREAM_FILL_RECONCILIATION_REQUIRED'
+                        continue
+                    state['trades'][cid] = candidate
+            # Validate against a committed read before opening a write. A
+            # malformed/future delta or a bounded retention limit must not
+            # starve REST recovery or the other account. Database failures are
+            # not caught here, and an uncertain write never acknowledges data.
+            simulation = self.store.load()
+            try:
+                transition(simulation)
+            except (RuntimeError,external.ExternalActivityError,life.LifecycleError) as exc:
+                errors[batch.account] = dict(reason=str(exc),
+                    symbols=sorted({f['symbol'] for f in batch.fills}))
+                continue
+            self.store.mutate(transition)
+            feed.acknowledge_fills(batch)
+        return errors
+
+    def _run_once(self, *, entries_enabled):
         owner=getattr(self,'startup_owner',None)
         if owner is not None:
             owner.verify()
+        stream_errors = self._ingest_pending_fills()
         history_ok=self._compact_history()
         before = self.store.load()
         admission_release = self._release(before, self.venue.now())
         collect_entries = (entries_enabled is True and history_ok
             and releases.entry_enabled(admission_release,self.venue.now()))
-        context = self.venue.collect(deepcopy(before), entries_enabled=collect_entries)
-        now = self.venue.now()
-        life.moment(now)
-        release = self._release(before, now)
-        enabled = (collect_entries and release == admission_release and releases.entry_enabled(release,now))
-        # No persistence or I/O in this simulation: the exact same pure
-        # transition is checked again after budget admission under SQL lock.
-        prepared_state = deepcopy(before)
-        proposal = self._cycle_proposal(prepared_state, context, now, entries_enabled=enabled)
-        admission = self.dispatch.reserve_transport(proposal) if proposal is not None else None
+        collection_state = deepcopy(before)
+        if stream_errors:
+            # Collection-only diagnostics: the provider closes affected entry
+            # gates before staging its receipt, while REST can still recover.
+            collection_state['_pending_stream_fill_errors'] = stream_errors
+        context = self.venue.collect(collection_state, entries_enabled=collect_entries)
+        # Optional history maintenance and collection keep their independent
+        # recovery paths. Warm the shared socket before the short permit;
+        # each subsequent state operation still commits separately.
+        with self.store.journal.reuse_connection():
+            now = self.venue.now()
+            life.moment(now)
+            release = self._release(before, now)
+            enabled = (collect_entries and release == admission_release and releases.entry_enabled(release,now))
+            # No persistence or I/O in this simulation: the exact same pure
+            # transition is checked again under the SQL lock. The concrete
+            # sender acquires its short permit only after durable preparation.
+            prepared_state = deepcopy(before)
+            proposal = self._cycle_proposal(prepared_state, context, now, entries_enabled=enabled)
 
-        def transition(state, nonce=None):
-            current = self._cycle_proposal(state, context, now, entries_enabled=enabled)
-            if current != proposal:
-                raise RuntimeError('CONCURRENT_PROPOSAL_RELOAD_REQUIRED')
-            return self._reserve_live(state, current, now, nonce) if current else None
+            def transition(state, nonce=None):
+                current = self._cycle_proposal(state, context, now, entries_enabled=enabled)
+                if current != proposal:
+                    raise RuntimeError('CONCURRENT_PROPOSAL_RELOAD_REQUIRED')
+                return self._reserve_live(state, current, now, nonce) if current else None
 
-        request = (self.store.commit_attempt(transition, role=proposal['role'], now_ms=now)
-            if proposal is not None else self.store.mutate(transition))
-        # A committed inventory checkpoint may release a feed generation;
-        # collection alone never certifies it. Failure closes only admissions.
-        observation_verified = True
-        try:
-            self.venue.observation_committed(context)
-        except Exception:
-            observation_verified = False
-        if request is None:
-            return dict(status='OBSERVED_NO_ACTION' if observation_verified else
-                'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
+            request = (self.store.commit_attempt(transition, role=proposal['role'], now_ms=now)
+                if proposal is not None else self.store.mutate(transition))
+            # A committed inventory checkpoint may release a feed generation;
+            # collection alone never certifies it. Checkpoint refusal closes
+            # admissions; a failed SQL transaction poisons the scope and stops
+            # all dispatch until the committed request is reconciled.
+            observation_verified = True
+            try:
+                self.venue.observation_committed(context)
+            except Exception:
+                observation_verified = False
+            if request is None:
+                return dict(status='OBSERVED_NO_ACTION' if observation_verified else
+                    'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
 
-        # A canceled/expired never-submitted entry keeps a durable tombstone.
-        latest_release = self._release(self.store.load(), self.venue.now())
-        def final_check(state):
-            current = state['requests'][request['request_id']]
-            if current != request:
-                raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
-            if (request['proposal']['operation'] == 'ENTRY'
-                    and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
-                        or latest_release != release
-                        or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
-                reason = ('OBSERVED_SAFETY_CHECKPOINT_PENDING' if not observation_verified
-                    and releases.entry_enabled(latest_release, self.venue.now()) and latest_release == release
-                    and _source_active(state['sources'][request['proposal']['card_id']], self.venue.now())
-                    else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
-                self._abort_entry_unsent(state, current, self.venue.now(), reason)
-                return False
-            return True
-        if not self.store.mutate(final_check):
-            return dict(status='CANCELED_BEFORE_TRANSPORT', **readiness())
-        admission.bind(request)
-        try:
-            reply = wire.send_admitted(self.dispatch, request, admission)
-        except wire.DefinitelyUnsent as certificate:
-            def abort_unsent(state):
+            # A canceled/expired never-submitted entry keeps a durable tombstone.
+            latest = self.store.load()
+            latest_release = self._release(latest, self.venue.now())
+            def final_check(state):
                 current = state['requests'][request['request_id']]
-                if not certificate.matches(current):
-                    raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
-                self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason)
-            self.store.mutate(abort_unsent)
-            return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
-        except Exception:
-            # Includes pre-wire errors without an explicit durable unsent
-            # certificate. Conservatively reconcile; never repeat the request.
-            return dict(status='OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED', **readiness())
-        def receipt(state):
-            current = state['requests'][request['request_id']]
-            if current['phase'] == 'OUTCOME_UNKNOWN':
-                current['reply'] = deepcopy(reply)
-        self.store.mutate(receipt)
-        return dict(status='TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',
-            operation=request['proposal']['operation'], **readiness())
+                if current != request:
+                    raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
+                if (request['proposal']['operation'] == 'ENTRY'
+                        and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
+                            or latest_release != release
+                            or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
+                    reason = ('OBSERVED_SAFETY_CHECKPOINT_PENDING' if not observation_verified
+                        and releases.entry_enabled(latest_release, self.venue.now()) and latest_release == release
+                        and _source_active(state['sources'][request['proposal']['card_id']], self.venue.now())
+                        else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
+                    self._abort_entry_unsent(state, current, self.venue.now(), reason)
+                    return False
+                return True
+            # Successful validation changes no durable state. Only a refusal needs
+            # a transaction, which rechecks the exact request before saving its abort.
+            # The sender independently reloads the request and gates before transport.
+            if not final_check(latest) and not self.store.mutate(final_check):
+                return dict(status='CANCELED_BEFORE_TRANSPORT', **readiness())
+            try:
+                reply = wire.send_admitted(self.dispatch, request, None)
+            except wire.DefinitelyUnsent as certificate:
+                def abort_unsent(state):
+                    current = state['requests'][request['request_id']]
+                    if not certificate.matches(current):
+                        raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
+                    self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason,
+                        retry_after_ms=getattr(certificate, 'retry_after_ms', None))
+                self.store.mutate(abort_unsent)
+                return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
+            except Exception:
+                # Includes pre-wire errors without an explicit durable unsent
+                # certificate. Conservatively reconcile; never repeat the request.
+                return dict(status='OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED', **readiness())
+            def receipt(state):
+                current = state['requests'][request['request_id']]
+                if current['phase'] == 'OUTCOME_UNKNOWN':
+                    current['reply'] = deepcopy(reply)
+            self.store.mutate(receipt)
+            return dict(status='TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',
+                operation=request['proposal']['operation'], **readiness())
 
     def report(self):
         """Domain-correct operational status, never a software P/L projection."""
@@ -547,4 +725,5 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
             entry_decisions=deepcopy(state.get('entry_decisions', {})),
             cards=cards_from_state(state, domain='testnet'),
+            external_activity=deepcopy(state.get('external_activity',{})),
             blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **capabilities)

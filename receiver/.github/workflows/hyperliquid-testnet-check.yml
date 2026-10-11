@@ -1,0 +1,51 @@
+name: Hyperliquid Testnet Adapter Safety
+
+on:
+  push:
+    branches: [paper-trading-v1]
+    paths:
+      - 'hyperliquid_testnet_*.py'
+      - 'requirements-hl-testnet.txt'
+      - '.github/workflows/hyperliquid-testnet-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hl-testnet-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Existing paper and new testnet adapter tests - all external actions mocked
+        run: python3 -m unittest -v paper_execution_selftest paper_execution_feed_selftest paper_execution_bridge_selftest hyperliquid_testnet_executor_selftest
+      - name: Install official SDK for offline signing checks only
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hl-testnet-sdk"
+          "$RUNNER_TEMP/hl-testnet-sdk/bin/pip" --disable-pip-version-check install -r requirements-hl-testnet.txt
+      - name: Official SDK wire and testnet signature checks - no account connected
+        run: '"$RUNNER_TEMP/hl-testnet-sdk/bin/python" -m unittest -v hyperliquid_testnet_sdk_selftest'
+      - name: Testnet public metadata connectivity only - zero orders
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PY'
+          import json
+          from hyperliquid_testnet_executor import TestnetHTTP
+          client = TestnetHTTP()
+          meta = client.info('meta')
+          assets = [a for a in meta['universe'] if a.get('name') == 'BTC' and not a.get('isDelisted', False)]
+          assert len(assets) == 1
+          assert type(assets[0]['szDecimals']) is int
+          assert 0 <= assets[0]['szDecimals'] <= 6
+          assert client.order_attempts == 0
+          print(json.dumps({'network': 'testnet', 'public_metadata_verified': True,
+                            'asset': 'BTC', 'public_reads': client.public_calls,
+                            'exchange_order_batches_sent': client.order_attempts,
+                            'account_connected': False, 'real_alerts_used': False}))
+          PY

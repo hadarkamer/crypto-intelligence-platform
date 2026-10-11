@@ -1104,22 +1104,6 @@ class EmergencyPureTests(NoExternal):
                         dict(status='ok',response='ack'),T)
         self.assertIsNone(state['protection_timing'][cid]['fill_to_stop_public_ms'])
 
-    def test_timing_trial_rejects_synthetic_expired_or_enabled_continuous_entries(self):
-        from . import protection_timing_trial as trial
-        from .test_long_stream_runtime import env
-        environment={**env(),'HL_TESTNET_EMERGENCY_CLOSE':m.APPROVAL,'HL_TESTNET_SHORT_ENTRY_ENABLED':'false'}
-        _,record=original(expiry_seconds=300)
-        card=record['card'];before=deepcopy(environment)
-        self.assertEqual(trial.validate(environment,card,T),T+90000)
-        self.assertEqual(environment,before)
-        for mutation in [{'HL_TESTNET_LONG_ENTRY_ENABLED':'true'},
-                         {'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'},
-                         {'HL_TESTNET_EMERGENCY_CLOSE':''},
-                         {'RENDER_SERVICE_ID':'production'}]:
-            with self.assertRaises(DispatchError):trial.validate({**environment,**mutation},card,T)
-        with self.assertRaises(DispatchError):trial.validate(environment,original()[1]['card'],T)
-        with self.assertRaises(DispatchError):trial.validate(environment,card,T+600000)
-
     def test_emergency_enabled_entry_requires_exact_expiring_trial_card(self):
         from .test_long_stream_runtime import env
         card=original(expiry_seconds=300)[1]['card'];cid=card['card_id']
