@@ -34,7 +34,7 @@ class Connection:
 class ScopeTests(unittest.TestCase):
     def journal(self):return PostgresJournal.for_ci('postgresql://fake@localhost/hl_journal_ci')
 
-    def test_each_transaction_commits_and_rechecks_database_on_one_socket(self):
+    def test_each_transaction_commits_with_one_database_check_per_socket(self):
         journal=self.journal();conn=Connection()
         with patch.object(journal,'_connect',return_value=conn) as connect:
             with journal.reuse_connection():
@@ -43,7 +43,7 @@ class ScopeTests(unittest.TestCase):
                     self.assertFalse(conn.active)
                 self.assertFalse(conn.closed)
             connect.assert_called_once_with(autocommit=True)
-        self.assertEqual((conn.commits,conn.checks),(3,3));self.assertTrue(conn.closed)
+        self.assertEqual((conn.commits,conn.checks),(3,1));self.assertTrue(conn.closed)
 
     def test_uncertain_commit_poison_prevents_retry_or_follow_on_transaction(self):
         journal=self.journal();conn=Connection();conn.fail_commit=True

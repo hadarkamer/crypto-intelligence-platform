@@ -7,7 +7,7 @@ Actual filled ownership and venue protection remain separate caller evidence.
 from copy import deepcopy
 from decimal import Decimal
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life
 from . import r2732_conditional_stop as common
 
@@ -26,10 +26,12 @@ def initialize_from_contract(card_id, message):
     if value['family'] != 'sol_g65':
         raise ConditionalStopError('G65_CONTRACT_REQUIRED')
     reference = contract.moment_ms(value['source_at'])
+    approved = contract.is_approved(value)
+    entered = contract.moment_ms(value['approved_at']) - MINUTE_MS if approved else None
     return dict(version=VERSION, card_id=card_id, source_event_id=value['occurrence_id'],
         contract=contract.immutable(value), plan_digest=contract.plan_digest(value),
-        price_source=SOURCE, phase='PENDING', status='PENDING',
-        reference_at_ms=reference, entry_at_ms=None, cursor_ms=reference-MINUTE_MS,
+        price_source=SOURCE, phase='OPEN' if approved else 'PENDING', status='OPEN' if approved else 'PENDING',
+        reference_at_ms=reference, entry_at_ms=entered, cursor_ms=(entered if approved else reference)-MINUTE_MS,
         last_bar_digest=None, last_evaluated_at_ms=None, next_expected_bar_ms=None,
         trigger_bar_at_ms=None, lock_effective_at_ms=None, formula_stop=value['stop'],
         outcome=None, levels=dict(entry=value['entry'], initial_stop=value['stop'],
@@ -44,9 +46,12 @@ def validate(state):
         value = deepcopy(state)
         source = deepcopy(value['contract'])
         stamp = contract.moment_ms(source['source_at'])
-        source.update(kind='PLAN', source_as_of=contract.iso_ms(stamp),
-            source_sequence=stamp*10+1, source_state='PENDING',
-            valid_until=contract.iso_ms(stamp+contract.LEASE_MS), cancel_reason=None)
+        approved = contract.is_approved(source)
+        as_of = contract.moment_ms(source['approved_at']) if approved else stamp
+        source.update(kind='ALERT' if approved else 'PLAN', created_at=source.get('created_at', source['source_at']),
+            source_as_of=contract.iso_ms(as_of), source_sequence=as_of*10+1,
+            source_state='APPROVED' if approved else 'PENDING',
+            valid_until=None if approved else contract.iso_ms(stamp+contract.LEASE_MS), cancel_reason=None)
         expected = initialize_from_contract(value['card_id'], source)
         if (set(value) != set(expected) or value['version'] != VERSION
                 or any(value[k] != expected[k] for k in ('contract', 'plan_digest',
@@ -69,7 +74,7 @@ def validate(state):
         entered = value['entry_at_ms']
         if value['phase'] == 'OPEN':
             common._minute(entered)
-            if not stamp <= entered <= cursor:
+            if not stamp <= entered <= cursor + (MINUTE_MS if approved and cursor == expected['cursor_ms'] else 0):
                 raise ValueError()
         elif entered is not None:
             raise ValueError()
@@ -88,7 +93,7 @@ def validate(state):
             life.moment(at)
             if cursor >= stamp and at < cursor+MINUTE_MS:
                 raise ValueError()
-        elif cursor >= stamp:
+        elif cursor > expected['cursor_ms']:
             raise ValueError()
         if value['next_expected_bar_ms'] != (cursor+MINUTE_MS if value['status'] == 'PRICE_GAP' else None):
             raise ValueError()
@@ -162,7 +167,8 @@ def advance(state, bars, *, now_ms, price_source=SOURCE):
             break
         value.update(cursor_ms=when, last_bar_digest=fingerprint,
             status=value['phase'], next_expected_bar_ms=None)
-        just_filled, entered_at_open = False, False
+        just_filled = (contract.is_approved(value['contract']) and when == value['entry_at_ms'])
+        entered_at_open = prices['open'] >= Decimal(value['levels']['entry']) if just_filled else False
         if value['phase'] == 'PENDING':
             entry, cancel = Decimal(value['levels']['entry']), Decimal(value['levels']['pending_cancel'])
             if prices['open'] <= cancel:

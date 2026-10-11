@@ -333,7 +333,6 @@ class EntrypointTests(unittest.TestCase):
 
     def test_worker_exit_stops_coordinator(self):
         with patch.object(startup,'stop') as stopped, \
-             patch('hl_testnet_runtime.single_trial_controller.stop'), \
              patch('hl_testnet_runtime.pending_cancel_monitor.stop'), \
              patch('hl_testnet_runtime.card_sync.stop'), \
              patch('hl_testnet_runtime.filled_trial_runtime.stop'), patch.object(legacy,'stop'):

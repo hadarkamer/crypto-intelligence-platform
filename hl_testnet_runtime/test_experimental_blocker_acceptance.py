@@ -5,6 +5,7 @@ the existing transactional in-memory test port; requests never reach a venue.
 These scenarios intentionally combine gates that separate unit suites exercise.
 """
 from copy import deepcopy
+import approved_alert_contract as contract
 from contextlib import contextmanager
 from unittest.mock import patch, Mock
 import time
@@ -172,20 +173,21 @@ class BlockerAcceptanceTests(unittest.TestCase):
         self.assertFalse(self.entries())
         self.assertEqual(len(self.store.load()['requests']), 1)
 
-    def test_three_certified_unsent_attempts_are_bounded_and_never_hit_http(self):
+    def test_certified_unsent_retries_continue_until_original_expiry(self):
         msg = alert(approved_ms=BASE + 60_000, cycle='retry-cap')
         self.receive(msg)
         with self.never_sent():
-            for attempt in range(live.MAX_ENTRY_ATTEMPTS):
+            for attempt in range(4):
                 self.assertEqual(self.cycle()['status'], 'DEFINITELY_NOT_SUBMITTED_REOBSERVE')
                 self.venue.t += live.ENTRY_RETRY_DELAY_MS + 1
                 self.restart()
+        self.venue.t = contract.moment_ms(msg['expires_at'])
         self.cycle()
         value = self.store.load()
-        self.assertEqual(len(value['requests']), live.MAX_ENTRY_ATTEMPTS)
+        self.assertEqual(len(value['requests']), 4)
         self.assertEqual(value['trades'][msg['occurrence_id']]['phase'], 'CANCELED_WITHOUT_FILL')
         self.assertFalse(self.entries())
-        self.assertEqual(len({r['nonce'] for r in value['requests'].values()}), live.MAX_ENTRY_ATTEMPTS)
+        self.assertEqual(len({r['nonce'] for r in value['requests'].values()}), 4)
 
     def test_unsent_status_without_positive_certificate_never_authorizes_retry(self):
         msg = alert(approved_ms=BASE + 60_000, cycle='missing-proof')

@@ -174,7 +174,7 @@ class PostgresJournal:
         local=self._connection_scope
         if getattr(local,'lease',None) is not None:
             raise JournalError('JOURNAL_CONNECTION_SCOPE_ALREADY_ACTIVE')
-        lease=dict(conn=None,pid=os.getpid(),failed=False,active=False)
+        lease=dict(conn=None,pid=os.getpid(),failed=False,active=False,verified=False)
         local.lease=lease
         try:
             try:
@@ -198,9 +198,11 @@ class PostgresJournal:
             lease['active']=True
             try:
                 with lease['conn'].transaction():
-                    actual=lease['conn'].execute('SELECT current_database()').fetchone()[0]
-                    if actual!=self._parameters['dbname']:
-                        raise JournalError('WRONG_DATABASE')
+                    if not lease['verified']:
+                        actual=lease['conn'].execute('SELECT current_database()').fetchone()[0]
+                        if actual!=self._parameters['dbname']:
+                            raise JournalError('WRONG_DATABASE')
+                        lease['verified']=True
                     yield lease['conn']
                 # Explicit transaction COMMIT completes before returning.
             except BaseException as exc:

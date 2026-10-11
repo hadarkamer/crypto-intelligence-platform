@@ -94,12 +94,12 @@ def application(environ, start_response):
     else:
         status = '200 OK'
         mode = os.environ.get('HL_TESTNET_RUNTIME_MODE')
-        controlled = mode == 'single_testnet_attempt_v1'
+        controlled = False
         filled = mode == 'filled_card_controlled_v1'
         long_stream = mode == 'long_stream_testnet_v1'
         experimental = mode == 'experimental_testnet_v1'
         monitoring = mode == 'cancel_monitor_testnet_v1'
-        rehearsal = mode == 'cancel_rehearsal_testnet_v1'
+        rehearsal = False
         report = {'service':'hyperliquid-testnet-preflight','running':True,
             'read_only':not (controlled or filled or long_stream or experimental or monitoring or rehearsal),'single_attempt_configured':controlled,
             'public_order_controls':False,'continuous_trading':long_stream and (
@@ -116,6 +116,8 @@ def application(environ, start_response):
         if experimental:
             from .experimental_live_startup import health as experimental_health
             report['experimental_testnet'] = experimental_health()
+            report['continuous_trading'] = bool(report['experimental_testnet'].get('running')
+                and report['experimental_testnet'].get('new_entries_enabled'))
         if monitoring:
             from .pending_cancel_monitor import health
             report['monitor'] = health()

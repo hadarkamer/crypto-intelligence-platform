@@ -163,6 +163,7 @@ class RuntimeContract:
         # an unresolved phantom order, and respects the quota's retry horizon.
         for reason in ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY'):
             with self.subTest(reason=reason):
+                self.venue.t=T+10000
                 self.make_worker(not_before=T-60000);self.worker.receive([msg])
                 denied=BudgetError(reason,retry_after_ms=7000)
                 with patch.object(self.port,'reserve_transport',side_effect=denied):
@@ -177,13 +178,16 @@ class RuntimeContract:
                 self.assertFalse(self.venue.requests)
                 self.cycle()
                 self.assertEqual(len(self.store.load()['requests']),1)
-                for _ in range(runtime.MAX_ENTRY_ATTEMPTS-1):
+                for _ in range(3):
                     self.venue.t+=7000
                     with patch.object(self.port,'reserve_transport',side_effect=denied):self.cycle()
                 value=self.store.load()
-                self.assertEqual(len(value['requests']),runtime.MAX_ENTRY_ATTEMPTS)
-                self.assertEqual(value['trades'][msg['occurrence_id']]['phase'],'CANCELED_WITHOUT_FILL')
-                self.cycle();self.assertEqual(len(self.store.load()['requests']),runtime.MAX_ENTRY_ATTEMPTS)
+                self.assertEqual(len(value['requests']),4)
+                self.assertEqual(value['trades'][msg['occurrence_id']]['phase'],'RETRY_WAIT_UNSENT')
+                self.assertFalse(self.venue.requests)
+                self.venue.t=__import__('approved_alert_contract').moment_ms(msg['expires_at'])
+                self.cycle()
+                self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'],'CANCELED_WITHOUT_FILL')
                 self.assertFalse(self.venue.requests)
 
     def test_release_halt_between_reservation_and_send_aborts_never_sent_entry(self):

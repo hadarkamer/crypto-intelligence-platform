@@ -10,6 +10,7 @@ import approved_alert_contract as contract
 from approved_alert_fixtures import maxpain_alert
 from . import experimental_execution_runtime as runtime
 from .experimental_live_provider import ProviderError
+from .experimental_live_runtime import TestnetExecutionRuntime
 from .experimental_plan_store import reduce_source
 from .request_budget import request_weight
 from . import test_experimental_live_provider as provider_fixtures
@@ -45,14 +46,29 @@ class EntryReadReuseTests(unittest.TestCase):
     def test_multiple_candidates_share_only_fresh_account_binding_and_allowance(self):
         first=self.candidate();second=self.candidate(symbol='SOL',cycle='second')
         third=self.candidate(cycle='third')
-        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
-        result=self.collect()
+        # Exercise account reuse after a later admission refusal. Invalid
+        # marks now stop before account queries (covered separately below).
+        with patch.object(TestnetExecutionRuntime, '_admit', side_effect=[None, {}]):
+            result=self.collect()
         self.assertEqual(set(result['entry_accounts']),{first,second})
         self.assertEqual(result['entry_blocked'],{third:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
         self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(
             ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs','userRole','userRateLimit']))
         result['entry_accounts'][first]['action_headroom']=0
         self.assertEqual(result['entry_accounts'][second]['action_headroom'],1000)
+
+    def test_outside_original_exits_skips_role_and_allowance_queries(self):
+        cid = self.candidate()
+        self.exchange.mark[runtime._lane(self.state['routes']['long_account'], 'HYPE')] = '39.455'
+        result = self.collect()
+        self.assertEqual(result['entry_accounts'], {})
+        self.assertEqual(result['entry_blocked'][cid], 'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
+        self.assertFalse({'userRole','userRateLimit'} & {c[0] for c in self.raw.calls})
+        valid = self.candidate(symbol='SOL', cycle='valid-second')
+        self.exchange.t += 5000  # New simulated quote becomes observable after existing cache TTL.
+        result = self.collect()
+        self.assertEqual(set(result['entry_accounts']), {valid})
+        self.assertEqual(result['entry_blocked'][cid], 'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
 
     def test_only_first_admissible_account_is_prepared(self):
         first=self.candidate();second=self.candidate(side='SHORT',cycle='second')
@@ -147,7 +163,7 @@ class EntryReadReuseTests(unittest.TestCase):
             entry_expires_at_ms=None)
         self.provider.safety=SimpleNamespace(release_loader=lambda:release)
         result=self.collect()
-        self.assertIn(cid,result['entry_accounts'])  # It reached the unchanged source-policy gate.
+        self.assertIn(cid,result['entry_accounts'])
         self.assertIn(approved,result['entry_accounts'])
         self.assertNotIn(approved,result['entry_blocked'])
 
@@ -264,11 +280,12 @@ class EntryReadReuseTests(unittest.TestCase):
 
     def test_cached_binding_preserves_original_observation_time(self):
         first=self.candidate();second=self.candidate(cycle='second')
-        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
         observed=[]
         def tick(kind):
             observed.append((kind,self.exchange.t));self.exchange.t+=10
-        self.raw.mutate=tick;result=self.collect()
+        self.raw.mutate=tick
+        with patch.object(TestnetExecutionRuntime, '_admit', return_value=None):
+            result=self.collect()
         first_at=result['entry_accounts'][first]['at_ms']
         self.assertEqual(first_at,result['entry_accounts'][second]['at_ms'])
         self.assertEqual(first_at,next(at for kind,at in observed if kind=='userRole'))
@@ -289,7 +306,6 @@ class EntryReadReuseTests(unittest.TestCase):
         failed_short=self.candidate(side='SHORT',cycle='short-first')
         second_long=self.candidate(symbol='SOL',cycle='long-second')
         recovered_short=self.candidate(side='SHORT',cycle='short-second')
-        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'SOL')]='99'
         original=self.raw.read;attempts=[]
         def malformed_once(kind,*args,**kwargs):
             value=original(kind,*args,**kwargs)
@@ -297,7 +313,9 @@ class EntryReadReuseTests(unittest.TestCase):
                 attempts.append(kind)
                 if len(attempts)==1:value['data']={}
             return value
-        with patch.object(self.raw,'read',side_effect=malformed_once):result=self.collect()
+        with patch.object(self.raw,'read',side_effect=malformed_once), \
+             patch.object(TestnetExecutionRuntime, '_admit', return_value=None):
+            result=self.collect()
         self.assertEqual(set(result['entry_blocked']),{failed_short})
         self.assertEqual(set(result['entry_accounts']),{first_long,second_long,recovered_short})
         self.assertEqual(len(attempts),2)

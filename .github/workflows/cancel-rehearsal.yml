@@ -1,4 +1,4 @@
-name: Isolated Testnet Cancellation Rehearsal
+name: Testnet Cancellation Checks
 on:
   push:
     branches: [paper-trading-v1]
@@ -27,9 +27,9 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m pip install 'psycopg[binary]==3.2.3'
-      - name: Rehearsal gates, cancellation engine, durable isolation, and regression checks
+      - name: Cancellation engine, durable isolation, and regression checks
         run: >-
-          python3 -m unittest -v hl_testnet_runtime.test_cancel_rehearsal
+          python3 -m unittest -v
           hl_testnet_runtime.test_half_threshold_cancel
           hl_testnet_runtime.test_cancel_runtime
           hl_testnet_runtime.test_pending_cancel_monitor

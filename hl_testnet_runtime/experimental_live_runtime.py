@@ -45,7 +45,6 @@ RETRYABLE_UNSENT = frozenset((
     'LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST', 'DISPATCH_CONTEXT_CHANGED_RECONCILE_FIRST',
     'OBSERVED_SAFETY_CHECKPOINT_PENDING',
 ))
-MAX_ENTRY_ATTEMPTS = 3
 ENTRY_RETRY_DELAY_MS = 1000
 
 
@@ -58,7 +57,7 @@ def entry_retry_ready(state, cid, now):
             or not _source_active(state['sources'][cid], now)):
         return False
     attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-    if not 0 < len(attempts) < MAX_ENTRY_ATTEMPTS:
+    if not attempts:
         return False
     if any(r['phase'] != 'ABORTED_UNSENT' or r.get('certified_unsent') is not True
             or r.get('observed_oid') is not None or r.get('reply') is not None
@@ -206,8 +205,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if trade['orders'] or trade['entry_fills'] or trade['exit_fills']:
                 raise RuntimeError('UNSENT_ENTRY_CONFLICTS_WITH_OBSERVED_EXPOSURE')
             attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-            retry = (reason in RETRYABLE_UNSENT and len(attempts) < MAX_ENTRY_ATTEMPTS
-                and _source_active(state['sources'][cid], now)
+            retry = (reason in RETRYABLE_UNSENT and _source_active(state['sources'][cid], now)
                 and all(r['phase'] == 'ABORTED_UNSENT' and r.get('certified_unsent') is True
                     and r.get('unsent_reason') in RETRYABLE_UNSENT for r in attempts))
             trade['phase'] = 'RETRY_WAIT_UNSENT' if retry else 'CANCELED_WITHOUT_FILL'

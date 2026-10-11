@@ -916,6 +916,10 @@ class LiveEvidenceProvider:
                     result['ranges'][cid]=dict(source=source,testnet=testnet)
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
+                from .experimental_execution_prices import require_entry_mark
+                require_entry_mark(msg, result['metadata'],
+                    entry_planner._mark(dict(account=account,symbol=msg['symbol']),result,self.now())['mark_price']
+                    if contract.is_approved(msg) else runtime._range(testnet,msg,self.now(),account=account)[2])
                 result['entry_accounts'][cid]=self._entry_account(account,role,state=state,
                     legacy_revision=result['legacy_account_revisions'][account],entry_reads=entry_reads)
                 # The worker sends at most one proposal per cycle. Reuse its

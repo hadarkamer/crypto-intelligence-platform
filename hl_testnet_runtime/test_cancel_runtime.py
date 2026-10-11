@@ -25,14 +25,13 @@ class RoutingTests(unittest.TestCase):
              patch('threading.Thread') as thread:
             conf.post_worker_init(None)
         self.assertIs(thread.call_args.kwargs['target'],fn)
-    def test_entry_test_inspection_routing_is_not_replaced(self):
-        fn=Mock()
-        with patch.dict(os.environ,{'HL_TESTNET_RUNTIME_MODE':'inspect_testnet_attempt_v1',
-                                   policy.REVIEW_ENV:'present'},clear=True), \
-             patch.dict(sys.modules,{'hl_testnet_runtime.controlled_attempt':SimpleNamespace(startup_single_attempt=fn)}), \
-             patch('threading.Thread') as thread:
-            conf.post_worker_init(None)
-        self.assertIs(thread.call_args.kwargs['target'],fn)
+    def test_removed_trial_modes_only_run_read_only_check(self):
+        for mode in ('single_testnet_attempt_v1','inspect_testnet_attempt_v1',
+                     'cancel_rehearsal_testnet_v1','inspect_cancel_rehearsal_testnet_v1'):
+            with patch.dict(os.environ,{'HL_TESTNET_RUNTIME_MODE':mode},clear=True), \
+                 patch('hl_testnet_runtime.app.start_read_only_check') as read:
+                conf.post_worker_init(None)
+                read.assert_called_once_with()
 
 
 if __name__=='__main__':unittest.main()

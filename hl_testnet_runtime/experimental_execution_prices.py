@@ -42,3 +42,12 @@ def prepare(source, metadata):
     audit.update(policy='approved-limit-bound-with-existing-exit-precision-v1',
         execution_digest=price_precision.digest(execution), entry_limit_worsened=False)
     return result
+
+
+def require_entry_mark(source, metadata, mark):
+    """Reuse price preparation before optional account reads; no new rule."""
+    prepared = prepare(source, metadata)
+    stop, take = (Decimal(prepared['execution'][k]) for k in ('stop', 'take_profit'))
+    if not min(stop, take) < Decimal(mark) < max(stop, take):
+        raise price_precision.PrecisionError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
+    return prepared

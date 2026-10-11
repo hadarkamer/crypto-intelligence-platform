@@ -314,7 +314,7 @@ class IsolatedExecutionRuntime:
         serial = state.get('archived_request_count', 0) + len(state['requests'])
         c = '0x'+life.digest([VERSION,trade['cid'],leg,serial,price,quantity])[:32]
         order = dict(a=index,b=trade['side']=='LONG' if leg=='ENTRY' else trade['side']=='SHORT',p=price,s=quantity,
-            r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
+            r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if contract.is_approved(trade['source']) or trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
                 if leg=='ENTRY' else dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=c)
         action = dict(type='order',orders=[order],grouping='na') if old_oid is None else dict(type='batchModify',modifies=[dict(oid=int(old_oid),order=order)])
         return self._proposal(state,trade,leg,action,quantity,now,operation='ENTRY' if leg=='ENTRY' else 'CREATE_EXIT' if old_oid is None else 'AMEND_EXIT')
@@ -422,7 +422,7 @@ class IsolatedExecutionRuntime:
                     trade['entry_retired_reason']='APPROVED_ALERT_EXIT_ALREADY_REACHED'
                 if msg['family']=='maxpain' and (mark>=_number(msg['original_target']) if msg['side']=='LONG' else mark<=_number(msg['original_target'])):
                     trade['entry_retired_reason']='TESTNET_TARGET_SAFETY_CANCEL_REMAINDER'
-                if msg['family']=='sol_g65' and mark<=_number(msg['policy']['pending_cancel_price']):
+                if msg['family']=='sol_g65' and not contract.is_approved(msg) and mark<=_number(msg['policy']['pending_cancel_price']):
                     trade['entry_retired_reason']='TESTNET_PENDING_CANCEL_BARRIER'
                 retire=retire or trade.get('entry_retired_reason') is not None
             for oid,o in active:
@@ -437,7 +437,7 @@ class IsolatedExecutionRuntime:
         source = state['sources'][cid]; msg = source['source']
         if not _source_active(source,now) or cid in state['trades'] or cid in state.get('source_condition_errors',{}):
             return None
-        if msg['family']=='sol_g65':
+        if msg['family']=='sol_g65' and not contract.is_approved(msg):
             condition=state.get('formula_states',{}).get(cid)
             if (condition is None or condition['phase']!='PENDING' or condition['outcome'] is not None
                     or condition['status'] in ('PRICE_GAP','AMBIGUOUS','EXIT_RECONCILIATION_REQUIRED')):
@@ -468,11 +468,10 @@ class IsolatedExecutionRuntime:
             slo,shi,smark = _range(paths['source'],msg,now)
             dlo,dhi,mark = _range(paths['testnet'],msg,now,account=account)
         metadata=context['metadata']; index,decimals=wire.asset(metadata,msg['symbol'])
-        prepared=prepare_prices(msg,metadata); p=prepared['execution']
+        from .experimental_execution_prices import require_entry_mark
+        prepared=require_entry_mark(msg,metadata,mark); p=prepared['execution']
         prices={k:p[k] for k in ('entry','stop','take_profit')}
         entry,stop,take=(_number(prices[k]) for k in ('entry','stop','take_profit'))
-        if not min(stop,take)<mark<max(stop,take):
-            raise RuntimeError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
         if approved:
             # The producer's approved alert owns formula admission. Do not run
             # another touch/overlap search, or request a pre-touch MARK history.

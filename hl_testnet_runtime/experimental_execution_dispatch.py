@@ -84,7 +84,7 @@ def _terms(request, source, metadata):
         if p['operation']=='ENTRY':
             if (p['leg']!='ENTRY' or action['type']!='order' or o['r'] is not False
                     or o['b'] is not (source['side']=='LONG')
-                    or o['p']!=levels['entry'] or o['t']!={'limit':{'tif':('Gtc' if source['family'] in ('maxpain','sol_g65') else 'Ioc')}}):
+                    or o['p']!=levels['entry'] or o['t']!={'limit':{'tif':('Gtc' if contract.is_approved(source) or source['family'] in ('maxpain','sol_g65') else 'Ioc')}}):
                 raise BoundaryError('EXACT_FROZEN_ENTRY_ACTION_REQUIRED')
             # The live filled-quantity lane submits an entry before observed-fill
             # exits. Apply the SAME risk rule to an exact synthetic bracket;

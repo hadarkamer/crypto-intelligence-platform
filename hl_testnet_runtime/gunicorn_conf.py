@@ -30,8 +30,6 @@ def post_worker_init(worker):
     if mode == 'long_stream_testnet_v1':
         from hl_testnet_runtime.long_stream_runtime import start
         start()
-        from hl_testnet_runtime.single_trial_controller import start as start_single_trial
-        start_single_trial()
         return
     if mode == 'filled_card_controlled_v1':
         # Mutually exclusive future release: never start old monitors alongside it.
@@ -51,17 +49,9 @@ def post_worker_init(worker):
         import threading
         from hl_testnet_runtime.trade_cards_startup import startup as cards_startup
         threading.Thread(target=cards_startup,daemon=True,name='cards-record-only-probe').start()
-    if mode in ('cancel_rehearsal_testnet_v1','inspect_cancel_rehearsal_testnet_v1'):
-        import threading
-        from hl_testnet_runtime.cancel_rehearsal import startup
-        threading.Thread(target=startup,daemon=True,name='explicit-cancel-rehearsal').start()
-    elif mode == 'cancel_monitor_testnet_v1':
+    if mode == 'cancel_monitor_testnet_v1':
         from hl_testnet_runtime.pending_cancel_monitor import start
         start()
-    elif mode in ('single_testnet_attempt_v1','inspect_testnet_attempt_v1'):
-        import threading
-        from hl_testnet_runtime.controlled_attempt import startup_single_attempt
-        threading.Thread(target=startup_single_attempt,daemon=True,name='explicit-single-testnet').start()
     elif (mode == 'read_only' and os.environ.get('HL_TESTNET_JOURNAL_BACKEND') == 'staging_postgres_v1'
             and os.environ.get('HL_TESTNET_CANCELLATION_RULE_REVIEW')):
         import threading
@@ -79,8 +69,6 @@ def post_worker_init(worker):
 def worker_exit(server, worker):
     from hl_testnet_runtime.experimental_live_startup import stop as stop_experimental
     stop_experimental()
-    from hl_testnet_runtime.single_trial_controller import stop as stop_single_trial
-    stop_single_trial()
     from hl_testnet_runtime.pending_cancel_monitor import stop
     stop()
     from hl_testnet_runtime.card_sync import stop as stop_card_sync

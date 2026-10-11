@@ -29,3 +29,18 @@ def maxpain_alert(*, approved_ms=BASE, as_of_ms=None, kind='ALERT',
         valid_until=None, cancel_reason=cancel_reason)
     value['occurrence_id'] = contract.occurrence_id(value)
     return contract.validate(value)
+
+
+def formula_alert(family, *, approved_ms=None):
+    from experimental_execution_fixtures import r2732_message, hype_row71205_message, sol_g65_message
+    builder = {'r2732': r2732_message, 'hype_row71205': hype_row71205_message,
+               'sol_g65': sol_g65_message}[family]
+    if approved_ms is None:
+        from experimental_execution_fixtures import BASE as decision
+        approved_ms = decision + (120000 if family == 'sol_g65' else 60000)
+    value = builder(decision_ms=approved_ms-(120000 if family == 'sol_g65' else 60000))
+    value.update(version=contract.VERSION, kind='ALERT', source_state='APPROVED',
+        approved_at=contract.iso_ms(approved_ms), arm_at=contract.iso_ms(approved_ms),
+        expires_at=contract.iso_ms(approved_ms+contract.LEASE_MS),
+        source_as_of=contract.iso_ms(approved_ms), source_sequence=approved_ms*10+1, valid_until=None)
+    return contract.validate(value)
