@@ -109,4 +109,73 @@ class FormulaTransportTests(unittest.TestCase):
             self.assertEqual(db.outbox, {})
 
 
+
+
+# Exercise the new source hooks against the same disposable database fixture
+# used by the existing outbox tests. No production DSN is accepted by it.
+import os
+import approved_alert_producer_selftest as pg_support
+
+
+@unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Disposable PostgreSQL required')
+class FormulaPostgreSQLTests(unittest.TestCase):
+    setUpClass = classmethod(pg_support.ApprovedOutboxPostgreSQLTests.setUpClass.__func__)
+    tearDownClass = classmethod(pg_support.ApprovedOutboxPostgreSQLTests.tearDownClass.__func__)
+
+    def test_source_commit_wake_duplicate_concurrency_and_rollback(self):
+        from concurrent.futures import ThreadPoolExecutor
+        for family, store in STORES.items():
+            with self.subTest(family=family):
+                key = store.key_for(SUBSCRIPTION)
+                decision = BASE + timedelta(minutes=30)
+                entry = decision + timedelta(minutes=1)
+                now = entry + timedelta(seconds=10)
+                visible = []
+                def after_commit(woken_key):
+                    self.assertEqual(woken_key, key)
+                    with self.connect() as conn:
+                        row, = outbox.read(conn, [key])
+                        visible.append(row)
+                        state = store._locked(conn, key, CONFIG)
+                        self.assertEqual(row['occurrence_id'], producer.approved_messages(
+                            state, now_ms=ms(now), fence_ms=ms(BASE))[0]['occurrence_id'])
+                with patch.object(store, '_connect', self.connect), \
+                     patch.dict('os.environ', approved_env()), \
+                     patch('experimental_execution_forwarder.notify_source_commit', side_effect=after_commit) as wake:
+                    store.initialize_scope(SUBSCRIPTION, BASE, config_sha256=CONFIG)
+                    def reserve(_):
+                        return store.reserve_signal(SUBSCRIPTION, decision, entry, 100,
+                            {'valid': True, 'signal': True}, now, config_sha256=CONFIG)
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        list(pool.map(reserve, range(4)))
+                    if family == 'sol_g65':
+                        wake.assert_not_called()
+                        now = entry + timedelta(minutes=1)
+                        def fill(_):
+                            return store.advance_position(SUBSCRIPTION, [dict(open_at=entry,
+                                open=100, high=100.6, low=100, close=100.4)], now, config_sha256=CONFIG)
+                        with ThreadPoolExecutor(max_workers=4) as pool:
+                            list(pool.map(fill, range(4)))
+                    wake.assert_called_once_with(key)
+                    state = store.snapshot(SUBSCRIPTION)
+                self.assertEqual(len(visible), 1)
+                original = visible[0]
+                self.assertEqual(original, producer.approved_messages(state, now_ms=ms(now), fence_ms=ms(BASE))[0])
+                ended = deepcopy(state)
+                ended.update(active=None, history=[], intents=[], last_exit_at=(now+timedelta(minutes=1)).isoformat())
+                with patch.dict('os.environ', approved_env()), \
+                     patch('experimental_execution_forwarder.notify_source_commit') as wake:
+                    with self.assertRaisesRegex(RuntimeError, 'SIMULATED_SOURCE_ROLLBACK'):
+                        with outbox.source_transaction(self.connect, None) as (conn, changes):
+                            store._save(conn, key, ended, now+timedelta(minutes=1), changes)
+                            raise RuntimeError('SIMULATED_SOURCE_ROLLBACK')
+                    wake.assert_not_called()
+                with self.connect() as conn:
+                    self.assertEqual(outbox.read(conn, [key]), [original])
+                    self.assertEqual(store._locked(conn, key, CONFIG), state)
+                    outbox.acknowledge(conn, [key], original)
+                with self.connect() as conn:
+                    self.assertEqual(outbox.read(conn, [key]), [])
+
+
 if __name__ == '__main__': unittest.main()
