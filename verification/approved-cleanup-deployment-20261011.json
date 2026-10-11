@@ -1,0 +1,567 @@
+{
+  "schema": "approved_cleanup_deployment_v1",
+  "recorded_at_utc": "2026-10-11T19:03:49.817Z",
+  "status": "DEPLOYED_HEALTH_VERIFIED",
+  "user_deployment_approval": "Explicit מאשרת in current conversation on 2026-10-11, after the tested candidate review",
+  "supersedes": "The pre-deployment PostgreSQL limitation/deployment status in verification/approved-cleanup-20261011.json; that historical review remains unchanged.",
+  "source_commits": {
+    "receiver": "30da26f6eefd17e1082466b87144d03f41c36e71",
+    "producer": "3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3"
+  },
+  "health": {
+    "receiver": {
+      "checked_at": "2026-10-11T19:02:49.241320+00:00",
+      "health": {
+        "running": true,
+        "read_only": false,
+        "continuous_trading": true,
+        "experimental_testnet": {
+          "configured": true,
+          "running": true,
+          "status": "EXPERIMENTAL_OWNER_RUNNING",
+          "new_entries_enabled": true,
+          "process_ownership": {
+            "status": "HELD",
+            "held": true
+          },
+          "last_cycle_at_ms": 1791745363268,
+          "last_cycle_error_code": null,
+          "last_entry_decisions": {
+            "source_blocks": 0,
+            "account_blocks": 0,
+            "market_blocks": 0,
+            "reasons": {}
+          }
+        }
+      }
+    },
+    "producer": {
+      "checked_at": "2026-10-11T19:02:53.229261+00:00",
+      "health": {
+        "status": "ok",
+        "service": "crypto-intelligence-v1",
+        "sol_g65_experimental": {
+          "ready": true,
+          "running": true,
+          "state": "WAITING_NEXT_SLOT",
+          "last_error_type": null,
+          "active_position": null,
+          "last_decision": {
+            "decision_at": "2026-10-11T19:00:00+00:00",
+            "observed_at": "2026-10-11T19:01:03.543000+00:00",
+            "status": "no_match"
+          },
+          "next_decision_at": "2026-10-11T19:30:00+00:00"
+        },
+        "hype_row71205_experimental": {
+          "ready": true,
+          "running": true,
+          "state": "WAITING_NEXT_SLOT",
+          "last_error_type": null,
+          "active_position": null,
+          "last_decision": {
+            "decision_at": "2026-10-11T19:00:00+00:00",
+            "observed_at": "2026-10-11T19:01:02.089000+00:00",
+            "status": "no_match"
+          },
+          "next_decision_at": "2026-10-11T19:30:00+00:00"
+        },
+        "xrp_r2732_experimental": {
+          "ready": true,
+          "running": true,
+          "state": "WAITING_NEXT_SLOT",
+          "last_error_type": null,
+          "active_position": null,
+          "last_decision": {
+            "decision_at": "2026-10-11T19:00:00+00:00",
+            "observed_at": "2026-10-11T19:01:07.508000+00:00",
+            "status": "ny_weekend"
+          },
+          "next_decision_at": "2026-10-11T19:15:00+00:00"
+        }
+      }
+    }
+  },
+  "approved_changes": [
+    "Wire existing SOL G65, XRP R2732 and HYPE ROW71205 approvals into existing v2 outbox/receiver with original prices and existing conditional stops.",
+    "Remove three-attempt cap only for certified never-submitted retries, retaining original alert expiry and retry eligibility.",
+    "Skip role/allowance exchange queries for already-invalid entry price; retain final checks and request budget.",
+    "Check database identity once per reused physical connection.",
+    "Read existing current and archived execution journal in the existing private trade report.",
+    "Correct root continuous_trading health flag.",
+    "Remove four dormant trial modules and their dedicated tests/startup/CI references."
+  ],
+  "removed_runtime_modules": [
+    "cancel_rehearsal.py",
+    "controlled_attempt.py",
+    "protection_timing_trial.py",
+    "single_trial_controller.py"
+  ],
+  "baseline_commits": {
+    "receiver": "d86ed93ff6339eaa71c80394b99b726112046feb",
+    "producer": "ef61934468b3499767bf35f00e0519ad18448d2c"
+  },
+  "market_conclusion": "Source prices are mainnet TRADE_1M; execution is the separate testnet order book. HYPE testnet has a large price gap and absent sell-side liquidity. XRP absent from sampled default testnet universe. No formula price, market selection, or protective bracket check was changed to mask the discrepancy.",
+  "market_evidence": {
+    "mainnet": {
+      "started_at_utc": "2026-10-11T18:25:33.732485+00:00",
+      "ended_at_utc": "2026-10-11T18:25:37.672026+00:00",
+      "assets": {
+        "ETH": {
+          "markPx": "2539.82",
+          "oraclePx": "2541.01",
+          "midPx": "2539.85",
+          "dayNtlVlm": "1413941285.5396707058",
+          "openInterest": "1108082.0337999999"
+        },
+        "SOL": {
+          "markPx": "111.93",
+          "oraclePx": "111.9734",
+          "midPx": "111.935",
+          "dayNtlVlm": "95517077.4985999763",
+          "openInterest": "5726136.5599999996"
+        },
+        "DOGE": {
+          "markPx": "0.08699",
+          "oraclePx": "0.086995",
+          "midPx": "0.086991",
+          "dayNtlVlm": "6367895.261150999",
+          "openInterest": "1117996116.0"
+        },
+        "XRP": {
+          "markPx": "1.415",
+          "oraclePx": "1.41565",
+          "midPx": "1.41505",
+          "dayNtlVlm": "18746266.9487000033",
+          "openInterest": "196221566.0"
+        },
+        "HYPE": {
+          "markPx": "86.497",
+          "oraclePx": "86.501",
+          "midPx": "86.4995",
+          "dayNtlVlm": "173078025.3631699383",
+          "openInterest": "20058253.8600000031"
+        }
+      },
+      "hype_book": {
+        "time_ms": 1791743178190,
+        "best_bid": [
+          {
+            "px": "86.568",
+            "sz": "113.72",
+            "n": 10
+          }
+        ],
+        "best_ask": [
+          {
+            "px": "86.569",
+            "sz": "0.52",
+            "n": 1
+          }
+        ]
+      },
+      "historical_hype_candles": [
+        {
+          "t": 1791642180000,
+          "T": 1791642239999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "85.587",
+          "c": "85.842",
+          "h": "85.868",
+          "l": "85.547",
+          "v": "14504.54",
+          "n": 677
+        },
+        {
+          "t": 1791642240000,
+          "T": 1791642299999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "85.836",
+          "c": "86.088",
+          "h": "86.104",
+          "l": "85.835",
+          "v": "51081.9",
+          "n": 1531
+        },
+        {
+          "t": 1791642300000,
+          "T": 1791642359999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "86.089",
+          "c": "86.101",
+          "h": "86.296",
+          "l": "86.088",
+          "v": "38231.69",
+          "n": 1367
+        },
+        {
+          "t": 1791642360000,
+          "T": 1791642419999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "86.102",
+          "c": "86.017",
+          "h": "86.177",
+          "l": "86.017",
+          "v": "11498.39",
+          "n": 572
+        },
+        {
+          "t": 1791642420000,
+          "T": 1791642479999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "86.015",
+          "c": "86.276",
+          "h": "86.304",
+          "l": "85.985",
+          "v": "19769.46",
+          "n": 881
+        },
+        {
+          "t": 1791642480000,
+          "T": 1791642539999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "86.284",
+          "c": "86.516",
+          "h": "86.525",
+          "l": "86.177",
+          "v": "33402.38",
+          "n": 1201
+        },
+        {
+          "t": 1791642540000,
+          "T": 1791642599999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "86.517",
+          "c": "86.666",
+          "h": "86.71",
+          "l": "86.502",
+          "v": "32570.52",
+          "n": 1698
+        }
+      ]
+    },
+    "testnet": {
+      "started_at_utc": "2026-10-11T18:25:33.733162+00:00",
+      "ended_at_utc": "2026-10-11T18:25:38.932743+00:00",
+      "assets": {
+        "SOL": {
+          "markPx": "111.71",
+          "oraclePx": "111.97",
+          "midPx": "111.74",
+          "dayNtlVlm": "277566.6883",
+          "openInterest": "5952.78"
+        },
+        "ETH": {
+          "markPx": "2530.7",
+          "oraclePx": "2541.01",
+          "midPx": "2530.45",
+          "dayNtlVlm": "457081.1213099998",
+          "openInterest": "513.5288"
+        },
+        "HYPE": {
+          "markPx": "39.455",
+          "oraclePx": "44.7055",
+          "midPx": null,
+          "dayNtlVlm": "323.21488",
+          "openInterest": "0.0"
+        },
+        "DOGE": {
+          "markPx": "0.086381",
+          "oraclePx": "0.086995",
+          "midPx": "0.08641",
+          "dayNtlVlm": "32274.721623",
+          "openInterest": "1429896.0"
+        }
+      },
+      "hype_book": {
+        "time_ms": 1791743177152,
+        "best_bid": [
+          {
+            "px": "32.799",
+            "sz": "2.75",
+            "n": 1
+          }
+        ],
+        "best_ask": []
+      },
+      "historical_hype_candles": [
+        {
+          "t": 1791642180000,
+          "T": 1791642239999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642240000,
+          "T": 1791642299999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642300000,
+          "T": 1791642359999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642360000,
+          "T": 1791642419999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642420000,
+          "T": 1791642479999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642480000,
+          "T": 1791642539999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        },
+        {
+          "t": 1791642540000,
+          "T": 1791642599999,
+          "s": "HYPE",
+          "i": "1m",
+          "o": "49.599",
+          "c": "49.599",
+          "h": "49.599",
+          "l": "49.599",
+          "v": "0.0",
+          "n": 0
+        }
+      ]
+    }
+  },
+  "private_journal_limitation": "No private receiver PostgreSQL journal was read: external access is disallowed. Public candles do not reconstruct the historical MARK or establish each private rejection reason.",
+  "isolated_verification": {
+    "build_only": true,
+    "candidate_sha256": {
+      "producer": "c924d0fd357b026b85745891ec7616747babc903d6e7e0b665ae8275a40f5807",
+      "receiver": "6cbd9bdc81f7ce92b40515de09cac5a984fa4ce4909d144abd9d1dcd26514b4a"
+    },
+    "manifest_sha256": "c851b7642cf0a1fd5318ba0817bb4acbddb09c99611d22bc181e9aa6ae27bc0b",
+    "parity": {
+      "bars_per_comparison": 4,
+      "candidate_sha256": "faebb16675d14101c4d387ff0c5a697ebaaf9951d746dc3f9a028f5c8c548b69",
+      "comparisons": 4000,
+      "network_attempts_blocked": 0,
+      "producer_decision_functions_sha256": "21f598be3767dd1b7fa69530bf3f937df7cc4fa5141adb42b78cae446ffd2a4b",
+      "producer_file_sha256": "342349eef5a0d2ff407b53f2e04efcc98d741da5e2508c26321bb66b672db108"
+    },
+    "postgresql_cleanup": "STOPPED",
+    "publication_blocked": true,
+    "real_exchange_requests_sent": 0,
+    "schema": "experimental_render_verification_v1",
+    "stages": {
+      "producer": {
+        "errors": 0,
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 408,
+        "skipped": 0,
+        "tests_run": 408,
+        "unexpected_successes": 0
+      },
+      "runtime": {
+        "errors": 0,
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 2942,
+        "skipped": 0,
+        "tests_run": 2942,
+        "unexpected_successes": 0
+      }
+    },
+    "status": "PASSED",
+    "verification": {
+      "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+      "postgresql_cleanup": "STOPPED",
+      "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+      "stages": {
+        "producer": {
+          "errors": 0,
+          "exit_code": 0,
+          "failure_details": [],
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 408,
+          "postgresql_configured": true,
+          "skipped": 0,
+          "tests_run": 408,
+          "unexpected_successes": 0
+        },
+        "runtime": {
+          "errors": 0,
+          "exit_code": 0,
+          "failure_details": [],
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 2942,
+          "postgresql_configured": true,
+          "skipped": 0,
+          "tests_run": 2942,
+          "unexpected_successes": 0
+        }
+      }
+    },
+    "render_log_timestamp": "2026-10-11T18:56:50.468541912Z",
+    "isolated_deploy_id": "dep-db5tl67lk1mc73b6tj3g",
+    "bundle_commit": "1b50a00aeacacd8e0123afe9f23b3b42c3b5f3d9"
+  },
+  "deployments": {
+    "receiver": {
+      "commit": {
+        "createdAt": "2026-10-11T18:50:23Z",
+        "id": "30da26f6eefd17e1082466b87144d03f41c36e71",
+        "message": "Adapt isolated formula parity fixture to existing source transaction hook\n\nVerification-only adjustment: the pure AST comparison supplies an in-memory transaction context. No runtime or strategy logic changes. 4000 unchanged source decision paths pass."
+      },
+      "createdAt": "2026-10-11T18:57:53.692169Z",
+      "finishedAt": "2026-10-11T18:58:35.000305Z",
+      "id": "dep-db5toce7bikc73e1jiug",
+      "startedAt": "2026-10-11T18:57:53.657412Z",
+      "status": "live",
+      "trigger": "api",
+      "updatedAt": "2026-10-11T18:59:09.211266Z"
+    },
+    "producer": {
+      "commit": {
+        "createdAt": "2026-10-11T18:50:25Z",
+        "id": "3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3",
+        "message": "Verify approved formula source hooks against disposable PostgreSQL\n\nTest-only coverage for commit visibility, concurrent duplicate decisions, post-commit wake, acknowledgement and rollback across SOL G65, XRP R2732 and HYPE ROW71205. No production code changes."
+      },
+      "createdAt": "2026-10-11T19:00:22.445133Z",
+      "finishedAt": "2026-10-11T19:02:22.430194Z",
+      "id": "dep-db5tphnavr4c73ffj6hg",
+      "startedAt": "2026-10-11T19:00:22.416945Z",
+      "status": "live",
+      "trigger": "new_commit",
+      "updatedAt": "2026-10-11T19:02:53.167616Z"
+    }
+  },
+  "producer_forwarder_observations": [
+    {
+      "at": "2026-10-11T19:02:17.015055614Z",
+      "log_id": "8610f0d9-469e-4623-9d1b-7371d3582fbf",
+      "experimental_execution_forwarder": {
+        "attempted": 0,
+        "cycles": 1,
+        "deferred": 0,
+        "duplicates": 0,
+        "exchange_requests_sent": 0,
+        "recorded": 0,
+        "source_errors": 0,
+        "source_records_changed": 0,
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "at": "2026-10-11T19:02:20.520270099Z",
+      "log_id": "4eaf4834-cea7-4c6d-babc-39c8646e3374",
+      "experimental_execution_forwarder": {
+        "attempted": 3,
+        "cycles": 2,
+        "deferred": 0,
+        "duplicates": 0,
+        "exchange_requests_sent": 0,
+        "recorded": 3,
+        "source_errors": 0,
+        "source_records_changed": 0,
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "at": "2026-10-11T19:02:21.359549341Z",
+      "log_id": "dc46f1b0-daf0-4c4a-9628-d453de52b7bd",
+      "experimental_execution_forwarder": {
+        "attempted": 1,
+        "cycles": 3,
+        "deferred": 0,
+        "duplicates": 0,
+        "exchange_requests_sent": 0,
+        "recorded": 1,
+        "source_errors": 0,
+        "source_records_changed": 0,
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "at": "2026-10-11T19:02:51.435561838Z",
+      "log_id": "03d5983a-5422-4497-a0a2-3db05a9d6f17",
+      "experimental_execution_forwarder": {
+        "attempted": 0,
+        "cycles": 4,
+        "deferred": 0,
+        "duplicates": 0,
+        "exchange_requests_sent": 0,
+        "recorded": 0,
+        "source_errors": 0,
+        "source_records_changed": 0,
+        "status": "COMPLETED"
+      }
+    }
+  ],
+  "new_instance_forwarder_records_acknowledged": 4,
+  "scope": {
+    "formula_decision_rules_changed": false,
+    "new_runtime_features_added": false,
+    "manual_test_orders_sent": false,
+    "manual_telegram_messages_sent": false,
+    "live_runtime_environment_changed": false,
+    "new_infrastructure_created": false,
+    "postgres_schema_changed": false
+  },
+  "limitations": [
+    "Acknowledged source records do not prove an exchange order or fill. No new fill is asserted.",
+    "Health is a point-in-time observation, not a guarantee of future execution.",
+    "The sampled source/Testnet market discrepancy persists; no price rescaling or strategy changes were made.",
+    "Private receiver execution journal was not queried; individual historical rejects are not established."
+  ],
+  "isolated_build_note": "Build-only verification reports PASSED then deliberately exits 42 to block publication; Render build_failed in this verification service is expected and is not a test failure."
+}
