@@ -270,7 +270,10 @@ def verify_postmaster(path, pid, data, port, *, start_epoch=None, start_ticks=No
 
 def source_bindings(args):
     sys.path.insert(0, str(Path(__file__).parent))
-    from ordered_postgres_memory_replay import source_hashes
+    if getattr(args, 'concurrent_arm', None):
+        from ordered_postgres_concurrent_replay import source_hashes
+    else:
+        from ordered_postgres_memory_replay import source_hashes
     return {'runner':sha_file(__file__),'contract':sha_file(args.contract),
             'python':sha_file(args.python),'postgres':sha_file(Path(args.pg_bin)/'postgres'),
             'initdb':sha_file(Path(args.pg_bin)/'initdb'),
@@ -455,13 +458,15 @@ def run_native(args, output, readiness):
     token = str(uuid4())
     server = client = initial = None
     tracked = {}
-    arm = getattr(args, 'memory_arm', None)
-    lifecycle = {'version':VERSION,'kind':'native_scope_memory' if arm else 'native_correctness','result':'FAIL',
+    concurrent = getattr(args, 'concurrent_arm', None)
+    arm = concurrent or getattr(args, 'memory_arm', None)
+    prefix = 'concurrent' if concurrent else 'memory'
+    lifecycle = {'version':VERSION,'kind':('native_concurrent_memory' if concurrent else 'native_scope_memory') if arm else 'native_correctness','result':'FAIL',
                  'run_token':token,'native_lifecycle_attempted':False,
                  'native_lifecycle_tested':False,'cleanup':[],
                  'preflight_sha256':sha_file(output/'preflight.json'),'measured_passes':0}
     if arm:
-        lifecycle.update(memory_arm=arm, memory_processes=[])
+        lifecycle.update({prefix+'_arm':arm, prefix+'_processes':[]})
     try:
         bindings = readiness['source_bindings']
         if source_bindings(args) != bindings: raise RuntimeError('Preflight sources changed')
@@ -514,9 +519,9 @@ def run_native(args, output, readiness):
                         'sys.path.insert(0,str(Path(p).parent)); sys.argv[0]=p; '
                         'runpy.run_path(p,run_name="__main__")')
             if arm:
-                (output/'memory').mkdir(mode=0o700)
+                (output/prefix).mkdir(mode=0o700)
                 stages = [('prepare',240), ('measure',900)]
-                tool = Path(__file__).with_name('ordered_postgres_memory_replay.py')
+                tool = Path(__file__).with_name('ordered_postgres_concurrent_replay.py' if concurrent else 'ordered_postgres_memory_replay.py')
             else:
                 stages = [('correctness',180)]
                 tool = Path(__file__).with_name('verify_ordered_binding_correctness.py')
@@ -525,14 +530,16 @@ def run_native(args, output, readiness):
                 if source_bindings(args) != bindings: raise RuntimeError('Sources changed before client stage')
                 command = [args.python,'-I','-c',launcher,str(tool),
                     '--connection-receipt',str(host/'connection.json'),
-                    '--output',str(output/('memory' if arm else 'correctness'))]
-                if arm:
+                    '--output',str(output/(prefix if arm else 'correctness'))]
+                if concurrent:
+                    command.extend(['--stage',stage])
+                elif arm:
                     command.extend(['--mode','scope','--rows','2000','--passes','12',
                         '--scope-parity','postonly','--cursor-policy','observed','--stage',stage])
-                logname = 'memory_'+stage if arm else 'correctness'
+                logname = prefix+'_'+stage if arm else 'correctness'
                 with (output/(logname+'.stdout.log')).open('xb') as out, (output/(logname+'.stderr.log')).open('xb') as err:
                     client = spawn_owned(command,stdout=out,stderr=err)
-                    if arm: lifecycle['memory_processes'].append({'stage':stage,'pid':client.pid})
+                    if arm: lifecycle[prefix+'_processes'].append({'stage':stage,'pid':client.pid})
                     deadline = time.monotonic()+seconds
                     while client.poll() is None:
                         if server.poll() is not None: raise RuntimeError('Postmaster exited during client stage')
@@ -545,8 +552,13 @@ def run_native(args, output, readiness):
                 if not item['group_gone'] or item['signals']:
                     raise RuntimeError('Client stage descendants survived')
             if arm:
-                proof = verify_memory(output,arm,host/'connection.json',bindings,
-                    readiness['observed']['driver_binding'],lifecycle['memory_processes'])
+                if concurrent:
+                    from verify_ordered_native_concurrent import verify_client
+                    proof = verify_client(output/prefix,arm,host/'connection.json',bindings,
+                        readiness['observed']['driver_binding'],lifecycle[prefix+'_processes'])
+                else:
+                    proof = verify_memory(output,arm,host/'connection.json',bindings,
+                        readiness['observed']['driver_binding'],lifecycle['memory_processes'])
                 lifecycle.update(proof)
             else:
                 receipt_sha = verify_correctness(output,token,host/'connection.json',bindings,
@@ -598,8 +610,11 @@ def main(argv=None):
     parser.add_argument('--contract',required=True)
     parser.add_argument('--output',required=True)
     parser.add_argument('--preflight-only',action='store_true')
-    parser.add_argument('--memory-arm',choices=['baseline','fixed'],
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--memory-arm',choices=['baseline','fixed'],
                         help='Explicit isolated 2000-row/12-pass actual-source memory arm')
+    modes.add_argument('--concurrent-arm',choices=['baseline','fixed'],
+                        help='Explicit isolated ordered plus BTC report overlap, 12 rounds')
     args = parser.parse_args(argv)
     output = new_output(args.output)
     args.output = str(output)

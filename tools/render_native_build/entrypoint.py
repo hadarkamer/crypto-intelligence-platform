@@ -71,7 +71,9 @@ def preserve_receipts(root):
 def preserve_failure_logs(root, prefix=''):
     for name in ('host/initdb.log', 'host/postgres.log', 'correctness.stdout.log', 'correctness.stderr.log',
                  'memory_prepare.stdout.log', 'memory_prepare.stderr.log',
-                 'memory_measure.stdout.log', 'memory_measure.stderr.log'):
+                 'memory_measure.stdout.log', 'memory_measure.stderr.log',
+                 'concurrent_prepare.stdout.log', 'concurrent_prepare.stderr.log',
+                 'concurrent_measure.stdout.log', 'concurrent_measure.stderr.log'):
         path = root/name
         if not path.is_file() or any(part.is_symlink() for part in (path, *path.parents)):
             continue
@@ -227,5 +229,5 @@ def main():
 
 
 if __name__ == '__main__':
-    from memory_entrypoint import main as memory_main
-    raise SystemExit(memory_main())
+    from concurrent_entrypoint import main as concurrent_main
+    raise SystemExit(concurrent_main())

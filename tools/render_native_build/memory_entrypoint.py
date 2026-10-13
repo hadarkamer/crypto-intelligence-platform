@@ -61,10 +61,10 @@ def validate_public_comparison(value):
                 raise ValueError('Invalid public numeric metric')
 
 
-def stage_sources(destination, run_root):
+def stage_sources(destination, run_root, expected_sources=None, protocol=None):
     """Copy tracked source bytes only; baseline differs by one pinned app blob."""
     root = build.ROOT
-    expected = source_hashes()
+    expected = source_hashes() if expected_sources is None else expected_sources
     names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root, timeout=10).decode().split('\0')
     names = sorted(name for name in names if (name.endswith(('.py', '.sql')) or name in expected
         or name == 'tools/ordered_native_runtime_contract_20261012.json')
@@ -89,19 +89,24 @@ def stage_sources(destination, run_root):
             target_sha = BASE_SHA if arm == 'baseline' and name == MODULE else sha
             if build.native.sha_file(destination/arm/name) != target_sha:
                 raise ValueError('Staged source drift')
-    build.native.publish(run_root/'staging.json', {
+    staging = {
         'version':VERSION, 'actual_source_comparison':True, 'only_changed_module':MODULE,
         'baseline_commit':'3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3',
         'baseline_sha256':BASE_SHA, 'fixed_sha256':FIX_SHA,
         'fixed_file_sha256':fixed_hashes, 'order':list(ORDER),
         'rows_per_arm':2000, 'passes_per_arm':12, 'scope_parity':'postonly',
-        'cursor_policy':'observed', 'gc':'enabled_unchanged', 'warm_passes':[4,12]})
+        'cursor_policy':'observed', 'gc':'enabled_unchanged', 'warm_passes':[4,12]}
+    if protocol is not None:
+        for key in ('rows_per_arm','passes_per_arm','scope_parity','cursor_policy','warm_passes'):
+            staging.pop(key)
+        staging.update(protocol)
+    build.native.publish(run_root/'staging.json', staging)
     return expected
 
 
-def preserve_receipts(root):
+def preserve_receipts(root, receipts=RECEIPTS, version=VERSION):
     present = []
-    for name in RECEIPTS:
+    for name in receipts:
         path = root/name
         if not path.exists(): continue
         if any(p.is_symlink() for p in (path, *path.parents)):
@@ -119,7 +124,7 @@ def preserve_receipts(root):
             print('[NATIVE_BUILD_RECEIPT] '+json.dumps(dict(entry,kind='chunk',index=index,data=chunk),sort_keys=True),flush=True)
         print('[NATIVE_BUILD_RECEIPT] '+json.dumps(dict(entry,kind='file_complete'),sort_keys=True),flush=True)
         manifest.append(entry)
-    print('[NATIVE_BUILD_RECEIPT] '+json.dumps(dict(kind='complete',version=VERSION,files=manifest),sort_keys=True),flush=True)
+    print('[NATIVE_BUILD_RECEIPT] '+json.dumps(dict(kind='complete',version=version,files=manifest),sort_keys=True),flush=True)
     return {entry['path']:entry['sha256'] for entry in manifest}
 
 
