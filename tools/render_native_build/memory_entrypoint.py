@@ -64,14 +64,14 @@ def validate_public_comparison(value):
 def stage_sources(destination, run_root):
     """Copy tracked source bytes only; baseline differs by one pinned app blob."""
     root = build.ROOT
+    expected = source_hashes()
     names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root, timeout=10).decode().split('\0')
-    names = sorted(name for name in names if (name.endswith(('.py', '.sql'))
+    names = sorted(name for name in names if (name.endswith(('.py', '.sql')) or name in expected
         or name == 'tools/ordered_native_runtime_contract_20261012.json')
         and not name.startswith('tools/render_native_build/baseline/'))
     baseline = root/'tools/render_native_build/baseline'/MODULE
     if build.native.sha_file(baseline) != BASE_SHA or build.native.sha_file(root/MODULE) != FIX_SHA:
         raise ValueError('Actual application source pins differ')
-    expected = source_hashes()
     if not set(expected) <= set(names): raise ValueError('Missing measured sources')
     fixed_hashes = {}
     for name in names:

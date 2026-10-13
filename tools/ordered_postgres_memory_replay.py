@@ -341,6 +341,7 @@ def source_hashes():
         'research_past_price_features_store.py', 'research_past_price_features.py',
         'research_ordered_first_touch.py', 'research_common_window_metrics.py',
         'research_common_window_metrics_store.py', 'research_formula_sequence_history_selftest.py',
+        'docs/ordered_research_question_map.json',
         'migrations/020_ordered_first_touch_v7.sql', 'migrations/021_btc_parent_movements_v1.sql',
         'migrations/029_common_window_metrics.sql'] + ['migrations/'+name for name in MIGRATIONS]
     optional = REPO/'tools/ordered_postgres_scope_fixture.py'
