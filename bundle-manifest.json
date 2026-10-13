@@ -542,7 +542,7 @@
       "hl_testnet_runtime/test_emergency_peer_checkpoint.py": "ae4910c24815370f3f445e2093d008524c4a90d210df6401c89184729615bb2c",
       "hl_testnet_runtime/test_execution_exit_seams.py": "efe449a0ddb38f58bc6eef6158997c02edf07f9d8d770c40e9a52723b4bae6f4",
       "hl_testnet_runtime/test_execution_history_lifecycle.py": "3346a0cdc4e78ad22cea7274d0b23fac76662b4cbc5162fb4abb00cfbfec4fc2",
-      "hl_testnet_runtime/test_execution_history_pg.py": "9b818f4612fe296cde00879cd24dfc27552b621b1aa9b15f69d4c1b16f77a9fc",
+      "hl_testnet_runtime/test_execution_history_pg.py": "d7b906464324fbda9252c212b38de4ede562053477cd53d626bce152e0fea0ca",
       "hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
       "hl_testnet_runtime/test_execution_occurrence.py": "f40d9ca5af69f73592c4c5dd88d7d44a1fb7d524262cf267609ae024afb0d782",
       "hl_testnet_runtime/test_exit_amendment.py": "144acf7920aa563574045c12c689034d8d83169b9d1da78687f4873045ae845a",
@@ -902,6 +902,6 @@
   "schema": "experimental_render_bundle_v1",
   "source_commits": {
     "producer": "3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3",
-    "receiver": "4965f7eaa508c88f976be0d6e4b5e78d1df78ff9"
+    "receiver": "3a360350e0d684d2cc40459a9945734e80f603e0"
   }
 }
