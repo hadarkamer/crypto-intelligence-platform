@@ -117,7 +117,7 @@ def build_action(message: dict, metadata: dict, account: str, *, exit_type: str,
                  historical_risk_usd: str | None = None) -> dict:
     """Pure conversion. Default budget is $10, before costs, NOT a loss cap.
 
-    historical_risk_usd reconstructs a frozen old $20 action for verification
+    historical_risk_usd reconstructs a frozen old $10/$20 action for verification
     only. Both signing and transport forbid a new entry above the CURRENT $10.
     Existing IDs remain stable; changing risk cannot bypass replay protection.
     $5000 maximum notional is a laboratory bound, not the trading strategy.

@@ -143,13 +143,13 @@ class BuildTests(unittest.TestCase):
         self.assertEqual([o['b'] for o in action(signal(side='SHORT'))['orders']], [False, True, True])
     def test_exits_only_reduce(self):
         self.assertEqual([o['r'] for o in action()['orders']], [False, True, True])
-    def test_risk_quantity_is_not_ten_dollars_notional(self):
+    def test_risk_quantity_is_not_two_dollars_notional(self):
         orders = action()['orders']
-        self.assertEqual(orders[0]['s'], '5')
-        self.assertEqual(Decimal(orders[0]['s']) * Decimal(orders[0]['p']), 500)
+        self.assertEqual(orders[0]['s'], '1')
+        self.assertEqual(Decimal(orders[0]['s']) * Decimal(orders[0]['p']), 100)
     def test_size_floored_not_prices(self):
         msg = signal(); msg['stop'] = '97'
-        self.assertEqual(action(msg)['orders'][0]['s'], '3.33')
+        self.assertEqual(action(msg)['orders'][0]['s'], '0.66')
     def test_exit_type_must_be_explicit(self):
         with self.assertRaises(mod.TestnetError): action(mode='automatic')
     def test_limit_exit_copies_trigger_and_limit(self):

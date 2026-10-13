@@ -116,8 +116,11 @@ def admission(state, cid, **kwargs):
 
 def attempted():
     state, cid = ready()
-    action = admission(state, cid)['action']
-    return execution.begin_entry(state, action, METADATA, market(), ownership(), now_ms=ARM), cid
+    # Frozen pre-reduction entry: subsequent tests verify its unchanged history/exits.
+    from . import risk_policy
+    with patch.object(risk_policy, 'CURRENT_RISK_USD', '10'):
+        action = admission(state, cid)['action']
+        return execution.begin_entry(state, action, METADATA, market(), ownership(), now_ms=ARM), cid
 
 
 def evidence(state, cid, *, at=ARM+1000, status='OPEN', fills=None):
@@ -232,7 +235,7 @@ class MaxPainExecutionTests(unittest.TestCase):
         action = admission(state, cid)['action']
         self.assertEqual(action['prepared']['source']['entry'], plan()['entry'])
         self.assertEqual(action['prepared']['execution']['entry'], '98')
-        self.assertEqual(Decimal(action['quantity']), Decimal('3.33'))
+        self.assertEqual(Decimal(action['quantity']), Decimal('0.66'))
         self.assertFalse(action['dispatch_enabled'])
 
     def test_mark_after_limit_cannot_recreate_historical_entry(self):

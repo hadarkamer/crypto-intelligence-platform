@@ -17,6 +17,7 @@ ROUTES = {'long_account':{'account':A},'short_account':{'account':B}}
 
 
 def original(n=1, side='LONG', expiry_seconds=None):
+    # Frozen pre-reduction records: these lifecycle fixtures retain $10/100 units.
     source=dict(kind='SIGNAL',event_id='filled-policy-'+str(n),symbol='DOGE',side=side,
         entry='10',stop='9.9' if side=='LONG' else '10.1',
         take_profit='10.2' if side=='LONG' else '9.8',
@@ -24,9 +25,10 @@ def original(n=1, side='LONG', expiry_seconds=None):
     expiry=(datetime.fromtimestamp((T-20000+expiry_seconds*1000)/1000,timezone.utc).isoformat()
             if expiry_seconds is not None else None)
     card=trade_cards.prepare_card(source,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',
-        record_kind='received_alert' if expiry is not None else 'synthetic_test',source_expires_at=expiry)
+        record_kind='received_alert' if expiry is not None else 'synthetic_test',source_expires_at=expiry,
+        _historical_risk_usd='10')
     account=ROUTES[card['account_role']]['account']
-    draft=m.prepare_entry(card,META,account,ROUTES)
+    draft=m.prepare_entry(card,META,account,ROUTES,_historical_risk_usd='10')
     b=life.binding_from_card(card,account,ROUTES,dict(ENTRY=[str(n*10)],STOP=[],TAKE_PROFIT=[]))
     return b,dict(card=card,draft=draft)
 
@@ -159,7 +161,7 @@ class FilledQuantityTests(NoOrders):
 
     def test_replay_stable_and_distinct_alerts_not_deduplicated(self):
         b,r=original();other,rr=original(2)
-        self.assertEqual(r['draft'],m.prepare_entry(r['card'],META,A,ROUTES))
+        self.assertEqual(r['draft'],m.prepare_entry(r['card'],META,A,ROUTES,_historical_risk_usd='10'))
         self.assertNotEqual(r['draft']['entry_action']['orders'][0]['c'],rr['draft']['entry_action']['orders'][0]['c'])
 
     def test_altered_plan_and_extra_app_fields_rejected(self):
@@ -184,7 +186,7 @@ class FilledQuantityTests(NoOrders):
     def test_oversized_source_still_hits_existing_lab_cap(self):
         import hyperliquid_testnet_executor as old
         b,r=original()
-        src=dict(r['card']['prepared']['source'],entry='100',stop='99.9',take_profit='100.2')
+        src=dict(r['card']['prepared']['source'],entry='100',stop='99.99',take_profit='100.2')
         card=trade_cards.prepare_card(src,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
         with self.assertRaisesRegex(old.TestnetError,'OUTSIDE_LAB_SIZE_BOUNDS'):
             m.prepare_entry(card,META,A,ROUTES)

@@ -83,7 +83,8 @@ class SoftwareExchange:
             view=dict(oid=oid,cloid=order['c'],wire_order=deepcopy(order),status='OPEN',at_ms=self.t,fills=[])
             self.orders[oid]=dict(account=p['account'],symbol=p['symbol'],leg=p['leg'],view=view)
             if order['t']=={'limit':{'tif':'Ioc'}}:
-                q=Decimal(order['s'])*self.instant_fraction
+                q=(Decimal(order['s'])*self.instant_fraction).quantize(
+                    Decimal(1).scaleb(-META['universe'][order['a']]['szDecimals']),rounding='ROUND_DOWN')
                 if q:self.fill(oid,str(q),order['p'])
                 if view['status']=='OPEN':view.update(status='CANCELED',at_ms=self.t)
             reply=dict(status='ACK',oid=oid)
@@ -151,7 +152,7 @@ class RuntimeTests(unittest.TestCase):
     def test_cancel_after_partial_entry_keeps_actual_protection(self):
         self.venue.instant_fraction=Decimal('.5');msg,_=self.start();self.cancel(msg);self.protect()
         trade=self.store.load()['trades'][msg['occurrence_id']];remaining=runtime._remaining(trade)
-        self.assertEqual(remaining,Decimal(trade['quantity'])/2)
+        self.assertEqual(remaining,(Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'))
         for leg in ('STOP','TAKE_PROFIT'):
             self.assertEqual(Decimal(self.venue.orders[self.venue.oid(leg)]['view']['wire_order']['s']),remaining)
 
@@ -214,9 +215,9 @@ class RuntimeTests(unittest.TestCase):
         self.worker=runtime.IsolatedExecutionRuntime(self.store,self.venue,mode=runtime.MODE)
         msg=plan();self.worker.receive([msg]);self.venue.t=ARM;self.worker.run_once()
         oid=self.venue.oid('ENTRY');qty=Decimal(self.venue.orders[oid]['view']['wire_order']['s'])
-        self.venue.fill(oid,'1',msg['entry']);self.venue.mark[runtime._lane(ROUTES['long_account']['account'],'HYPE')]=msg['entry']
-        self.protect();self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['s'],'1')
-        self.venue.fill(oid,str(qty-1),msg['entry']);self.protect()
+        self.venue.fill(oid,'0.2',msg['entry']);self.venue.mark[runtime._lane(ROUTES['long_account']['account'],'HYPE')]=msg['entry']
+        self.protect();self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['s'],'0.2')
+        self.venue.fill(oid,str(qty-Decimal('0.2')),msg['entry']);self.protect()
         self.assertEqual(Decimal(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['s']),qty)
         self.assertEqual(Decimal(self.venue.orders[self.venue.oid('TAKE_PROFIT')]['view']['wire_order']['s']),qty)
         self.venue.fill(self.venue.oid('STOP'),str(qty));self.worker.run_once();self.worker.run_once();self.worker.run_once()
@@ -310,7 +311,7 @@ class RuntimeTests(unittest.TestCase):
         result=self.worker.run_once();self.assertEqual(result['status'],'OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED')
         requests=[r for r in self.venue.requests if r['proposal']['operation']=='EMERGENCY_CLOSE']
         self.assertEqual(len(requests),2)
-        self.assertEqual(Decimal(requests[1]['proposal']['quantity']),Decimal(requests[0]['proposal']['quantity'])/2)
+        self.assertEqual(Decimal(requests[1]['proposal']['quantity']),(Decimal(requests[0]['proposal']['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_UP'))
         self.restart();self.worker.run_once();self.worker.run_once()
         self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'],'CLOSED')
         self.assertEqual(len(self.venue.requests),3)
@@ -339,15 +340,15 @@ class RuntimeTests(unittest.TestCase):
         self.venue.t=CREATED;self.store=ExecutionState(Path(self.tmp.name)/'cancel-race.isolated-experimental.sqlite3')
         self.store.initialize(ROUTES,not_before_ms=CREATED-60000);self.worker=runtime.IsolatedExecutionRuntime(self.store,self.venue,mode=runtime.MODE)
         msg=plan();self.worker.receive([msg]);self.venue.t=ARM;self.worker.run_once()
-        oid=self.venue.oid('ENTRY');self.venue.fill(oid,'1');self.protect();self.cancel(msg)
+        oid=self.venue.oid('ENTRY');self.venue.fill(oid,'0.2');self.protect();self.cancel(msg)
         def racing(request):
             if request['proposal']['operation']=='CANCEL':
-                self.venue.before_send=None;self.venue.fill(oid,'1')
+                self.venue.before_send=None;self.venue.fill(oid,'0.2')
         self.venue.before_send=racing;self.worker.run_once();self.protect()
         trade=self.store.load()['trades'][msg['occurrence_id']]
-        self.assertEqual(runtime._remaining(trade),Decimal(2))
-        self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['s'],'2')
-        self.assertEqual(self.venue.orders[self.venue.oid('TAKE_PROFIT')]['view']['wire_order']['s'],'2')
+        self.assertEqual(runtime._remaining(trade),Decimal('0.4'))
+        self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['s'],'0.4')
+        self.assertEqual(self.venue.orders[self.venue.oid('TAKE_PROFIT')]['view']['wire_order']['s'],'0.4')
 
     def test_account_inventory_completeness_is_required_before_attempt(self):
         self.worker.receive([self.r2732()]);original=self.venue.collect

@@ -10,7 +10,7 @@ import json
 import re
 
 from . import price_precision as precision
-from .risk_policy import budget, CURRENT_RISK_USD, VERSION as RISK_VERSION
+from .risk_policy import budget, card_profile
 
 VERSION = 'testnet-trade-card-v1'
 SCOPES = ('received_alert', 'historical_review', 'synthetic_test')
@@ -48,7 +48,8 @@ def text(value):
 
 
 def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
-                 source_stream='bot_experimental', source_expires_at=None):
+                 source_stream='bot_experimental', source_expires_at=None,
+                 _historical_risk_usd=None):
     """Record a valid alert even when accounts are unconfigured; do not dispatch.
 
     Source IDs identify individual alerts, not a market wave or message text.
@@ -92,11 +93,12 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
     except precision.PrecisionError as exc:
         raise CardError(str(exc)) from None
     execution = prepared['execution']
+    risk = card_profile(_historical_risk_usd)
     with localcontext() as ctx:
         ctx.prec = 60
         entry, stop = (Decimal(execution[k]) for k in ('entry', 'stop'))
         step = Decimal(1).scaleb(-prepared['audit']['sz_decimals'])
-        size = ((budget() / abs(entry-stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        size = ((budget(risk['planned_usd']) / abs(entry-stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         direction = Decimal(1) if execution['side'] == 'LONG' else Decimal(-1)
         cancel_price = None if threshold is None else text(entry * (1 + direction * threshold / 200))
         planning = dict(quantity=text(size), distance_risk_usd=text(size * abs(entry-stop)),
@@ -106,7 +108,7 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
         source_stream=source_stream, event_id=execution['event_id'], record_kind=record_kind,
         rule=dict(id=rule_id, threshold_pct=threshold_pct), prepared=prepared,
         account_role=ROLES[execution['side']], planning=planning,
-        risk=dict(planned_usd=CURRENT_RISK_USD, policy=RISK_VERSION, costs_included=False),
+        risk=risk,
         state='RECORDED_ONLY', actual_execution=None, dispatch_enabled=False, revision=1)
     if source_expires_at is not None:
         card['source_expires_at'] = source_expires_at
@@ -125,7 +127,8 @@ def validate_card(card):
                              'szDecimals': prepared['audit']['sz_decimals']}]}
         expected = prepare_card(prepared['source'], meta, rule_id=card['rule']['id'],
             threshold_pct=card['rule']['threshold_pct'], record_kind=card['record_kind'],
-            source_stream=card['source_stream'],source_expires_at=card.get('source_expires_at'))
+            source_stream=card['source_stream'],source_expires_at=card.get('source_expires_at'),
+            _historical_risk_usd=card['risk']['planned_usd'])
         if canonical(expected) != canonical(card):
             raise ValueError()
         return deepcopy(card)

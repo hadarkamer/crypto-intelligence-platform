@@ -6,14 +6,14 @@ transition; this module never silently turns an archived alert into a trade.
 """
 from copy import deepcopy
 import alert_cards_wire as wire
-from .risk_policy import CURRENT_RISK_USD, VERSION as RISK_VERSION
+from .risk_policy import card_profile
 
 VERSION = 'testnet-unavailable-source-card-v1'
 STATE = 'RECORDED_ASSET_UNAVAILABLE'
 REASON = 'ASSET_UNAVAILABLE'
 
 
-def prepare(value):
+def prepare(value, *, _historical_risk_usd=None):
     """Revalidate the exact allowlisted producer contract before any storage."""
     from .trade_cards import checksum, ROLES
     spec = wire.normalize(value)
@@ -29,7 +29,7 @@ def prepare(value):
         account_role=ROLES[source['side']],
         planning=dict(quantity=None, distance_risk_usd=None, cancel_price=None,
                       positive_quantity=False),
-        risk=dict(planned_usd=CURRENT_RISK_USD, policy=RISK_VERSION, costs_included=False),
+        risk=card_profile(_historical_risk_usd),
         state=STATE, actual_execution=None, dispatch_enabled=False, revision=1,
         delivery=deepcopy(value))
     if spec.get('source_expires_at') is not None:
@@ -40,7 +40,7 @@ def prepare(value):
 def validate(card):
     from .trade_cards import canonical, CardError
     try:
-        expected = prepare(card['delivery'])
+        expected = prepare(card['delivery'],_historical_risk_usd=card['risk']['planned_usd'])
         if canonical(expected) != canonical(card):
             raise ValueError()
         return deepcopy(card)

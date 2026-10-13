@@ -32,7 +32,7 @@ class UnpreparedCardTests(unittest.TestCase):
         self.assertFalse(card['dispatch_enabled'])
         self.assertFalse(card['prepared']['audit']['rounding_applied'])
         self.assertEqual(card['state'],'RECORDED_ASSET_UNAVAILABLE')
-        self.assertEqual(card['risk']['planned_usd'],'10')
+        self.assertEqual(card['risk']['planned_usd'],'2')
     def test_both_final_directions_keep_their_account(self):
         for side,role in [('LONG','long_account'),('SHORT','short_account')]:
             self.assertEqual(unprepared.prepare(delivery(side))['account_role'],role)

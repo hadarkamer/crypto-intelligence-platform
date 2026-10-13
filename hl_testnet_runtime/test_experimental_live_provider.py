@@ -325,7 +325,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(value['blocked_lanes'],{})
         order=value['snapshots'][0]['orders'][0]
         self.assertEqual(order['status'],'CANCELED')
-        self.assertEqual(Decimal(order['wire_order']['s']),2*Decimal(order['fills'][0]['quantity']))
+        self.assertEqual((Decimal(order['wire_order']['s'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'),Decimal(order['fills'][0]['quantity']))
 
     def test_changed_raw_cloid_terms_are_blocked_and_not_given_owner(self):
         self.active();original=self.raw.lookup

@@ -81,7 +81,7 @@ class DispatchIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.venue.boundary_calls),3)
         trade=self.store.load()['trades'][self.msg['occurrence_id']]
         self.assertEqual(trade['phase'],'OPEN')
-        remaining=runtime._remaining(trade);self.assertEqual(remaining,Decimal(trade['quantity'])/2)
+        remaining=runtime._remaining(trade);self.assertEqual(remaining,(Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'))
         for leg in ('STOP','TAKE_PROFIT'):self.assertEqual(Decimal(self.venue.orders[self.venue.oid(leg)]['view']['wire_order']['s']),remaining)
         self.venue.fill(self.venue.oid('TAKE_PROFIT'),life.text(remaining))
         for _ in range(3):self.worker.run_once()

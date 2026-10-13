@@ -179,7 +179,7 @@ def plan_check(plan, symbol, decimals, unheld, available, max_size, *,
                active=None, metadata_max_leverage=None, diagnostics=None):
     """Read-only estimate using the account's EXISTING leverage, never setting it.
 
-    New plans use the shared $10 price-distance budget before trading costs.
+    New plans use the shared $2 price-distance budget before trading costs.
     Hyperliquid's size * mark / leverage, plus adverse entry-vs-mark loss and a
     separate 1% notional lab reserve (not a claim about actual fees).
     Exchange size and available-margin caps AND unheld USDC remain enforced.
