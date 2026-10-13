@@ -52,17 +52,17 @@ class CardTests(unittest.TestCase):
         self.assertEqual(item['prepared']['execution']['take_profit'],'98.818')
         self.assertEqual(item['prepared']['execution']['at'],src['at'])
 
-    def test_ten_dollars_before_costs(self):
+    def test_two_dollars_before_costs(self):
         item=card()
-        self.assertEqual(item['risk']['planned_usd'],'10')
+        self.assertEqual(item['risk']['planned_usd'],'2')
         self.assertFalse(item['risk']['costs_included'])
-        self.assertEqual(item['planning']['quantity'],'5')
-        self.assertEqual(item['planning']['distance_risk_usd'],'10')
+        self.assertEqual(item['planning']['quantity'],'1')
+        self.assertEqual(item['planning']['distance_risk_usd'],'2')
 
     def test_quantity_is_floored_after_price_rounding(self):
         src=source();src['stop']='97'
-        self.assertEqual(card(src)['planning']['quantity'],'3.33')
-        self.assertLessEqual(Decimal(card(src)['planning']['distance_risk_usd']),10)
+        self.assertEqual(card(src)['planning']['quantity'],'0.66')
+        self.assertLessEqual(Decimal(card(src)['planning']['distance_risk_usd']),2)
 
     def test_zero_rounded_size_recorded_not_silently_increased(self):
         src=source();src.update(entry='100000',stop='50000',take_profit='110000')

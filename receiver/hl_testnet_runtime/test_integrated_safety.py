@@ -82,8 +82,8 @@ class IntegratedSafetyTests(NoVenue):
 
     def test_partial_dormant_pair_requests_decision_without_cancellation(self):
         b,row=original()
-        snap=snapshot(b,fills=[fill(b,qty='2')],opens=[order(b,'ENTRY','3'),
-            order(b,'STOP',state='WAITING_PARENT'),order(b,'TAKE_PROFIT',state='WAITING_PARENT')],position='2')
+        snap=snapshot(b,fills=[fill(b,qty='0.4')],opens=[order(b,'ENTRY','0.6'),
+            order(b,'STOP',state='WAITING_PARENT'),order(b,'TAKE_PROFIT',state='WAITING_PARENT')],position='0.4')
         out=direct(b,row,snap=snap)
         self.assertEqual(out['partial_cards'],1)
         self.assertEqual(out['handoff_states'],['POLICY_APPROVAL_REQUIRED'])
@@ -236,7 +236,7 @@ class IntegratedDatabaseTests(NoVenue):
             receipt=intake.ReceiptStore(self.j).get(result['receipt_id'])
             card=cards.load(receipt['card_id'])
             self.assertEqual(card['state'],'RECORDED_ONLY')
-            self.assertEqual(card['risk']['planned_usd'],'10')
+            self.assertEqual(card['risk']['planned_usd'],'2')
             self.assertIsNone(card['actual_execution'])
             with self.j._transaction() as conn:
                 self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)

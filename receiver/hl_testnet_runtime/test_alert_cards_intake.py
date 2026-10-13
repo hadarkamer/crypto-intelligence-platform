@@ -163,7 +163,7 @@ class IntakePostgresTests(unittest.TestCase):
         r=self.accept();self.assertEqual(r['status'],'RECORDED');self.assertEqual(self.counts(),(1,1,0))
         rec=self.receipts.get(r['receipt_id']);card=self.store.load(rec['card_id'])
         self.assertEqual(card['state'],'RECORDED_ONLY');self.assertEqual(card['account_role'],'long_account')
-        self.assertIsNone(card['actual_execution']);self.assertEqual(card['risk']['planned_usd'],'10')
+        self.assertIsNone(card['actual_execution']);self.assertEqual(card['risk']['planned_usd'],'2')
         self.assertEqual(card['prepared']['source']['at'],delivery()['source_at'])
         self.assertEqual(card['source_expires_at'],delivery()['expires_at'])
     def test_current_v5_watch_delivery_commits_original_terms_as_one_record_only_card(self):

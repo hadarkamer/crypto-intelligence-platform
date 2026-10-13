@@ -31,7 +31,7 @@ RULES = {
 }
 
 
-def alert(*, symbol='HYPE', side='LONG', cycle='approved-case', approved_ms=BASE):
+def alert(*, symbol='HYPE', side='LONG', cycle='approved-case', approved_ms=BASE, stop=None):
     value = maxpain_alert(approved_ms=approved_ms)
     value.update(symbol=symbol, side=side, rule_id=RULES[symbol])
     value['policy']['source_price'] = f'HYPERLIQUID_{symbol}_PERPETUAL_TRADE_1M'
@@ -40,6 +40,7 @@ def alert(*, symbol='HYPE', side='LONG', cycle='approved-case', approved_ms=BASE
         value.update(entry='106.456', stop='108.595', take_profit='104.6735',
                      original_target='103.961')
         value['proof']['episode_key'] = '103.961'
+    if stop is not None: value['stop'] = stop
     value['occurrence_id'] = contract.occurrence_id(value)
     return contract.validate(value)
 
@@ -224,7 +225,7 @@ class ApprovedAlertLifecycleTests(unittest.TestCase):
         self.assertFalse(self.venue.requests)
 
     def test_cancel_after_partial_fill_protects_actual_fill_and_cancels_remainder(self):
-        value, _ = self.start()
+        value, _ = self.start(alert(stop='93.1'))
         entry_oid = self.venue.oid('ENTRY')
         self.venue.fill(entry_oid, '1', value['entry'])
         self.worker.receive([cancellation(value, self.venue.t)])
@@ -240,7 +241,7 @@ class ApprovedAlertLifecycleTests(unittest.TestCase):
                          ['ENTRY', 'CREATE_EXIT', 'CREATE_EXIT', 'CANCEL'])
 
     def test_fill_racing_entry_cancellation_is_reconciled_and_exits_resized(self):
-        value, _ = self.start()
+        value, _ = self.start(alert(stop='93.1'))
         entry_oid = self.venue.oid('ENTRY')
         self.venue.fill(entry_oid, '1')
         self.worker.receive([cancellation(value, self.venue.t)])

@@ -36,8 +36,8 @@ def fixture():
     source=r2732_message(entry=2.0,decision_ms=decision,as_of_ms=decision+60000)
     now=contract.moment_ms(source['source_at'])+1; cid=source['occurrence_id']
     meta={'universe':[dict(name='XRP',szDecimals=1,maxLeverage=20)]}
-    order=dict(a=0,b=False,p='2',s='1000',r=False,t={'limit':{'tif':'Ioc'}},c='0x'+'a'*32)
-    proposal=dict(version='isolated',card_id=cid,account=C,role='short_account',symbol='XRP',leg='ENTRY',operation='ENTRY',quantity='1000',action=dict(type='order',orders=[order],grouping='na'),source_at=source['source_at'],source_expires_at=source['expires_at'],basis='e'*64,observed_at_ms=now)
+    order=dict(a=0,b=False,p='2',s='200',r=False,t={'limit':{'tif':'Ioc'}},c='0x'+'a'*32)
+    proposal=dict(version='isolated',card_id=cid,account=C,role='short_account',symbol='XRP',leg='ENTRY',operation='ENTRY',quantity='200',action=dict(type='order',orders=[order],grouping='na'),source_at=source['source_at'],source_expires_at=source['expires_at'],basis='e'*64,observed_at_ms=now)
     request=dict(request_id='b'*64,domain='software',bucket='c'*64,proposal=proposal,nonce=now,attempt_at_ms=now,prepared_at_ms=now,attempts=1,phase='OUTCOME_UNKNOWN',reply=None,observed_oid=None)
     plan=dict(symbol='XRP',side='SHORT',entry='2',stop='2.01',take_profit='1.84')
     context=dict(source=source,current_source=dict(source=source,plan_digest=contract.plan_digest(source),entry_permission='WAITING',cancellation=None),env=deepcopy(ENV),agent=D,host=boundary.HOST,metadata=meta,
@@ -64,9 +64,9 @@ def approved_fixture(*, side='LONG', entry='93.544', mark='93.544'):
     meta={'universe':[dict(name='HYPE',szDecimals=2,maxLeverage=10)]}
     levels=prepare(source,meta)['execution']
     p=request['proposal'];p.update(card_id=source['occurrence_id'],account=route['account'],
-        role=role,symbol='HYPE',quantity='1',source_at=source['source_at'],
+        role=role,symbol='HYPE',quantity='0.5',source_at=source['source_at'],
         source_expires_at=source['expires_at'],observed_at_ms=now)
-    p['action']['orders'][0].update(b=side=='LONG',p=levels['entry'],s='1',t=dict(limit=dict(tif='Gtc')))
+    p['action']['orders'][0].update(b=side=='LONG',p=levels['entry'],s='0.5',t=dict(limit=dict(tif='Gtc')))
     request.update(nonce=now,attempt_at_ms=now,prepared_at_ms=now)
     plan={k:levels[k] for k in ('symbol','side','entry','stop','take_profit')}
     context.update(source=source,current_source=dict(source=source,plan_digest=approved.plan_digest(source),
@@ -123,7 +123,7 @@ class DispatchBoundaryTests(unittest.TestCase):
         self.context['open_orders']=[]; self.context['positions']={'assetPositions':[dict(position=dict(coin='XRP',szi='-1'))]}
         with self.assertRaisesRegex(wire.DispatchError,'UNOWNED_ACCOUNT_POSITION'): self.send()
     def test_quantity_over_current_risk_is_not_permitted_by_wire_shape(self):
-        self.request['proposal']['quantity']='1000.1'; self.request['proposal']['action']['orders'][0]['s']='1000.1'
+        self.request['proposal']['quantity']='200.1'; self.request['proposal']['action']['orders'][0]['s']='200.1'
         with self.assertRaisesRegex(boundary.risk_policy.RiskError,'EXCEEDS_CURRENT'): self.send()
         self.assertEqual(self.signer.calls,[])
     def test_wrong_signer_and_real_transport_fail_before_any_signing(self):

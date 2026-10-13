@@ -137,7 +137,7 @@ class RuntimeContract:
         self.protect()
         trade=self.store.load()['trades'][msg['occurrence_id']]
         for leg in ('STOP','TAKE_PROFIT'):
-            self.assertEqual(Decimal(self.venue.orders[self.venue.oid(leg)]['view']['wire_order']['s']),Decimal(trade['quantity'])/2)
+            self.assertEqual(Decimal(self.venue.orders[self.venue.oid(leg)]['view']['wire_order']['s']),(Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'))
         self.assertEqual(sum(r['proposal']['operation']=='ENTRY' for r in self.venue.requests),1)
 
     def test_lost_reply_and_restart_never_replays_entry(self):
@@ -389,7 +389,7 @@ class RuntimeContract:
         self.assertEqual(self.venue.orders[old]['view']['status'],'OPEN')
         self.assertEqual(self.venue.orders[old]['view']['wire_order']['p'],'2.3115')
         take=self.venue.oid('TAKE_PROFIT');qty=Decimal(self.venue.orders[take]['view']['wire_order']['s'])
-        self.venue.fill(take,str(qty/2))
+        self.venue.fill(take,str((qty/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN')))
         self.assertEqual(self.cycle(False)['operation'],'AMEND_EXIT')
         self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['p'],'2.2943')
 

@@ -22,7 +22,7 @@ def selection():
         entry_remainder_after_exit_policy='NOT_SELECTED', dispatch_enabled=False)
 
 
-def prepare_entry(card, metadata, account, routes):
+def prepare_entry(card, metadata, account, routes, *, _historical_risk_usd=None):
     """Draft one entry only. Never convert a previously submitted native group.
 
     The existing senders deliberately do NOT accept this one-leg draft. Enabling
@@ -37,7 +37,8 @@ def prepare_entry(card, metadata, account, routes):
     if life.address(routes.get(card['account_role'],{}).get('account')) != account:
         raise life.LifecycleError('FILLED_ENTRY_ROUTE_MISMATCH')
     source = card['prepared']['execution']
-    native = builder.build_action(source,metadata,account,exit_type='tp_limit_sl_market')
+    native = builder.build_action(source,metadata,account,exit_type='tp_limit_sl_market',
+                                  historical_risk_usd=_historical_risk_usd)
     if life.number(native['orders'][0]['s']) != life.number(card['planning']['quantity']):
         raise life.LifecycleError('FILLED_ENTRY_QUANTITY_MISMATCH')
     entry = deepcopy(native['orders'][0])
@@ -67,7 +68,8 @@ def validate_draft(card, draft, routes):
         meta = {'universe':[{'name':'_unused'} for _ in range(index)]+[
             {'name':card['prepared']['execution']['symbol'],
              'szDecimals':card['prepared']['audit']['sz_decimals']} ]}
-        expected = prepare_entry(card,meta,draft['account'],routes)
+        expected = prepare_entry(card,meta,draft['account'],routes,
+                                 _historical_risk_usd=card['risk']['planned_usd'])
         if draft != expected:
             raise life.LifecycleError('FILLED_ENTRY_DRAFT_CHANGED')
     except (KeyError,IndexError,TypeError):

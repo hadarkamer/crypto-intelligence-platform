@@ -44,8 +44,8 @@ class HalfThresholdPureTests(fx.NoExternal):
         for threshold,price in (('1','10.05'),('2','10.1'),('0.25','10.0125')):
             s=fx.state_from_case(q='0');cid=s['bindings'][0]['card_id'];old=s['originals'][cid]
             card=trade_cards.prepare_card(old['card']['prepared']['source'],META,
-                rule_id='formula:lower-case.1',threshold_pct=threshold,record_kind='synthetic_test')
-            draft=selected.prepare_entry(card,META,s['account'],fx.ROUTES2)
+                rule_id='formula:lower-case.1',threshold_pct=threshold,record_kind='synthetic_test',_historical_risk_usd='10')
+            draft=selected.prepare_entry(card,META,s['account'],fx.ROUTES2,_historical_risk_usd='10')
             b=life.binding_from_card(card,s['account'],fx.ROUTES2,s['bindings'][0]['orders'])
             s['originals'][cid]=dict(card=card,draft=draft);s['bindings']=[b]
             s['evidence']['bindings']=[b]

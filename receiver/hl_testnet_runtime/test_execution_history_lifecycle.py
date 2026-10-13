@@ -43,7 +43,7 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
                                                        mode=runtime.MODE)
 
     def start(self, value=None):
-        value = value or alert()
+        value = value or alert(stop='93.1')
         self.worker.receive([value])
         result = self.worker.run_once()
         self.assertEqual(result.get('operation'), 'ENTRY')
@@ -251,10 +251,10 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
 
     def test_archive_insert_failure_rolls_back_but_keeps_partial_fill_protected(self):
         first, _ = self.close()
-        second, oid = self.start(alert(symbol='ETH', cycle='active-during-archive-failure'))
+        second, oid = self.start(alert(stop='93.1', symbol='ETH', cycle='active-during-archive-failure'))
         self.venue.fill(oid, '1', second['entry'])
         self.venue.t = BASE + 61000  # Due maintenance; approvals remain fresh.
-        self.worker.receive([alert(symbol='SOL', cycle='defer-new-exposure')])
+        self.worker.receive([alert(stop='93.1', symbol='SOL', cycle='defer-new-exposure')])
         self.store.mutate(lambda state: state['history'].update(cursor=''))
         with patch('hl_testnet_runtime.experimental_execution_archive._SQL.insert',
                    side_effect=sqlite3.OperationalError('SIMULATED_ARCHIVE_INSERT_FAILURE')) as insert:
@@ -277,7 +277,7 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
 
     def test_archive_commit_ack_loss_reloads_committed_state_before_protection(self):
         first, expected = self.close()
-        second, oid = self.start(alert(symbol='ETH', cycle='active-during-lost-ack'))
+        second, oid = self.start(alert(stop='93.1', symbol='ETH', cycle='active-during-lost-ack'))
         self.venue.fill(oid, '1', second['entry'])
         self.store.mutate(lambda state: state['history'].update(cursor=''))
         original = self.store.compact_history
@@ -307,7 +307,7 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
     def test_oversized_history_record_blocks_entries_but_protects_partial_position(self):
         value, oid = self.start()
         self.venue.fill(oid, '1', value['entry'])
-        self.worker.receive([alert(symbol='ETH', cycle='deferred-for-history-capacity')])
+        self.worker.receive([alert(stop='93.1', symbol='ETH', cycle='deferred-for-history-capacity')])
         with patch.object(self.store, 'compact_history', return_value=dict(
                 status='HISTORY_RECORD_CAPACITY_REVIEW_REQUIRED', archived=0,
                 oversized_records=1)):
@@ -329,12 +329,12 @@ class TestnetDomainHistoryMaintenanceTests(unittest.TestCase):
         fixture = support.ApprovedContinuousReleaseTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        value = alert()
+        value = alert(stop='93.1')
         fixture.worker.receive([value])
         fixture.cycle()
         oid = fixture.venue.oid('ENTRY')
         fixture.venue.fill(oid, '1', value['entry'])
-        fixture.worker.receive([alert(symbol='ETH', cycle='native-deferred-entry')])
+        fixture.worker.receive([alert(stop='93.1', symbol='ETH', cycle='native-deferred-entry')])
         with patch.object(fixture.store, 'compact_history',
                           side_effect=OSError('SIMULATED_HISTORY_OUTAGE')):
             for _ in range(4):

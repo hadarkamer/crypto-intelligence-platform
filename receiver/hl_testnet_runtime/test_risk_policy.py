@@ -1,4 +1,4 @@
-"""New $10 entries and immutable old $20 records. No real exchange or keys."""
+"""New $2 entries and immutable old $10/$20 records. No real exchange or keys."""
 from copy import deepcopy
 from decimal import Decimal
 import os
@@ -30,17 +30,17 @@ class RiskPolicyTests(unittest.TestCase):
     def setUp(self):
         self.net = patch('http.client.HTTPSConnection', side_effect=AssertionError('No live network'))
         self.net.start(); self.addCleanup(self.net.stop)
-    def test_current_budget_is_ten(self):
-        self.assertEqual(risk.budget(),Decimal(10))
-        self.assertEqual(risk.CURRENT_RISK_USD,'10')
+    def test_current_budget_is_two(self):
+        self.assertEqual(risk.budget(),Decimal(2))
+        self.assertEqual(risk.CURRENT_RISK_USD,'2')
     def test_environment_cannot_increase_risk(self):
         with patch.dict(os.environ, {'HL_TESTNET_RISK_USD':'20','RISK_USD':'1000'}):
-            self.assertEqual(action()['orders'][0]['s'],'5')
-    def test_both_directions_use_ten_dollars(self):
+            self.assertEqual(action()['orders'][0]['s'],'1')
+    def test_both_directions_use_two_dollars(self):
         for side in ('LONG','SHORT'):
             src=source(side); built=action(src)
-            self.assertEqual([o['s'] for o in built['orders']],['5']*3)
-            self.assertEqual(Decimal(built['orders'][0]['s'])*abs(Decimal(src['entry'])-Decimal(src['stop'])),Decimal(10))
+            self.assertEqual([o['s'] for o in built['orders']],['1']*3)
+            self.assertEqual(Decimal(built['orders'][0]['s'])*abs(Decimal(src['entry'])-Decimal(src['stop'])),Decimal(2))
             risk.assert_new_entry_budget(built)
     def test_legacy_pure_rebuild_has_original_size_and_same_ids(self):
         new,old=action(),action(historical='20')
@@ -48,27 +48,43 @@ class RiskPolicyTests(unittest.TestCase):
         for a,b in zip(new['orders'],old['orders']):
             a=deepcopy(a);b=deepcopy(b);a.pop('s');b.pop('s');self.assertEqual(a,b)
     def test_legacy_action_cannot_be_signed(self):
-        with self.assertRaisesRegex(risk.RiskError,'TEN_DOLLAR'):
+        with self.assertRaisesRegex(risk.RiskError,'CURRENT_RISK_BUDGET'):
             sender._signed_body(None,action(historical='20'),0)
     def test_legacy_action_cannot_reach_transport(self):
         http=sender.TestnetHTTP(allow_orders=True)
-        with self.assertRaisesRegex(risk.RiskError,'TEN_DOLLAR'):
+        with self.assertRaisesRegex(risk.RiskError,'CURRENT_RISK_BUDGET'):
             http._post('/exchange',{'action':action(historical='20')})
         self.assertEqual(http.order_attempts,0)
+    def test_previous_ten_dollar_reconstruction_cannot_authorize_a_new_entry(self):
+        built=action(historical='10')
+        self.assertEqual([o['s'] for o in built['orders']],['5']*3)
+        with self.assertRaisesRegex(risk.RiskError,'CURRENT_RISK_BUDGET'):
+            sender._signed_body(None,built,0)
+        http=sender.TestnetHTTP(allow_orders=True)
+        with self.assertRaisesRegex(risk.RiskError,'CURRENT_RISK_BUDGET'):
+            http._post('/exchange',{'action':built})
+        self.assertEqual(http.order_attempts,0)
+        prepared=precision.prepare_signal(source(),META)
+        rec={'account':ACCOUNT,'prepared':prepared,'action':built}
+        before=deepcopy(rec)
+        repaired=canceller.repair_action(rec,'4')
+        self.assertEqual([o['s'] for o in repaired['orders']],['4','4'])
+        risk.assert_new_entry_budget(repaired)
+        self.assertEqual(rec,before)
     def test_price_source_direction_and_timestamp_unchanged(self):
         src=source();before=deepcopy(src);built=action(src)
         self.assertEqual(src,before)
         self.assertEqual([o['p'] for o in built['orders']],['100','104','98'])
-    def test_rounded_prices_use_ten_not_old_quantity(self):
+    def test_rounded_prices_use_two_not_old_quantity(self):
         src=source();src.update(entry='96.88',stop='94.9424',take_profit='98.8176')
         prepared=precision.build_prepared_orders(src,META,ACCOUNT,exit_type='tp_limit_sl_market')
         self.assertEqual(prepared['source'],src)
         entry,_,stop=prepared['action']['orders']
         loss=Decimal(entry['s'])*abs(Decimal(entry['p'])-Decimal(stop['p']))
-        self.assertLessEqual(loss,Decimal(10));self.assertGreater(loss,Decimal('9.99'))
+        self.assertLessEqual(loss,Decimal(2));self.assertGreater(loss,Decimal('1.99'))
     def test_quantity_rounds_down(self):
         src=source();src['stop']='97'
-        self.assertEqual(action(src)['orders'][0]['s'],'3.333')
+        self.assertEqual(action(src)['orders'][0]['s'],'0.666')
         risk.assert_new_entry_budget(action(src))
     def test_minimum_notional_not_increased_to_force_acceptance(self):
         src=source('SHORT');src.update(entry='1',stop='3',take_profit='0.5')
@@ -79,16 +95,16 @@ class RiskPolicyTests(unittest.TestCase):
     def test_current_budget_check_uses_same_quantity_as_sender(self):
         plan={k:source()[k] for k in ('symbol','side','entry','stop','take_profit')}
         diag={}
-        self.assertTrue(checks.plan_check(plan,'BTC',3,Decimal('56'),Decimal('56'),Decimal('5'),
+        self.assertTrue(checks.plan_check(plan,'BTC',3,Decimal('12'),Decimal('12'),Decimal('1'),
             active={'markPx':'100','leverage':{'type':'cross','value':10}},metadata_max_leverage=40,diagnostics=diag))
-        self.assertEqual(diag['planned_risk_usd'],'10')
+        self.assertEqual(diag['planned_risk_usd'],'2')
         self.assertFalse(diag['fees_funding_slippage_included_in_risk'])
         with self.assertRaises(checks.Blocked):
-            checks.plan_check(plan,'BTC',3,Decimal('54'),Decimal('54'),Decimal('5'),
+            checks.plan_check(plan,'BTC',3,Decimal('10'),Decimal('10'),Decimal('1'),
                 active={'markPx':'100','leverage':{'type':'cross','value':10}},metadata_max_leverage=40)
     def test_current_and_legacy_records_validate_without_rewrite(self):
         prepared=precision.prepare_signal(source(),META)
-        for built in (action(),action(historical='20')):
+        for built in (action(),action(historical='10'),action(historical='20')):
             before=deepcopy(built)
             self.assertEqual(pg.validate_action(built,prepared,ACCOUNT),before)
             self.assertEqual(built,before)
@@ -111,7 +127,7 @@ class RiskPolicyTests(unittest.TestCase):
         for bad in ({'type':'order'},{'type':'order','orders':[]}, {'type':'order','orders':action()['orders'][:1]}):
             with self.assertRaises(risk.RiskError):risk.assert_new_entry_budget(bad)
     def test_nan_negative_and_over_budget_quantities_refused(self):
-        for qty in ('NaN','-1','5.001','Infinity'):
+        for qty in ('NaN','-1','1.001','Infinity'):
             built=action()
             for o in built['orders']:o['s']=qty
             with self.assertRaises(risk.RiskError):risk.assert_new_entry_budget(built)
@@ -124,14 +140,40 @@ class RiskPolicyTests(unittest.TestCase):
             self.assertEqual(sender.submit_once(source(),account=ACCOUNT,journal='/no-file',exit_type='tp_limit_sl_market')['status'],'DISABLED')
     def test_testnet_host_stays_fixed(self):
         self.assertEqual(sender.TESTNET_HOST,'api.hyperliquid-testnet.xyz')
+    def test_old_card_and_exit_draft_remain_exact_after_risk_reduction(self):
+        from . import trade_cards as cards, filled_quantity_exits as exits
+        routes={'long_account':{'account':ACCOUNT}}
+        kwargs=dict(rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
+        old=cards.prepare_card(source(),META,**kwargs,_historical_risk_usd='10')
+        current=cards.prepare_card(source(),META,**kwargs)
+        self.assertEqual(old['card_id'],current['card_id'])
+        self.assertEqual((old['planning']['quantity'],current['planning']['quantity']),('5','1'))
+        draft=exits.prepare_entry(old,META,ACCOUNT,routes,_historical_risk_usd='10')
+        before=deepcopy((old,draft))
+        self.assertEqual(cards.validate_card(old),old)
+        self.assertEqual(exits.validate_draft(old,draft,routes),draft)
+        self.assertEqual((old,draft),before)
+        with self.assertRaises(ValueError):exits.prepare_entry(old,META,ACCOUNT,routes)
+        for key,value in [('planned_usd','15'),('policy',risk.VERSION),('costs_included',True)]:
+            changed=deepcopy(old);changed['risk'][key]=value
+            with self.assertRaises(cards.CardError):cards.validate_card(changed)
+    def test_old_unavailable_asset_card_remains_exact(self):
+        from alert_cards_forwarder_selftest import delivery
+        from . import unavailable_asset_cards as unprepared, trade_cards as cards
+        old=unprepared.prepare(delivery(),_historical_risk_usd='10')
+        before=deepcopy(old)
+        self.assertEqual(cards.validate_card(old),before)
+        self.assertEqual(old,before)
+        changed=deepcopy(old);changed['risk']['policy']=risk.VERSION
+        with self.assertRaises(cards.CardError):cards.validate_card(changed)
 
 
 @unittest.skipUnless(os.environ.get('HL_JOURNAL_CI_URL'),'Requires disposable PostgreSQL')
 class RiskMigrationPostgresTests(unittest.TestCase):
     setUp=fixtures.PostgresTests.setUp
-    def pair(self):
+    def pair(self, historical='20'):
         key,_=self.journal.save_prepared(ACCOUNT,self.prepared)
-        return key,sender.build_action(self.prepared['execution'],self.meta,ACCOUNT,exit_type='tp_limit_sl_market'),sender.build_action(self.prepared['execution'],self.meta,ACCOUNT,exit_type='tp_limit_sl_market',historical_risk_usd='20')
+        return key,sender.build_action(self.prepared['execution'],self.meta,ACCOUNT,exit_type='tp_limit_sl_market'),sender.build_action(self.prepared['execution'],self.meta,ACCOUNT,exit_type='tp_limit_sl_market',historical_risk_usd=historical)
     def test_new_twenty_reservation_refused(self):
         key,new,old=self.pair()
         with self.assertRaises(pg.JournalError):self.journal.reserve(key,old)
@@ -148,11 +190,26 @@ class RiskMigrationPostgresTests(unittest.TestCase):
         self.assertFalse(other.reserve(key,old)[0])
         with self.assertRaises(pg.JournalError):other.reserve(key,new)
         self.assertEqual(other.load(key),before)
-    def test_new_ten_action_survives_restart(self):
+    def test_new_two_action_survives_restart(self):
         key,new,_=self.pair();self.assertTrue(self.journal.reserve(key,new)[0])
         other=pg.PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         self.assertEqual(other.load(key)['action'],new)
         self.assertFalse(other.reserve(key,new)[0])
+    def test_new_ten_reservation_refused(self):
+        key,new,old=self.pair('10')
+        with self.assertRaises(pg.JournalError):self.journal.reserve(key,old)
+        self.assertIsNone(self.journal.load(key)['action'])
+        self.assertTrue(self.journal.reserve(key,new)[0])
+    def test_old_ten_record_survives_restart_without_resize_or_resend(self):
+        key,new,old=self.pair('10');self.journal.reserve(key,new)
+        with self.journal._transaction() as conn:
+            conn.execute('UPDATE hl_testnet_execution_v1.attempts SET action=%s::jsonb WHERE plan_key=%s',(pg.canonical(old),key))
+        other=pg.PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
+        before=other.load(key)
+        self.assertEqual(pg.validate_action(before['action'],before['prepared'],ACCOUNT),old)
+        self.assertFalse(other.reserve(key,old)[0])
+        with self.assertRaises(pg.JournalError):other.reserve(key,new)
+        self.assertEqual(other.load(key),before)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

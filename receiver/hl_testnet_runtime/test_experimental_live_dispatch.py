@@ -98,8 +98,8 @@ class LiveDispatchTests(unittest.TestCase):
             terminal_orders=[dict(**common, state='FILLED', filled_quantity='1000', at_ms=self.t)],
             fills=[dict(**common, fill_id='f1', quantity='1000', price='2', at_ms=self.t,
                 fee='0', fee_token='USDC', side='A')]))
-        p.update(leg='STOP', operation='CREATE_EXIT')
-        p['action']['orders'][0].update(b=True, p='2.01', r=True,
+        p.update(leg='STOP', operation='CREATE_EXIT', quantity='1000')
+        p['action']['orders'][0].update(b=True, p='2.01', s='1000', r=True,
             t=dict(trigger=dict(isMarket=True, triggerPx='2.01', tpsl='sl')))
         self.persisted = deepcopy(self.request)
 

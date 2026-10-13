@@ -268,12 +268,12 @@ class RuntimeTests(unittest.TestCase):
     def test_short_plan_pass(self):
         self.assertTrue(self.plan_case({**PLAN,'side':'SHORT','stop':'110','take_profit':'90'})['test_plan_checked'])
     def test_quantity_cap_not_bypassed(self):
-        # $10 / $10 gap = 1 unit; the smaller-side cap deliberately excludes it.
-        self.reader.capacity['maxTradeSzs'] = ['0.5','5']
+        # $2 / $10 gap = 0.2 units; the smaller-side cap deliberately excludes it.
+        self.reader.capacity['maxTradeSzs'] = ['0.1','5']
         self.assertEqual(self.plan_case()['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
     def test_available_budget_uses_conservative_side(self):
-        # 1 unit * 100 at 1x plus 1 reserve = 101, not 202 as under $20 risk.
-        self.reader.capacity['availableToTrade'] = ['500','100.5']
+        # 0.2 units * 100 at 1x plus 0.2 reserve = 20.2.
+        self.reader.capacity['availableToTrade'] = ['500','20.1']
         self.assertFalse(self.plan_case()['test_plan_checked'])
     def test_capacity_identity_and_symbol(self):
         for key, value in [('user',B),('coin','ETH')]:
@@ -386,9 +386,9 @@ class RuntimeTests(unittest.TestCase):
 
 
     def test_legacy_budget_components_are_reported_separately(self):
-        self.reader.capacity['maxTradeSzs'] = ['0.5','5']
-        self.reader.capacity['availableToTrade'] = ['100','100']
-        self.reader.spot['balances'][0]['hold'] = '900'
+        self.reader.capacity['maxTradeSzs'] = ['0.1','5']
+        self.reader.capacity['availableToTrade'] = ['20','20']
+        self.reader.spot['balances'][0]['hold'] = '980'
         report = self.plan_case()['budget_diagnostics']
         self.assertEqual(report['legacy_checks_same_sample'], {
             'quantity_within_exchange_cap': False,
@@ -397,7 +397,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(report['failed_checks']),3)
     def test_existing_leverage_resolves_cash_only_false_rejection(self):
         self.reader.capacity['leverage']['value'] = 5
-        self.reader.capacity['availableToTrade'] = ['100','100']
+        self.reader.capacity['availableToTrade'] = ['20','20']
         result = self.plan_case()
         self.assertTrue(result['test_plan_checked'])
         report = result['budget_diagnostics']
@@ -407,18 +407,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(report['account_settings_changed'])
         self.assertFalse(report['order_authorization'])
     def test_one_x_does_not_bypass_cash_shortage(self):
-        self.reader.capacity['availableToTrade'] = ['100','100']
+        self.reader.capacity['availableToTrade'] = ['20','20']
         self.assertEqual(self.plan_case()['status'],'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')
     def test_unheld_usdc_cap_remains_enforced(self):
         self.reader.capacity['leverage']['value'] = 5
-        self.reader.spot['balances'][0]['hold'] = '985'
+        self.reader.spot['balances'][0]['hold'] = '997'
         self.assertEqual(self.plan_case()['status'],'ESTIMATED_MARGIN_EXCEEDS_UNHELD_USDC')
     def test_reserve_is_not_divided_by_leverage(self):
         self.reader.capacity['leverage']['value'] = 5
-        # Required = 20 margin + 1 reserve, NOT 20 + 1/5.
-        self.reader.capacity['availableToTrade'] = ['20.5','20.5']
+        # Required = 4 margin + 0.2 reserve, NOT 4 + 0.2/5.
+        self.reader.capacity['availableToTrade'] = ['4.1','4.1']
         self.assertFalse(self.plan_case()['test_plan_checked'])
-        self.reader.capacity['availableToTrade'] = ['21','21']
+        self.reader.capacity['availableToTrade'] = ['4.2','4.2']
         self.assertTrue(self.plan_case()['test_plan_checked'])
     def test_all_current_budget_failures_are_preserved(self):
         self.reader.capacity['availableToTrade'] = ['1','1']
@@ -446,26 +446,26 @@ class RuntimeTests(unittest.TestCase):
     def test_adverse_entry_price_is_not_ignored_long(self):
         self.reader.capacity['markPx']='80'
         self.reader.capacity['leverage']['value']=5
-        # Margin + reserve = 17, but adding adverse loss requires 37.
-        self.reader.capacity['availableToTrade']=['20','20']
+        # Margin + reserve = 3.4, but adding adverse loss requires 7.4.
+        self.reader.capacity['availableToTrade']=['4','4']
         result=self.plan_case()
         self.assertFalse(result['test_plan_checked'])
         self.assertTrue(result['budget_diagnostics']['adverse_entry_mark_loss_included'])
     def test_adverse_entry_price_is_not_ignored_short(self):
         self.reader.capacity['markPx']='120'
         self.reader.capacity['leverage']['value']=5
-        # Margin + reserve = 25.2, but adding adverse loss requires 45.2.
-        self.reader.capacity['availableToTrade']=['30','30']
+        # Margin + reserve = 5.04, but adding adverse loss requires 9.04.
+        self.reader.capacity['availableToTrade']=['6','6']
         result=self.plan_case({**PLAN,'side':'SHORT','stop':'110','take_profit':'90'})
         self.assertFalse(result['test_plan_checked'])
         self.assertTrue(result['budget_diagnostics']['adverse_entry_mark_loss_included'])
     def test_quantity_cap_still_applies_with_leverage(self):
         self.reader.capacity['leverage']['value']=5
-        self.reader.capacity['maxTradeSzs']=['0.5','5']
+        self.reader.capacity['maxTradeSzs']=['0.1','5']
         self.assertEqual(self.plan_case()['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
     def test_capacity_array_order_is_not_guessed(self):
         self.reader.capacity['leverage']['value']=5
-        for pair in (['20.5','500'],['500','20.5']):
+        for pair in (['4.1','500'],['500','4.1']):
             self.reader.capacity['availableToTrade']=pair
             self.assertFalse(self.plan_case()['test_plan_checked'])
     def test_key_match_is_independent_of_budget_failure(self):
@@ -491,22 +491,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(one,two)
         self.assertNotEqual(one,three)
     def test_mark_value_lab_bound_not_raised(self):
-        self.reader.capacity['markPx']='6000'
+        self.reader.capacity['markPx']='30000'
         self.reader.capacity['availableToTrade']=['100000','100000']
         self.reader.spot['balances'][0]['total']='100000'
         result=self.plan_case()
         self.assertFalse(result['test_plan_checked'])
         self.assertIn('mark_notional_within_lab_cap',result['budget_diagnostics']['failed_checks'])
-    def test_ten_dollar_risk_does_not_shrink_to_make_budget_pass(self):
+    def test_two_dollar_risk_does_not_shrink_to_make_budget_pass(self):
         self.reader.capacity['leverage']['value']=5
-        # 10/(100-99) = 10 units, not 1; cap deliberately excludes it.
+        # 2/(100-99) = 2 units; the 1-unit cap deliberately excludes it.
+        self.reader.capacity['maxTradeSzs']=['1','1']
         result=self.plan_case({**PLAN,'stop':'99'})
         self.assertEqual(result['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
         self.assertFalse(result['budget_diagnostics']['risk_rule_changed'])
     def test_legacy_wrapper_remains_conservative_without_context(self):
         from decimal import Decimal as D
         with self.assertRaises(checks.Blocked):
-            checks.plan_check(PLAN,'BTC',2,D('100'),D('100'),D('5'))
+            checks.plan_check(PLAN,'BTC',2,D('20'),D('20'),D('5'))
 
 
 if __name__ == '__main__':

@@ -331,8 +331,8 @@ class FullConnectionTests(unittest.TestCase):
         self.assertEqual(trade['phase'], 'OPEN')
         for leg in ('STOP', 'TAKE_PROFIT'):
             self.assertEqual(Decimal(self.oracle.orders[self.oracle.oid(leg)]['view']['wire_order']['s']),
-                             Decimal(trade['quantity'])/2)
-        self.oracle.fill(self.oracle.oid('TAKE_PROFIT'), str(Decimal(trade['quantity'])/2))
+                             (Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'))
+        self.oracle.fill(self.oracle.oid('TAKE_PROFIT'), str((Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN')))
         for _ in range(3): self.service.tick()
         self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'], 'CLOSED')
         self.assertEqual(len(self.http), 4)
@@ -433,7 +433,7 @@ class FullConnectionTests(unittest.TestCase):
         self.assertEqual(trade['phase'],'OPEN')
         for leg in ('STOP','TAKE_PROFIT'):
             order=self.oracle.orders[self.oracle.oid(leg)]['view']['wire_order']
-            self.assertEqual(Decimal(order['s']),Decimal(trade['quantity'])/2)
+            self.assertEqual(Decimal(order['s']),(Decimal(trade['quantity'])/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN'))
         self.assertEqual(sum(r['proposal']['operation']=='ENTRY' for r in self.oracle.requests),1)
 
     def test_admitted_trade_never_repeats_entry_preflight_when_entries_remain_enabled(self):

@@ -103,7 +103,7 @@ class TradeCardTests(unittest.TestCase):
 
     def test_attempts_are_ordered_and_uncertain_is_not_presented_as_filled(self):
         f = self.fixture; f.venue.lose_reply = True
-        value = alert()
+        value = alert(stop='93.1')
         f.worker.receive([value]); f.worker.run_once()
         f.restart()
         card = f.store.trade_card(value['occurrence_id'])['card']
@@ -158,7 +158,7 @@ class TradeCardTests(unittest.TestCase):
             f.store.trade_card(cid)
 
     def test_unknown_source_only_and_invalid_page_do_not_create_a_trade(self):
-        f = self.fixture; value = alert()
+        f = self.fixture; value = alert(stop='93.1')
         f.worker.receive([cancellation(value, f.venue.t)]); f.compact()
         self.assertIsNone(f.store.trade_card(value['occurrence_id']))
         self.assertIsNone(f.store.trade_card('f'*64))
@@ -223,7 +223,7 @@ class NativeDomainCardTests(unittest.TestCase):
     def test_native_report_cards_preserve_domain_account_and_actual_fill_facts(self):
         f = approved_support.ApprovedContinuousReleaseTests()
         f.setUp(); self.addCleanup(f.doCleanups)
-        value = alert()
+        value = alert(stop='93.1')
         f.worker.receive([value]); f.cycle()
         oid = f.venue.oid('ENTRY')
         f.venue.fill(oid, '1', value['entry'])

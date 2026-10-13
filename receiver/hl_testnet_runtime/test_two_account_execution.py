@@ -108,10 +108,10 @@ class ConnectionTests(unittest.TestCase):
     def test_other_default_account_not_silently_enabled(self):
         with self.assertRaisesRegex(checks.Blocked,'SCOPE_NOT_APPROVED'):
             r.default_native_snapshot({'account':A,'agent':B},self.reader,'BTC')
-    def test_exact_plan_uses_same_ten_dollar_quantity(self):
+    def test_exact_plan_uses_same_two_dollar_quantity(self):
         out=r.budget_for_role(ENV,'short_account',C,D,PLAN,self.reader)
         self.assertTrue(out['test_plan_checked'])
-        self.assertEqual(out['budget_diagnostics']['planned_risk_usd'],'10')
+        self.assertEqual(out['budget_diagnostics']['planned_risk_usd'],'2')
         self.assertEqual(out['budget_diagnostics']['plan_sha256'],p.digest(PLAN))
     def test_stream_budget_accepts_existing_owned_market_capacity_only(self):
         self.reader.perp['assetPositions']=[dict(position=dict(coin='DOGE',szi='-10'))]

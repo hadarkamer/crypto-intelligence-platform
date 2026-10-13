@@ -1,25 +1,35 @@
 """Versioned planned price-distance budget. Never reads credentials or settings.
 
-The current $10 budget is before fees, funding and slippage; NOT a loss cap.
-The old $20 profile is retained only for exact historical action reconstruction.
+The current $2 budget is before fees, funding and slippage; NOT a loss cap.
+Old $10/$20 profiles are retained only for exact historical action reconstruction.
 Existing positions and immutable order records must never be resized by a config
-change. Signing and transport independently reject NEW entries above $10.
+change. Signing and transport independently reject NEW entries above $2.
 """
 from decimal import Decimal, InvalidOperation, localcontext
 
-CURRENT_RISK_USD = '10'
+CURRENT_RISK_USD = '2'
 LEGACY_RISK_USD = '20'
-VERSION = 'planned-distance-risk-10usd-v2'
+HISTORICAL_RISK_PROFILES = ('10', LEGACY_RISK_USD)
+VERSION = 'planned-distance-risk-2usd-v3'
 
 
 class RiskError(ValueError):
     """Fixed codes only."""
 
 
+def card_profile(historical=None):
+    """Exact profiles used by stored cards; not permission to send an entry."""
+    value = CURRENT_RISK_USD if historical is None else historical
+    versions = {'2': VERSION, '10': 'planned-distance-risk-10usd-v2'}
+    if type(value) is not str or value not in versions:
+        raise RiskError('UNKNOWN_HISTORICAL_CARD_RISK_PROFILE')
+    return dict(planned_usd=value, policy=versions[value], costs_included=False)
+
+
 def budget(historical=None):
     if historical is None:
         return Decimal(CURRENT_RISK_USD)
-    if type(historical) is not str or historical not in (CURRENT_RISK_USD, LEGACY_RISK_USD):
+    if type(historical) is not str or historical not in (CURRENT_RISK_USD, *HISTORICAL_RISK_PROFILES):
         raise RiskError('UNKNOWN_HISTORICAL_RISK_PROFILE')
     return Decimal(historical)
 
@@ -41,7 +51,7 @@ def assert_new_entry_budget(action):
     """Defense at signing/transport. Reduce-only repair is not a new entry.
 
     Historical profiles may be rebuilt and inspected, but may not authorize
-    another $20 entry. Do not change order sizes, prices, IDs or exit types here.
+    another $10/$20 entry. Do not change order sizes, prices, IDs or exit types here.
     """
     try:
         if not isinstance(action, dict) or action.get('type') != 'order':
@@ -77,7 +87,7 @@ def assert_new_entry_budget(action):
         with localcontext() as ctx:
             ctx.prec = 60
             if size * abs(price - stop_price) > budget():
-                raise RiskError('NEW_ENTRY_EXCEEDS_CURRENT_TEN_DOLLAR_RISK')
+                raise RiskError('NEW_ENTRY_EXCEEDS_CURRENT_RISK_BUDGET')
     except RiskError:
         raise
     except (KeyError, TypeError, AttributeError, InvalidOperation):

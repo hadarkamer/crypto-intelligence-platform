@@ -101,11 +101,11 @@ def safe_result(value):
 def validate_action(action, prepared, account):
     """Exact current OR historical reconstruction, never resize a stored order.
 
-    Retain the old $20 profile only to read/inspect/cancel already stored actions.
-    A new reservation, signature or transport still enforces the current $10.
+    Retain old $10/$20 profiles only to read/inspect/cancel already stored actions.
+    A new reservation, signature or transport still enforces the current $2.
     """
     import hyperliquid_testnet_executor as sender
-    from .risk_policy import LEGACY_RISK_USD
+    from .risk_policy import HISTORICAL_RISK_PROFILES
     try:
         orders = action['orders']
         asset = orders[0]['a']
@@ -123,7 +123,7 @@ def validate_action(action, prepared, account):
         universe = [{'name': '_unused'} for _ in range(asset)]
         universe.append({'name': prepared['execution']['symbol'],
                          'szDecimals': prepared['audit']['sz_decimals']})
-        for profile in (None, LEGACY_RISK_USD):
+        for profile in (None, *HISTORICAL_RISK_PROFILES):
             try:
                 expected = sender.build_action(prepared['execution'], {'universe': universe}, account,
                     exit_type=exit_type, historical_risk_usd=profile)

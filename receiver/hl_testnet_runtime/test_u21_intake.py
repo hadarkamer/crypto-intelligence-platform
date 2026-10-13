@@ -54,7 +54,7 @@ class U21IntakeTests(unittest.TestCase):
         self.assertEqual(card['source_expires_at'],value()['expires_at'])
         self.assertEqual(card['prepared']['source']['stop'],'1.2401699999999998')
         self.assertEqual(card['prepared']['execution']['stop'],'1.2402')
-        self.assertEqual(card['risk']['planned_usd'],'10')
+        self.assertEqual(card['risk']['planned_usd'],'2')
 
     def test_replay_same_notification_and_distinct_notifications(self):
         first=value(); second=value(delivered(SECOND))

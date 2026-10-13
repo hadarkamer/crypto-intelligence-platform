@@ -64,7 +64,7 @@ class IngestionFixture:
             time=self.venue.now() if at is None else at)
 
     def bound_entry(self):
-        msg, result = self.start(maxpain_alert(approved_ms=T))
+        msg, result = self.start(maxpain_alert(stop='93.1', approved_ms=T))
         self.assertEqual(result.get('operation'), 'ENTRY')
         self.cycle(False)
         oid = self.venue.oid('ENTRY')
@@ -276,7 +276,7 @@ class WsFillIngestionTests(IngestionFixture, unittest.TestCase):
         self.assert_pending(2)
 
     def test_unbound_request_fill_waits_for_rest_to_assign_order(self):
-        msg, result = self.start(maxpain_alert(approved_ms=T))
+        msg, result = self.start(maxpain_alert(stop='93.1', approved_ms=T))
         self.assertEqual(result.get('operation'), 'ENTRY')
         oid = self.venue.oid('ENTRY')
         row = self.exchange_fill(oid)
@@ -440,7 +440,7 @@ class WsFillIngestionTests(IngestionFixture, unittest.TestCase):
         h.setUp()
         self.addCleanup(h.doCleanups)
         h.provider.safety.feed = self.feed
-        msg = maxpain_alert(approved_ms=T)
+        msg = maxpain_alert(stop='93.1', approved_ms=T)
         h.seed(msg)
         self.assertEqual(h.worker.run_once(entries_enabled=True).get('operation'), 'ENTRY')
         h.worker.run_once(entries_enabled=False)
@@ -470,7 +470,7 @@ class WsFillIngestionTests(IngestionFixture, unittest.TestCase):
         h = FullConnectionTests()
         h.setUp()
         self.addCleanup(h.doCleanups)
-        msg = maxpain_alert(approved_ms=T)
+        msg = maxpain_alert(stop='93.1', approved_ms=T)
         h.seed(msg)
         self.assertEqual(h.worker.run_once(entries_enabled=True).get('operation'), 'ENTRY')
         h.worker.run_once(entries_enabled=False)
@@ -519,7 +519,7 @@ class WsFillIngestionTests(IngestionFixture, unittest.TestCase):
                 self.addCleanup(h.doCleanups)
                 self.new_feed()
                 h.provider.safety.feed = self.feed
-                msg = maxpain_alert(approved_ms=T)
+                msg = maxpain_alert(stop='93.1', approved_ms=T)
                 cid = msg['occurrence_id']
                 h.seed(msg)
                 self.assertEqual(h.worker.run_once(entries_enabled=True).get('operation'), 'ENTRY')
