@@ -90,9 +90,9 @@ connection. Full row dictionaries are compared transiently, never returned.
             _require(conn.pgconn.transaction_status == TransactionStatus.IDLE,
                      'Recovery read did not finish IDLE')
             result = {'case':name, 'input_decimal':str(value), 'backend_pid':backend_pid,
-                'before_transaction_state':before.name, 'sqlstate':observed_sqlstate,
-                'error_class':error_class, 'error_transaction_state':failed_state.name,
-                'after_rollback_state':recovered_state.name, 'final_transaction_state':'IDLE',
+                'before_transaction_state':TransactionStatus(before).name, 'sqlstate':observed_sqlstate,
+                'error_class':error_class, 'error_transaction_state':TransactionStatus(failed_state).name,
+                'after_rollback_state':TransactionStatus(recovered_state).name, 'final_transaction_state':'IDLE',
                 'read_only_transactions_verified':3, 'reference_rows':1,
                 'reference_sha256':case_reference_sha, 'recovered_sha256':_digest(recovered),
                 'full_result_equal':True}
