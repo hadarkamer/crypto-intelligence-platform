@@ -133,7 +133,7 @@ print('RESTART_READBACK_PASSED')'''
         src=trade_cards.prepare_card(source(),META,rule_id='C1',threshold_pct='2',record_kind='received_alert')
         self.store.record(src);before=self.store.load(src['card_id'])
         b=life.binding_from_card(src,A,{'long_account':{'account':A}},binding()['orders'])
-        self.assertEqual(b['planned_quantity'],'5')
+        self.assertEqual(b['planned_quantity'],'1')
         self.assertEqual(b['prices'],dict(entry='100',stop='98',take_profit='104'))
         self.save(b,closed(b))
         self.assertEqual(before,self.store.load(src['card_id']))
