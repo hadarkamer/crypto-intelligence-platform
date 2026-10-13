@@ -530,7 +530,7 @@
       "hl_testnet_runtime/test_card_display_projection.py": "95c19bfdc27e1a7b291869cb5a569da8afd23ec2e37d6e783784c068f2aed9e6",
       "hl_testnet_runtime/test_card_exit_recovery.py": "1b3ce66c0f3b88863f8218f8e751dee6218021d2f9f90edb0f05f3f37031e586",
       "hl_testnet_runtime/test_card_lifecycle.py": "10b3c498764127904e4e7e4dd67f90dd9d4789f60756e02c63b0d8e2e59a4bf7",
-      "hl_testnet_runtime/test_card_lifecycle_store.py": "9748fd82b94e8f35ee2aef146217225925200c4abf82516279398a76ddbd99c3",
+      "hl_testnet_runtime/test_card_lifecycle_store.py": "39f03f0af85b3fad36baecf58ccd8554beb2aa932ad8245f2885b215a1844d5b",
       "hl_testnet_runtime/test_card_receipt_review.py": "a43fc1da05e1637c104ea2bd2c33e6e2bbdd26080c585d6eab3ec7cf2fbd27f3",
       "hl_testnet_runtime/test_card_recovery_journal.py": "16a9387045a9b985f6a7d2f610db123ef8e29f45e94b3ab6f2a499e9e7f6e82e",
       "hl_testnet_runtime/test_card_sync.py": "c52027fccbf64a2230ff0f9ac2d0b328314b9947d24005820e398a24d1099d75",
@@ -548,7 +548,7 @@
       "hl_testnet_runtime/test_exit_amendment.py": "144acf7920aa563574045c12c689034d8d83169b9d1da78687f4873045ae845a",
       "hl_testnet_runtime/test_experimental_allocations.py": "58f2612e2b1c85a95411c45ec94a5ae13275db4edb168ce01fe5ad8246fce2ff",
       "hl_testnet_runtime/test_experimental_blocker_acceptance.py": "2ff9713d976c2e6b2962325a839e51ab5ba00fab6565e68eeb8abb293e20d636",
-      "hl_testnet_runtime/test_experimental_bridge_audit.py": "2523ce674b5701de16748f46b958c30b5c56ad33b83989b693047ad67f08bb31",
+      "hl_testnet_runtime/test_experimental_bridge_audit.py": "a4072c926d9684326c7ada3c0872be5271c4bf775039c153cc5010662ba19801",
       "hl_testnet_runtime/test_experimental_dispatch_integration.py": "ae0b721675757201718d267b0da1e644038d4d318c2ef3e321439f545d494bfa",
       "hl_testnet_runtime/test_experimental_entry_read_reuse.py": "a11961eba7b95aa4491845653959c2bf380470160319eebcdcd22d07b59a9a06",
       "hl_testnet_runtime/test_experimental_execution_cards.py": "0df2f2c0854368a4da9277fc543344c9c5c539ff78576fde331da8f32f7c317d",
@@ -585,9 +585,9 @@
       "hl_testnet_runtime/test_fill_wakeups.py": "37116bb7ba3188ab079308a3bca1ebaa3ac3fd3ed6a7b3209fc3b826ad5ca7b8",
       "hl_testnet_runtime/test_filled_dispatch_attempt_boundary.py": "e504d7089756a95c314ab84f2092907faa428dbe6bc019a9b8696d90d325a2b8",
       "hl_testnet_runtime/test_filled_dispatch_final_gate.py": "851b8d37977d1a9c74804e0702b90f01abfceaa2e14eab68683e7984867bbe71",
-      "hl_testnet_runtime/test_filled_pending_cancel.py": "8b42fe27eb2a3b86a27d66ce94f2f7951fb2c6e52d40730eb661303367d24859",
+      "hl_testnet_runtime/test_filled_pending_cancel.py": "3eae7a406f188ae5d0584f44b98059f44591d6103e44437285823277bc165325",
       "hl_testnet_runtime/test_filled_quantity_dispatch.py": "84a31e90f037ed87470c22067e67a95d120b2ac9ac2b0bf4ff5b6fc2c06ae5e2",
-      "hl_testnet_runtime/test_filled_quantity_exits.py": "3c0dcfb14e363eff6ed8c7eb5bdbc2de2401887d3e9d2998630f28ab81665fa9",
+      "hl_testnet_runtime/test_filled_quantity_exits.py": "b45a5887b28928e94f66fba0d8d1fb12d3fa6d29cc8d08ecd68d1ecaee244fb2",
       "hl_testnet_runtime/test_filled_trial_runtime.py": "bea6976606e3a6175ac61234ea5a62930c6c8ec8ec00f71c4d7ad0dc2264c947",
       "hl_testnet_runtime/test_filled_trial_worker_diagnostics.py": "412a251baf8cf7c4a1a1d0f298f822b64752fe46fe2f08bfb98fb61f96bbb92d",
       "hl_testnet_runtime/test_guarded_execution.py": "038ecc37cd1f2c0fd68e4185c3f155c7a8cd840ad3430b96b81e674909563498",
@@ -902,6 +902,6 @@
   "schema": "experimental_render_bundle_v1",
   "source_commits": {
     "producer": "3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3",
-    "receiver": "93226a933678b0cb8775a6d657dfebe23b6f07b3"
+    "receiver": "4965f7eaa508c88f976be0d6e4b5e78d1df78ff9"
   }
 }

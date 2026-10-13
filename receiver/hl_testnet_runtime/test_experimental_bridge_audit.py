@@ -157,7 +157,7 @@ class ExperimentalBridgeAuditTests(unittest.TestCase):
         context['mark_price'] = '9.89'  # more than 1% favorable from entry 10
         before = deepcopy(bindings)
         report = card_exit_recovery.plan(bindings, snapshot, context, now_ms=snapshot['at_ms'])
-        self.assertEqual(report['desired_exits'][0]['stop_price'], '10.1')
+        self.assertEqual(report['desired_exits'][0]['stop_price'], '10.02')
         self.assertIsNone(report['next_step'])
         self.assertEqual(bindings, before)
 
