@@ -279,8 +279,9 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.check_observed_archived_mutation()
 
     def test_partial_fill_and_unsettled_exit_never_archive_during_protection(self):
-        value = alert(cycle='partial-must-stay-hot')
+        value = alert(cycle='partial-must-stay-hot', stop='93.1')
         oid = self.start(value)
+        self.assertGreater(Decimal(self.oracle.orders[oid]['view']['wire_order']['s']), Decimal(1))
         self.oracle.fill(oid, '1')
         self.assertEqual(self.cycle().get('operation'), 'CREATE_EXIT')
         self.assertEqual(self.compact()['archived'], 0)
