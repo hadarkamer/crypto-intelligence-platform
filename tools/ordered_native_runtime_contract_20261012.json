@@ -1,0 +1,69 @@
+{
+  "version": "ordered-native-runtime-contract-v1",
+  "expected": {
+    "python_version": "3.11.9",
+    "python_implementation": "cpython",
+    "libc_name": "glibc",
+    "libc_version": "2.36",
+    "psycopg_version": "3.2.3",
+    "postgres_server_version_num": 180006
+  },
+  "required_keys": [
+    "python_version",
+    "python_implementation",
+    "libc_name",
+    "libc_version",
+    "psycopg_version",
+    "postgres_server_version_num"
+  ],
+  "unknown_fields": [
+    "libpq_version",
+    "pq_implementation",
+    "machine"
+  ],
+  "provenance": {
+    "python_version": {
+      "kind": "observed",
+      "source": "Render runtime_start log",
+      "log_id": "89534a0d-c723-4aab-81d0-321c68e623be",
+      "timestamp": "2026-10-12T10:56:21.500781559Z"
+    },
+    "python_implementation": {
+      "kind": "observed",
+      "source": "Render runtime_start log",
+      "log_id": "89534a0d-c723-4aab-81d0-321c68e623be"
+    },
+    "libc_name": {
+      "kind": "observed",
+      "source": "glibc_mallinfo2 provider in Render runtime_start"
+    },
+    "libc_version": {
+      "kind": "observed",
+      "source": "Render runtime_start log",
+      "log_id": "89534a0d-c723-4aab-81d0-321c68e623be"
+    },
+    "psycopg_version": {
+      "kind": "configured",
+      "source": "https://github.com/hadarkamer/crypto-intelligence-platform/blob/3c5bdb9ae5a450d1b3fb0cd4c71bab599d252ad3/requirements.txt",
+      "git_blob_sha": "af30e4d55627631b5b18f6cb60d898685a891644",
+      "note": "Dependency pin and build installation evidence; loaded production driver not directly probed.",
+      "build_evidence": {
+        "log_id": "387cc5e6-f22b-49ff-b4d3-8d8a473629a6",
+        "timestamp": "2026-10-11T19:01:00.40513039Z",
+        "observed": "Latest-deploy build log records successful installation of psycopg3.2.3 and psycopg-binary3.2.3; loaded runtime not directly probed."
+      }
+    },
+    "postgres_server_version_num": {
+      "kind": "observed",
+      "source": "Render read-only version-only SQL",
+      "database": "crypto_intelligence_db",
+      "observed_on": "2026-10-12"
+    }
+  },
+  "limitations": [
+    "Matching this contract is not full production equivalence.",
+    "Loaded production psycopg,libpq and driver implementation still require observation.",
+    "Server build provenance: PostgreSQL18.6 Debian x86_64; exact binary/build flags and host kernel are not matched.",
+    "Concurrent collector and trading workloads are outside the native correctness-only runner."
+  ]
+}

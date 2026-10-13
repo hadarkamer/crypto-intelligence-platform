@@ -1,0 +1,13 @@
+{
+  "workspaceId": "tea-d94cq7e7r5hc73dee88g",
+  "name": "ordered-native-build-check-20261013",
+  "repo": "https://github.com/hadarkamer/crypto-intelligence-platform",
+  "branch": "codex/ordered-native-build-check-20261013",
+  "autoDeploy": "no",
+  "buildCommand": "python tools/render_native_build/entrypoint.py",
+  "publishPath": "native-build-public",
+  "envVars": [
+    {"key": "PYTHON_VERSION", "value": "3.11.9"},
+    {"key": "SKIP_INSTALL_DEPS", "value": "true"}
+  ]
+}
