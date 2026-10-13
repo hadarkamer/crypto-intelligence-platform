@@ -335,6 +335,8 @@ def run_operation(conn, mode, fixture, catalog, phase=None, *, full_parity=True,
 def source_hashes():
     names = ['tools/ordered_postgres_memory_replay.py', 'tools/ordered_memory_replay.py',
         'tools/ordered_cursor_lifetime_probe.py',
+        'tools/ordered_binding_range_check.py', 'tools/verify_ordered_binding_correctness.py',
+        'research_common_window_metrics_store_selftest.py',
         'runtime_allocation_diagnostics.py', 'research_formula_ordered_store.py',
         'research_formula_ordered_v7.py', 'research_ordered_question_catalog.py',
         'research_ordered_question_store.py', 'research_event_scan.py',

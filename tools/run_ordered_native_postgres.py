@@ -282,13 +282,24 @@ def source_bindings(args):
 
 
 def verify_correctness(output, token, host_receipt, bindings, driver):
+    from verify_ordered_binding_correctness import MODULE, SOURCE_SHA256, VERSION as correctness_version
     folder = output/'correctness'
     path = folder/'correctness_receipt.json'
     value = json.loads(path.read_text())
     manifest = json.loads((folder/'fixture_manifest.json').read_text())
-    if (value.get('kind')!='binding_correctness' or value.get('result')!='PASS'
+    source_arm = value.get('source_arm')
+    loader_sha = SOURCE_SHA256.get(source_arm)
+    if (loader_sha is None or bindings['actual_sources'].get(MODULE)!=loader_sha
+            or value.get('loader_sha256')!=loader_sha
+            or manifest.get('source_arm')!=source_arm or manifest.get('loader_sha256')!=loader_sha
+            or bindings['actual_sources'].get('tools/verify_ordered_binding_correctness.py')!=bindings['verifier']
+            or not re.fullmatch(r'[0-9a-f]{64}', bindings['actual_sources'].get('tools/ordered_binding_range_check.py',''))
+            or not re.fullmatch(r'[0-9a-f]{64}', bindings['actual_sources'].get('research_common_window_metrics_store_selftest.py',''))
+            or value.get('version')!=correctness_version or manifest.get('version')!=correctness_version
+            or value.get('kind')!='binding_correctness' or value.get('result')!='PASS'
             or value.get('run_token')!=token or value.get('measured_passes')!=0
             or value.get('actual_loader') is not True or value.get('proxy_rewrites')!=0
+            or value.get('connection_count')!=3 or value.get('cursor_policy')!='observed'
             or value.get('connection_closed') is not True or value.get('checkpoint_verified') is not True
             or value.get('source_hashes')!=bindings['actual_sources']
             or value.get('driver_binding')!=driver or value.get('tool_sha256')!=bindings['verifier']
@@ -300,10 +311,60 @@ def verify_correctness(output, token, host_receipt, bindings, driver):
             or manifest.get('expected')!=value.get('full_scope_result')):
         raise RuntimeError('Correctness receipt source/driver/host binding mismatch')
     result = value['full_scope_result']
+    counts = {'queries':4, 'fetchone':2, 'fetchall':2, 'array_targets':1,
+              'scalar_conversions':0, 'explicit_closes':0,
+              'observed_list_bindings':int(source_arm == 'baseline'),
+              'observed_scalar_bindings':int(source_arm == 'fixed')}
+    positive = value.get('source_semantics_audit',{})
+    positive_rows = {'empty_no_query':0, 'duplicate_and_missing':1,
+                     'existing_int_normalization':1, 'signed_int64_boundaries':0,
+                     'string_int64_boundaries':0}
+    cases = positive.get('cases',[])
     if (result.get('loaded_rows')!=32 or result.get('full_parity_verified') is not True
             or result.get('reference_parity') is not True
-            or value.get('source_semantics_audit',{}).get('result')!='PASS'):
+            or value.get('cursor_counts')!=counts or positive.get('result')!='PASS'
+            or positive.get('actual_loader') is not True or positive.get('proxy_used') is not False
+            or positive.get('input_int_conversion_preserved') is not True
+            or positive.get('source_writes')!=0 or len(cases)!=5
+            or {case.get('case') for case in cases}!=set(positive_rows)
+            or any(case.get('rows')!=positive_rows[case['case']]
+                   or not re.fullmatch(r'[0-9a-f]{64}',case.get('sha256','')) for case in cases)):
         raise RuntimeError('Correctness evidence incomplete')
+    reference = {case['sha256'] for case in cases if positive_rows[case['case']]==1}
+    range_audit = value.get('range_audit',{})
+    range_cases = range_audit.get('cases',[])
+    expected_ranges = {'overflow_above_int64':str(2**63),
+                       'overflow_below_int64':str(-(2**63)-1)}
+    if (range_audit.get('version')!='ordered-binding-range-check-v1'
+            or range_audit.get('result')!='PASS' or range_audit.get('actual_loader') is not True
+            or range_audit.get('proxy_used') is not False
+            or range_audit.get('loader_sha256')!=loader_sha
+            or range_audit.get('checker_sha256')!=bindings['actual_sources']['tools/ordered_binding_range_check.py']
+            or range_audit.get('connection_count')!=2
+            or range_audit.get('fresh_backend_connections') is not True
+            or range_audit.get('database_writes') is not False
+            or range_audit.get('read_only_enforced') is not True
+            or range_audit.get('window_minutes')!=60
+            or reference!={range_audit.get('reference_sha256')}
+            or len(range_cases)!=2 or {case.get('case') for case in range_cases}!=set(expected_ranges)):
+        raise RuntimeError('Actual-loader range evidence incomplete or unbound')
+    pids = []
+    for case in range_cases:
+        if (case.get('input_decimal')!=expected_ranges[case['case']]
+                or case.get('sqlstate')!='22003' or case.get('error_class')!='NumericValueOutOfRange'
+                or case.get('before_transaction_state')!='IDLE'
+                or case.get('error_transaction_state')!='INERROR'
+                or case.get('after_rollback_state')!='IDLE'
+                or case.get('final_transaction_state')!='IDLE'
+                or case.get('read_only_transactions_verified')!=3 or case.get('reference_rows')!=1
+                or case.get('full_result_equal') is not True or case.get('connection_closed') is not True
+                or case.get('reference_sha256')!=range_audit['reference_sha256']
+                or case.get('recovered_sha256')!=range_audit['reference_sha256']
+                or type(case.get('backend_pid')) is not int or case['backend_pid']<=0):
+            raise RuntimeError('Overflow transaction recovery evidence incomplete')
+        pids.append(case['backend_pid'])
+    if len(set(pids))!=2:
+        raise RuntimeError('Range cases did not use distinct backend connections')
     return sha_file(path)
 
 

@@ -120,7 +120,7 @@ def validate_run(root, bindings):
     if (life.get('correctness_receipt_sha256') != proof_sha
             or {case['case'] for case in correct['source_semantics_audit']['cases']} != expected_cases
             or len(correct['source_semantics_audit']['cases']) != 5
-            or correct.get('connection_count') != 1):
+            or correct.get('connection_count') != 3):
         raise ValueError('Correctness receipt gate failed')
     runtime = {key:pre['observed'][key] for key in native.FIELDS if key in pre['observed']}
     return {'synthetic_rows':32, 'positive_input_cases':5, 'memory_passes':0,
@@ -229,5 +229,5 @@ def main():
 
 
 if __name__ == '__main__':
-    from concurrent_entrypoint import main as concurrent_main
-    raise SystemExit(concurrent_main())
+    from readiness_entrypoint import main as readiness_main
+    raise SystemExit(readiness_main())

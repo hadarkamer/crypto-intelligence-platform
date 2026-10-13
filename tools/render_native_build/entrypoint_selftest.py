@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import entrypoint as build
+from verify_ordered_binding_correctness import MODULE, SOURCE_SHA256, VERSION as CORRECTNESS_VERSION
 
 
 SECRET = 'PRIVATE_FIXTURE_SENTINEL_DO_NOT_PUBLISH'
@@ -27,11 +28,15 @@ def write_json(path, value):
     return digest(path.read_bytes())
 
 
-def fixture(root):
+def fixture(root, source_arm='fixed'):
     contract = json.loads(build.CONTRACT.read_text())
+    loader_sha = SOURCE_SHA256[source_arm]
     bindings = dict(runner=build.native.sha_file(build.native.__file__),
                     contract=build.native.sha_file(build.CONTRACT),
-                    verifier='a' * 64, actual_sources={'fixture_source.py': 'b' * 64})
+                    verifier='a' * 64, actual_sources={'fixture_source.py':'b'*64,
+                        MODULE:loader_sha, 'tools/verify_ordered_binding_correctness.py':'a'*64,
+                        'tools/ordered_binding_range_check.py':'c'*64,
+                        'research_common_window_metrics_store_selftest.py':'d'*64})
     token, driver = 'fixture-owned-token', {'fixture_driver': 'binary'}
     observed = dict(contract['expected'], driver_binding=driver)
     pre = dict(result='READY', source_bindings=bindings, runner_sha256=bindings['runner'],
@@ -42,18 +47,41 @@ def fixture(root):
                 engine='native PostgreSQL', dbname='postgres', user='postgres', run_token=token)
     host_sha = write_json(root / 'host/connection.json', host)
     result = dict(loaded_rows=32, full_parity_verified=True, reference_parity=True)
-    manifest = dict(sources=bindings['actual_sources'], driver_binding=driver, run_token=token,
+    manifest = dict(version=CORRECTNESS_VERSION, source_arm=source_arm, loader_sha256=loader_sha,
+                    sources=bindings['actual_sources'], driver_binding=driver, run_token=token,
                     tool_sha256=bindings['verifier'], connection_receipt_sha256=host_sha,
                     expected=result)
     manifest_sha = write_json(root / 'correctness/fixture_manifest.json', manifest)
-    correct = dict(kind='binding_correctness', result='PASS', run_token=token,
+    case_rows = dict(zip(CASES, (0, 1, 1, 0, 0)))
+    reference_sha = 'e'*64
+    range_cases = [dict(case=name, input_decimal=str(number), backend_pid=pid,
+        before_transaction_state='IDLE', sqlstate='22003', error_class='NumericValueOutOfRange',
+        error_transaction_state='INERROR', after_rollback_state='IDLE', final_transaction_state='IDLE',
+        read_only_transactions_verified=3, reference_rows=1, reference_sha256=reference_sha,
+        recovered_sha256=reference_sha, full_result_equal=True, connection_closed=True)
+        for name, number, pid in [('overflow_above_int64',2**63,101),
+                                  ('overflow_below_int64',-(2**63)-1,102)]]
+    correct = dict(version=CORRECTNESS_VERSION, kind='binding_correctness', result='PASS', run_token=token,
+                   source_arm=source_arm, loader_sha256=loader_sha, cursor_policy='observed',
                    measured_passes=0, actual_loader=True, proxy_rewrites=0,
                    connection_closed=True, checkpoint_verified=True,
                    source_hashes=bindings['actual_sources'], driver_binding=driver,
                    tool_sha256=bindings['verifier'], connection_receipt_sha256=host_sha,
                    fixture_manifest_sha256=manifest_sha, full_scope_result=result,
-                   source_semantics_audit=dict(result='PASS', cases=[{'case': x} for x in CASES]),
-                   connection_count=1)
+                   source_semantics_audit=dict(result='PASS', actual_loader=True, proxy_used=False,
+                       input_int_conversion_preserved=True, source_writes=0,
+                       cases=[dict(case=x, rows=case_rows[x], sha256=reference_sha if case_rows[x] else digest(b'{}'))
+                              for x in CASES]),
+                   cursor_counts=dict(queries=4, fetchone=2, fetchall=2, array_targets=1,
+                       scalar_conversions=0, explicit_closes=0,
+                       observed_list_bindings=int(source_arm=='baseline'),
+                       observed_scalar_bindings=int(source_arm=='fixed')),
+                   range_audit=dict(version='ordered-binding-range-check-v1', result='PASS',
+                       actual_loader=True, proxy_used=False, connection_count=2,
+                       fresh_backend_connections=True, database_writes=False, read_only_enforced=True,
+                       window_minutes=60, reference_sha256=reference_sha, cases=range_cases,
+                       loader_sha256=loader_sha, checker_sha256='c'*64),
+                   connection_count=3)
     correct_sha = write_json(root / 'correctness/correctness_receipt.json', correct)
     clean = dict(group_gone=True, forced=False, leader_exit_code=0)
     life = dict(result='PASS', native_lifecycle_tested=True, sources_unchanged=True,
@@ -81,21 +109,24 @@ class NativeBuildReceiptTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_complete_bound_fixture_publishes_only_public_summary(self):
-        run = self.root / 'run'
-        bindings = fixture(run)
-        details = build.validate_run(run, bindings)  # Calls the real frozen verifier.
-        public = self.root / 'public'
-        expected = summary(details)
-        build.publish_summary(public, expected)
-        self.assertEqual({p.name for p in public.iterdir()}, {'summary.json', 'index.html'})
-        self.assertEqual(json.loads((public / 'summary.json').read_text()), expected)
-        self.assertEqual(set(expected), build.PUBLIC_KEYS)
-        for path in public.iterdir():
-            self.assertNotIn(SECRET, path.read_text())
-        self.assertEqual(details['memory_passes'], 0)
+        for arm in ('baseline', 'fixed'):
+            with self.subTest(arm=arm):
+                run = self.root / arm
+                bindings = fixture(run, arm)
+                details = build.validate_run(run, bindings)  # Calls the real verifier.
+                public = self.root / (arm+'-public')
+                expected = summary(details)
+                build.publish_summary(public, expected)
+                self.assertEqual({p.name for p in public.iterdir()}, {'summary.json', 'index.html'})
+                self.assertEqual(json.loads((public / 'summary.json').read_text()), expected)
+                self.assertEqual(set(expected), build.PUBLIC_KEYS)
+                for path in public.iterdir():
+                    self.assertNotIn(SECRET, path.read_text())
+                self.assertEqual(details['memory_passes'], 0)
 
     def test_missing_tampered_source_and_failed_cleanup_are_rejected(self):
-        for case in ('missing', 'host_bytes', 'source_binding', 'cleanup', 'exit_code'):
+        for case in ('missing', 'host_bytes', 'source_binding', 'cleanup', 'exit_code',
+                     'source_arm', 'range_missing', 'range_state', 'range_reference', 'range_connection'):
             with self.subTest(case=case):
                 run = self.root / case
                 bindings = fixture(run)
@@ -107,7 +138,7 @@ class NativeBuildReceiptTests(unittest.TestCase):
                 elif case == 'source_binding':
                     bindings = copy.deepcopy(bindings)
                     bindings['actual_sources']['fixture_source.py'] = 'd' * 64
-                else:
+                elif case in ('cleanup', 'exit_code'):
                     path = run / 'runner_cleanup.json'
                     value = json.loads(path.read_text())
                     if case == 'cleanup':
@@ -115,6 +146,24 @@ class NativeBuildReceiptTests(unittest.TestCase):
                     else:
                         value['exit_code'] = 1
                     write_json(path, value)
+                else:
+                    path = run / 'correctness/correctness_receipt.json'
+                    value = json.loads(path.read_text())
+                    if case == 'source_arm':
+                        value['source_arm'] = 'baseline'
+                    elif case == 'range_missing':
+                        value['range_audit']['cases'].pop()
+                    elif case == 'range_state':
+                        value['range_audit']['cases'][0]['error_transaction_state'] = 'IDLE'
+                    elif case == 'range_reference':
+                        value['range_audit']['cases'][0]['recovered_sha256'] = 'f'*64
+                    else:
+                        value['range_audit']['cases'][0]['connection_closed'] = False
+                    proof_sha = write_json(path, value)
+                    life_path = run / 'native_lifecycle.json'
+                    life = json.loads(life_path.read_text())
+                    life['correctness_receipt_sha256'] = proof_sha
+                    write_json(life_path, life)
                 with self.assertRaises((ValueError, RuntimeError, OSError)):
                     build.validate_run(run, bindings)
 
