@@ -25,14 +25,22 @@ The parallel service `srv-dakptbh594qs7395460g` uses `paper-trading-v1`, with au
 | Native positive correctness | PASS: 32-row full-scope parity and five actual-loader cases, including empty input, duplicates/missing IDs, existing integer normalization and signed/string int64 boundaries. |
 | Native sequential measurement | PASS integrity: four fresh ABBA runs, 12 passes each; approximately 4.57% lower warm endpoint RSS in this synthetic workload. |
 | Native concurrent measurement | PASS integrity: four fresh ABBA runs, 48 rounds / 96 tasks; approximately 12.02% lower warm both-loaded RSS. Positive endpoint growth remains. |
-| Native overflow / recovery | **PENDING.** Both baseline and fixed arms must produce accepted receipts for values above and below int64, expected SQLSTATE `22003`, read-only execution, rollback recovery, unchanged reference results and closed fresh connections. A prepared checker is not completion evidence. |
+| Native overflow / recovery | **PASS.** Both actual baseline/fixed arms completed 32-row full-result parity, five positive cases and both int64 overflows. SQLSTATE `22003`, read-only transactions, rollback to IDLE, full reference-result equality and closure of all three connections per arm were verified. Exact native receipts and an offline source/receipt validation passed. |
 | Application PR CI | **PENDING.** Require successful checks on the exact integration PR head/merge tree, not the experimental branch or earlier native build. |
 
 The native experiments establish bounded synthetic correctness and memory behavior. They do not establish production equivalence or resolution of OOM. The loaded production psycopg implementation/libpq version and long-duration memory behavior remain unknown. Within-process repetitions are correlated; sampled RSS and cumulative process high-water are separate measurements.
 
+**Accepted native run (October 13)**
+
+Tested commit `9d6a76663556a154839f247014e7304c6b0c7d5e`, tree `ed4fb330f0d1e9f4fdb588e15b2c33eee5ec7259`; isolated deployment `dep-db7409hsrm7s73buje5g` completed at `2026-10-13T14:31:56.908178Z`. The 14 exact receipts total 116,432 bytes and bind 28 measured source files; all 438 staged source files were checked against the tested tree. Both arms used CPython 3.11.9, glibc 2.36, native PostgreSQL 18.6 and psycopg 3.2.3 binary/libpq 170000. No memory passes or production deployment ran in this step.
+
+The first attempt failed while formatting a transaction-state label: the binary driver's low-level property returned an integer. Converting that observed value through `TransactionStatus` fixed only receipt serialization. The complete native comparison was rerun and accepted; the failed attempt is retained in the evidence. The application hashes above did not change.
+
+The report `crypto_native_release_readiness_2026-10-13_HE.html` and its evidence archive retain the public summary, original native receipts, source identities, offline validation, failed-attempt diagnostics and read-only deployment snapshots. Application PR CI remains pending. The documentation completion commit is separate from the tested code commit above.
+
 **Release sequence**
 
-1. Finish and independently verify the pending baseline/fixed overflow receipts. Bind their application, driver and runtime identities to the reviewed sources; retain the original receipts. Do not mark this gate complete from a build status alone.
+1. Retain the accepted baseline/fixed native evidence below. At integration, verify that the exact application and focused-selftest hashes still match the recorded pins; otherwise review the changes and rerun the affected checks.
 2. Fetch current `main`. If it still matches the recorded base, create an isolated application branch from it and apply only the two executable-line binding change, its comments and the new focused selftest. Verify the two SHA256 values above and a diff containing exactly those two files.
 3. If `main` has advanced, apply the small change to current main without replacing the whole application file from the old experiment. Review intervening edits, record the resulting new source hash and rerun the affected checks. Do not assume the original fixed-file hash still applies.
 4. Run `python research_common_window_metrics_store_selftest.py` and the existing `research_common_window_metrics_selftest.py`, `research_formula_ordered_store_selftest.py` and `research_formula_ordered_worker_selftest.py`. The focused suite must report 11 tests with no failures or skips. Local fake-connection tests do not substitute for native PostgreSQL receipts.
