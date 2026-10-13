@@ -45,7 +45,6 @@ TABLES = ['research_events', 'research_ordered_formula_candidates',
           'research_event_scan_cursors']
 LIMITATIONS = [
     'Synthetic engineering fixtures; no production data or cardinality equivalence.',
-    'PostgreSQL is supplied by a disposable PGlite WASM socket, not a native production server.',
     'Real psycopg/libpq SQL and JSONB decoding; one persistent executor thread, new connection per pass.',
     'Rollback replays a fixed checkpoint; server caches/MVCC and operating-system caches may warm.',
     'No concurrent services, collector, Chromium, inverse provider or publication.',
@@ -55,6 +54,12 @@ LIMITATIONS = [
     'Allocator counters are neither exclusive RSS partitions nor reclaimable-byte estimates.',
     'Local Python/glibc may differ from deployed Python 3.11/glibc 2.36.',
 ]
+
+
+def engine_limitations(receipt):
+    if receipt.get('engine') == 'native PostgreSQL':
+        return ['Owned disposable native PostgreSQL; declared runtime contract only, not a production workload replica.']
+    return ['PostgreSQL is supplied by a disposable PGlite WASM socket, not a native production server.']
 
 
 def canonical(value):
@@ -274,7 +279,14 @@ def prepare(args):
                 'fixture':fixture, 'expected':expected, 'expected_measured':expected_measured,
                 'baseline':baseline, 'expected_written':expected_written, 'server':server,
                 'connection_receipt_sha256':sha_file(args.connection_receipt),
-                'sources':source_hashes()}
+                'sources':source_hashes(), 'preparation_pid':os.getpid(),
+                'engine':receipt.get('engine', 'PGlite WASM socket')}
+    if args.mode == 'scope':
+        import research_common_window_metrics_store as common_source
+        actual_path = Path(common_source.__file__).resolve()
+        if actual_path != REPO/'research_common_window_metrics_store.py':
+            raise AssertionError('Application loader imported outside the selected source root')
+        manifest['loaded_metrics_module'] = {'path':str(actual_path), 'sha256':sha_file(actual_path)}
     write_json(Path(args.output)/'fixture_manifest.json', manifest)
 
 
@@ -284,7 +296,8 @@ def run_operation(conn, mode, fixture, catalog, phase=None, *, full_parity=True,
     if mode == 'scope':
         import ordered_postgres_scope_fixture as scope_fixture
         from ordered_cursor_lifetime_probe import CursorPolicyConnection, query_contract
-        guarded = CursorPolicyConnection(conn, cursor_policy, cursor_contract or query_contract())
+        guarded = CursorPolicyConnection(conn, cursor_policy, cursor_contract or query_contract(),
+                                         validate_binding=full_parity)
         result = scope_fixture.run_pass(guarded, fixture, phase=phase, full_parity=full_parity)
         counts = guarded.finish()
         if cursor_counts is not None:
@@ -327,7 +340,7 @@ def source_hashes():
         'research_ordered_question_store.py', 'research_event_scan.py',
         'research_past_price_features_store.py', 'research_past_price_features.py',
         'research_ordered_first_touch.py', 'research_common_window_metrics.py',
-        'research_common_window_metrics_store.py',
+        'research_common_window_metrics_store.py', 'research_formula_sequence_history_selftest.py',
         'migrations/020_ordered_first_touch_v7.sql', 'migrations/021_btc_parent_movements_v1.sql',
         'migrations/029_common_window_metrics.sql'] + ['migrations/'+name for name in MIGRATIONS]
     optional = REPO/'tools/ordered_postgres_scope_fixture.py'
@@ -344,6 +357,12 @@ def measured(args):
     manifest = json.loads((output/'fixture_manifest.json').read_text())
     if manifest['sources'] != source_hashes():
         raise AssertionError('Source changed between preparation and measurement')
+    if args.mode == 'scope':
+        import research_common_window_metrics_store as common_source
+        actual_path = Path(common_source.__file__).resolve()
+        if (actual_path != REPO/'research_common_window_metrics_store.py'
+                or manifest['loaded_metrics_module'] != {'path':str(actual_path), 'sha256':sha_file(actual_path)}):
+            raise AssertionError('Measured application loader differs from preparation')
     if manifest['connection_receipt_sha256'] != sha_file(args.connection_receipt):
         raise AssertionError('Connection receipt changed')
     if manifest['scope_parity'] != args.scope_parity:
@@ -444,7 +463,7 @@ def measured(args):
             scope_audit = run_operation(conn, args.mode, manifest['fixture'], catalog,
                 full_parity=True, cursor_policy=args.cursor_policy, cursor_contract=cursor_contract)
             conn.rollback()
-        if args.cursor_policy == 'source':
+        if args.cursor_policy in ('source', 'observed'):
             from ordered_cursor_lifetime_probe import source_semantics_audit
             source_audit = source_semantics_audit(lambda:connect(receipt, manifest['schema']),
                                                 manifest['fixture']['scope']['window_minutes'])
@@ -474,15 +493,20 @@ def measured(args):
         'postmeasurement_feature_audit':feature_audit,
         'postmeasurement_full_scope_audit':scope_audit,
         'postmeasurement_source_semantics_audit':source_audit,
+        'preparation_pid':manifest['preparation_pid'], 'measurement_pid':os.getpid(),
+        'loaded_metrics_module':manifest.get('loaded_metrics_module'),
+        'engine':receipt.get('engine', 'PGlite WASM socket'),
         'server':manifest['server'],
         'python':sys.version,'libc':platform.libc_ver(), 'psycopg':psycopg.__version__,
-        'libpq':psycopg.pq.version(),'gc_thresholds':gc.get_threshold(),
+        'libpq':psycopg.pq.version(),'gc_thresholds':gc.get_threshold(), 'gc_enabled':gc.isenabled(),
+        'forced_gc_calls':0, 'allocator_trim_calls':0,
         'probe_observer_ns':observer.total_ns,'observer_scope':
           'Synchronous samples only; fingerprint phase and post-pass scalar digest add separate work.',
-        'limitations':LIMITATIONS+([
+        'limitations':LIMITATIONS+engine_limitations(receipt)+([
             'All scope arms use the same four-query cursor proxy; policy '+args.cursor_policy
             +' changes only explicit cursor close or the bound common-window ID-array representation; '
             'source policy validates the application binding without conversion or replacement. '
+            'observed policy records binding type only during measured passes; full representation checks run in prep/post audits. '
             'Preparation-only weakref probe is separate from measured passes; it does not assign native bytes to a driver object.',
             'Scope parity mode '+args.scope_parity+': full diagnostic row/window/summary hashes '
             +('run during every measured pass.' if args.scope_parity == 'full' else
@@ -575,7 +599,7 @@ def main():
     parser.add_argument('--rows', type=int, choices=[32,256,2000,6001], default=256)
     parser.add_argument('--passes', type=int, default=12)
     parser.add_argument('--scope-parity', choices=['full','postonly'], default='full')
-    parser.add_argument('--cursor-policy', choices=['baseline','close','scalar-array','source'])
+    parser.add_argument('--cursor-policy', choices=['baseline','close','scalar-array','source','observed'])
     parser.add_argument('--stage', choices=['prepare','measure','negative'])
     parser.add_argument('--negative-boundary', choices=['above','below'])
     args = parser.parse_args()
@@ -588,6 +612,8 @@ def main():
         parser.error('Cursor treatment policies require scope mode with postonly parity')
     if args.cursor_policy == 'source' and args.mode != 'scope':
         parser.error('Source cursor policy requires scope mode')
+    if args.cursor_policy == 'observed' and (args.mode != 'scope' or args.scope_parity != 'postonly'):
+        parser.error('Observed cursor policy requires scope mode with postonly parity')
     if args.negative_boundary and (args.mode != 'scope' or args.cursor_policy != 'source'
                                   or args.rows != 32 or args.stage in ('prepare','measure')):
         parser.error('Negative boundary requires source scope with 32 rows and negative stage')

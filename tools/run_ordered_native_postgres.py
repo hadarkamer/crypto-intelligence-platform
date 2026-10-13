@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Preflight a supplied native runtime, then own one correctness-only cluster.
+"""Preflight a supplied native runtime, then own one isolated native cluster.
 
-No installation, external DSN, existing PGDATA, production connection or memory
-benchmark. Native lifecycle remains untested until supplied binaries pass gates.
+Default: correctness only. Explicit memory arms run fixed synthetic scope work.
+No installation, external DSN, existing PGDATA or production connection.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import time
+import zipfile
 from uuid import uuid4
 
 VERSION = 'ordered-native-postgres-runner-v1'
@@ -303,6 +304,90 @@ def verify_correctness(output, token, host_receipt, bindings, driver):
     return sha_file(path)
 
 
+def verify_memory(output, arm, host_receipt, bindings, driver, processes):
+    """Require complete sealed native evidence before accepting this one arm."""
+    folder = output/'memory'
+    sealed = json.loads((folder/'sealed.json').read_text())
+    archive_path = folder/'evidence.zip'
+    if (sealed.get('result') != 'PASS' or sealed.get('readback_verified') is not True
+            or sealed.get('file') != 'evidence.zip' or archive_path.stat().st_size > 2097152
+            or sealed.get('bytes') != archive_path.stat().st_size
+            or sealed.get('sha256') != sha_file(archive_path)):
+        raise RuntimeError('Memory archive is incomplete or changed')
+    names = ['fixture_manifest.json', 'samples.jsonl', 'receipt.json', 'bundle_manifest.json']
+    with zipfile.ZipFile(archive_path) as archive:
+        if (archive.namelist() != names or sum(item.file_size for item in archive.infolist()) > 4194304
+                or archive.testzip() is not None):
+            raise RuntimeError('Memory archive inventory is invalid')
+        raw = {name:archive.read(name) for name in names}
+    if any(raw[name] != (folder/name).read_bytes() for name in names):
+        raise RuntimeError('Memory archive differs from completed files')
+    inventory = json.loads(raw['bundle_manifest.json'])
+    if set(inventory) != set(names[:-1]): raise RuntimeError('Memory manifest inventory differs')
+    for name in names[:-1]:
+        if inventory[name] != {'sha256':hashlib.sha256(raw[name]).hexdigest(), 'bytes':len(raw[name])}:
+            raise RuntimeError('Memory artifact checksum mismatch')
+    manifest, receipt = json.loads(raw['fixture_manifest.json']), json.loads(raw['receipt.json'])
+    samples = [json.loads(line) for line in raw['samples.jsonl'].splitlines()]
+    endpoints = [row for row in samples if row.get('event') == 'pass_end']
+    expected_ids = list(range(1,13))
+    expected_counts = {'queries':4, 'fetchone':2, 'fetchall':2, 'array_targets':1,
+        'scalar_conversions':0, 'explicit_closes':0,
+        'observed_list_bindings':int(arm == 'baseline'), 'observed_scalar_bindings':int(arm == 'fixed')}
+    expected_module = Path(__file__).resolve().parents[1]/'research_common_window_metrics_store.py'
+    module = {'path':str(expected_module), 'sha256':bindings['actual_sources']['research_common_window_metrics_store.py']}
+    if (receipt.get('result') != 'PASS' or receipt.get('mode') != 'scope'
+            or receipt.get('rows') != 2000 or receipt.get('passes') != 12
+            or receipt.get('scope_parity') != 'postonly' or receipt.get('cursor_policy') != 'observed'
+            or receipt.get('engine') != 'native PostgreSQL' or manifest.get('engine') != 'native PostgreSQL'
+            or manifest.get('rows') != 2000 or manifest.get('passes') != 12
+            or manifest.get('mode') != 'scope' or manifest.get('scope_parity') != 'postonly'
+            or manifest.get('cursor_policy') != 'observed'
+            or receipt.get('source_hashes') != bindings['actual_sources']
+            or manifest.get('sources') != bindings['actual_sources']
+            or receipt.get('driver_binding') != driver or manifest.get('driver_binding') != driver
+            or receipt.get('loaded_metrics_module') != module or manifest.get('loaded_metrics_module') != module
+            or manifest.get('connection_receipt_sha256') != sha_file(host_receipt)
+            or receipt.get('fixture_manifest_sha256') != hashlib.sha256(raw['fixture_manifest.json']).hexdigest()
+            or sealed.get('receipt_sha256') != hashlib.sha256(raw['receipt.json']).hexdigest()
+            or receipt.get('checkpoint_unchanged') is not True
+            or receipt.get('postmeasurement_content_parity') is not True
+            or receipt.get('postmeasurement_full_scope_audit') != manifest.get('expected')
+            or receipt.get('gc_enabled') is not True or receipt.get('forced_gc_calls') != 0
+            or receipt.get('allocator_trim_calls') != 0
+            or receipt.get('preparation_pid') != processes[0]['pid']
+            or manifest.get('preparation_pid') != processes[0]['pid']
+            or receipt.get('measurement_pid') != processes[1]['pid']
+            or processes[0]['pid'] == processes[1]['pid']):
+        raise RuntimeError('Native memory receipt/source/process binding mismatch')
+    sample_meta = receipt.get('samples', {})
+    if (sample_meta != {'file':'samples.jsonl', 'bytes':len(raw['samples.jsonl']),
+            'sha256':hashlib.sha256(raw['samples.jsonl']).hexdigest(), 'records':len(samples),
+            'pass_ids':expected_ids} or [row.get('pass_index') for row in endpoints] != expected_ids
+            or not samples or len({row.get('thread_id') for row in samples}) != 1
+            or any(row.get('pid') != processes[1]['pid'] or row.get('gc_enabled') is not True for row in samples)):
+        raise RuntimeError('Native memory sample journal is incomplete')
+    expected_result = manifest['expected_measured']
+    result_sha = hashlib.sha256(json.dumps(expected_result, sort_keys=True, separators=(',', ':'),
+                                         ensure_ascii=False, default=str, allow_nan=False).encode()).hexdigest()
+    if any(row.get('result') != expected_result or row.get('result_sha256') != result_sha
+           or row.get('cursor_counts') != expected_counts or row.get('cursor_policy') != 'observed'
+           or row.get('commits_in_workload') != 0 or row.get('rollbacks') != 1 for row in endpoints):
+        raise RuntimeError('Native memory pass contract changed')
+    expected_cases = {'empty_no_query','duplicate_and_missing','existing_int_normalization',
+                      'signed_int64_boundaries','string_int64_boundaries'}
+    audit = receipt.get('postmeasurement_source_semantics_audit', {})
+    if (audit.get('result') != 'PASS' or audit.get('actual_loader') is not True
+            or audit.get('proxy_used') is not False or len(audit.get('cases', [])) != 5
+            or {case['case'] for case in audit['cases']} != expected_cases
+            or manifest['expected'].get('loaded_rows') != 2000
+            or manifest['expected'].get('reference_parity') is not True
+            or manifest['expected'].get('full_parity_verified') is not True):
+        raise RuntimeError('Native memory full correctness audit is incomplete')
+    return {'memory_receipt_sha256':sha_file(folder/'receipt.json'),
+            'memory_sealed_sha256':sha_file(folder/'sealed.json'), 'measured_passes':12}
+
+
 def remember_descendants(pid, tracked):
     """Only descendants of the owned postmaster; bounded by this cluster's cap."""
     pending, visited = [pid], set()
@@ -370,10 +455,13 @@ def run_native(args, output, readiness):
     token = str(uuid4())
     server = client = initial = None
     tracked = {}
-    lifecycle = {'version':VERSION,'kind':'native_correctness','result':'FAIL',
+    arm = getattr(args, 'memory_arm', None)
+    lifecycle = {'version':VERSION,'kind':'native_scope_memory' if arm else 'native_correctness','result':'FAIL',
                  'run_token':token,'native_lifecycle_attempted':False,
                  'native_lifecycle_tested':False,'cleanup':[],
                  'preflight_sha256':sha_file(output/'preflight.json'),'measured_passes':0}
+    if arm:
+        lifecycle.update(memory_arm=arm, memory_processes=[])
     try:
         bindings = readiness['source_bindings']
         if source_bindings(args) != bindings: raise RuntimeError('Preflight sources changed')
@@ -421,26 +509,51 @@ def run_native(args, output, readiness):
             if server.poll() is not None: raise RuntimeError('Postmaster exited before verifier')
             verify_postmaster(data/'postmaster.pid',server.pid,data,port,**identity)
             if source_bindings(args) != bindings: raise RuntimeError('Sources changed before fixture write')
-            with (output/'correctness.stdout.log').open('xb') as out, (output/'correctness.stderr.log').open('xb') as err:
+            launcher = ('import runpy,sys; from pathlib import Path; '
+                        'sys.dont_write_bytecode=True; p=sys.argv.pop(1); '
+                        'sys.path.insert(0,str(Path(p).parent)); sys.argv[0]=p; '
+                        'runpy.run_path(p,run_name="__main__")')
+            if arm:
+                (output/'memory').mkdir(mode=0o700)
+                stages = [('prepare',240), ('measure',900)]
+                tool = Path(__file__).with_name('ordered_postgres_memory_replay.py')
+            else:
+                stages = [('correctness',180)]
                 tool = Path(__file__).with_name('verify_ordered_binding_correctness.py')
-                launcher = ('import runpy,sys; from pathlib import Path; '
-                            'sys.dont_write_bytecode=True; p=sys.argv.pop(1); '
-                            'sys.path.insert(0,str(Path(p).parent)); sys.argv[0]=p; '
-                            'runpy.run_path(p,run_name="__main__")')
-                client = spawn_owned([args.python,'-I','-c',launcher,str(tool),
+            for stage,seconds in stages:
+                verify_postmaster(data/'postmaster.pid',server.pid,data,port,**identity)
+                if source_bindings(args) != bindings: raise RuntimeError('Sources changed before client stage')
+                command = [args.python,'-I','-c',launcher,str(tool),
                     '--connection-receipt',str(host/'connection.json'),
-                    '--output',str(output/'correctness')],stdout=out,stderr=err)
-                deadline = time.monotonic()+180
-                while client.poll() is None:
-                    if server.poll() is not None: raise RuntimeError('Postmaster exited during verifier')
-                    remember_descendants(server.pid,tracked)
-                    if time.monotonic()>=deadline: raise TimeoutError('Correctness verifier timeout')
-                    time.sleep(0.05)
-                if client.returncode: raise RuntimeError('Correctness verifier failed')
-            receipt_sha = verify_correctness(output,token,host/'connection.json',bindings,
-                                             readiness['observed']['driver_binding'])
+                    '--output',str(output/('memory' if arm else 'correctness'))]
+                if arm:
+                    command.extend(['--mode','scope','--rows','2000','--passes','12',
+                        '--scope-parity','postonly','--cursor-policy','observed','--stage',stage])
+                logname = 'memory_'+stage if arm else 'correctness'
+                with (output/(logname+'.stdout.log')).open('xb') as out, (output/(logname+'.stderr.log')).open('xb') as err:
+                    client = spawn_owned(command,stdout=out,stderr=err)
+                    if arm: lifecycle['memory_processes'].append({'stage':stage,'pid':client.pid})
+                    deadline = time.monotonic()+seconds
+                    while client.poll() is None:
+                        if server.poll() is not None: raise RuntimeError('Postmaster exited during client stage')
+                        remember_descendants(server.pid,tracked)
+                        if time.monotonic()>=deadline: raise TimeoutError('Native client stage timeout')
+                        time.sleep(0.05)
+                    if client.returncode: raise RuntimeError('Native client stage failed: '+stage)
+                item = stop_owned(client)
+                lifecycle['cleanup'].append(item)
+                if not item['group_gone'] or item['signals']:
+                    raise RuntimeError('Client stage descendants survived')
+            if arm:
+                proof = verify_memory(output,arm,host/'connection.json',bindings,
+                    readiness['observed']['driver_binding'],lifecycle['memory_processes'])
+                lifecycle.update(proof)
+            else:
+                receipt_sha = verify_correctness(output,token,host/'connection.json',bindings,
+                                                 readiness['observed']['driver_binding'])
+                lifecycle['correctness_receipt_sha256'] = receipt_sha
             if server.poll() is not None: raise RuntimeError('Postmaster exited before controlled shutdown')
-            lifecycle.update(result='PASS',correctness_receipt_sha256=receipt_sha)
+            lifecycle['result'] = 'PASS'
     except (Exception,RunnerInterrupted) as error:
         lifecycle.update(result='FAIL',error_type=type(error).__name__,error=str(error)[:300])
     finally:
@@ -485,6 +598,8 @@ def main(argv=None):
     parser.add_argument('--contract',required=True)
     parser.add_argument('--output',required=True)
     parser.add_argument('--preflight-only',action='store_true')
+    parser.add_argument('--memory-arm',choices=['baseline','fixed'],
+                        help='Explicit isolated 2000-row/12-pass actual-source memory arm')
     args = parser.parse_args(argv)
     output = new_output(args.output)
     args.output = str(output)

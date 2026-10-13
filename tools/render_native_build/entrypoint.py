@@ -68,8 +68,10 @@ def preserve_receipts(root):
           'files':manifest}, sort_keys=True), flush=True)
 
 
-def preserve_failure_logs(root):
-    for name in ('host/initdb.log', 'host/postgres.log', 'correctness.stdout.log', 'correctness.stderr.log'):
+def preserve_failure_logs(root, prefix=''):
+    for name in ('host/initdb.log', 'host/postgres.log', 'correctness.stdout.log', 'correctness.stderr.log',
+                 'memory_prepare.stdout.log', 'memory_prepare.stderr.log',
+                 'memory_measure.stdout.log', 'memory_measure.stderr.log'):
         path = root/name
         if not path.is_file() or any(part.is_symlink() for part in (path, *path.parents)):
             continue
@@ -80,7 +82,7 @@ def preserve_failure_logs(root):
         encoded = base64.b64encode(tail).decode('ascii')
         chunks = [encoded[i:i+2048] for i in range(0, len(encoded), 2048)] or ['']
         for index, chunk in enumerate(chunks):
-            print('[NATIVE_BUILD_DIAGNOSTIC] '+json.dumps({'path':name, 'original_bytes':size,
+            print('[NATIVE_BUILD_DIAGNOSTIC] '+json.dumps({'path':prefix+name, 'original_bytes':size,
                 'tail_bytes':len(tail), 'truncated':size>len(tail), 'tail_sha256':hashlib.sha256(tail).hexdigest(),
                 'index':index, 'chunks':len(chunks), 'data':chunk}, sort_keys=True), flush=True)
 
@@ -152,16 +154,22 @@ def publish_summary(directory, summary):
 
 
 def run_step(command, timeout):
-    proc = native.spawn_owned(command)
+    existing = set(native.OWNED_PROCESSES)
     try:
+        proc = native.spawn_owned(command)
         if proc.wait(timeout=timeout):
             raise RuntimeError('Build step failed')
     finally:
         previous = {sig:signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
-            cleanup = native.stop_owned(proc, timeout=75)
-            if not cleanup['group_gone'] or cleanup['forced']:
-                raise RuntimeError('Build step cleanup failed')
+            # spawn_owned registers before delivering a deferred signal. That
+            # interruption must clean the child before a caller removes PGDATA.
+            failed = False
+            for pid, child in list(native.OWNED_PROCESSES.items()):
+                if pid in existing: continue
+                cleanup = native.stop_owned(child, timeout=75)
+                failed |= not cleanup['group_gone'] or cleanup['forced']
+            if failed: raise RuntimeError('Build step cleanup failed')
         finally:
             for sig, handler in previous.items(): signal.signal(sig, handler)
 
@@ -219,4 +227,5 @@ def main():
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    from memory_entrypoint import main as memory_main
+    raise SystemExit(memory_main())

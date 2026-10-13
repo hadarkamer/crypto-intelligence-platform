@@ -11,7 +11,7 @@ import sys
 import textwrap
 import weakref
 
-POLICIES = ('baseline', 'close', 'scalar-array', 'source')
+POLICIES = ('baseline', 'close', 'scalar-array', 'source', 'observed')
 VERSION = 'ordered-cursor-lifetime-probe-v1'
 
 
@@ -60,14 +60,17 @@ def validate_source_array(value):
 
 class CursorPolicyConnection:
     """Four exact queries, counters only; no cursor, SQL-parameter or row history."""
-    def __init__(self, connection, policy, contract):
+    def __init__(self, connection, policy, contract, *, validate_binding=False):
         if policy not in POLICIES:
             raise ValueError('Unknown cursor policy')
         self.connection, self.policy, self.contract = connection, policy, contract
+        self.validate_binding = validate_binding
         self.counts = {'queries':0, 'fetchone':0, 'fetchall':0, 'array_targets':0,
                        'scalar_conversions':0, 'explicit_closes':0}
         if policy == 'source':
             self.counts['source_scalar_bindings'] = 0
+        if policy == 'observed':
+            self.counts.update(observed_list_bindings=0, observed_scalar_bindings=0)
         self.pending = False
 
     def execute(self, query, params=None, **kwargs):
@@ -78,7 +81,20 @@ class CursorPolicyConnection:
             self.counts['array_targets'] += 1
             if type(params) is not tuple or len(params) != 3:
                 raise AssertionError('Unexpected common-window parameter shape')
-            if self.policy == 'source':
+            if self.policy == 'observed':
+                # Identical, constant-cost observer in both actual-source arms.
+                # Full representation checks belong only to prep/post audits.
+                if type(params[0]) is list:
+                    self.counts['observed_list_bindings'] += 1
+                    if self.validate_binding:
+                        validate_source_array(scalar_array(params[0]))
+                elif type(params[0]) is str:
+                    self.counts['observed_scalar_bindings'] += 1
+                    if self.validate_binding:
+                        validate_source_array(params[0])
+                else:
+                    raise AssertionError('Expected an actual list or scalar source binding')
+            elif self.policy == 'source':
                 validate_source_array(params[0])
                 self.counts['source_scalar_bindings'] += 1
             elif type(params[0]) is not list:
@@ -97,6 +113,12 @@ class CursorPolicyConnection:
                     'explicit_closes':4 if self.policy == 'close' else 0}
         if self.policy == 'source':
             expected['source_scalar_bindings'] = 1
+        if self.policy == 'observed':
+            observed = {key:self.counts[key] for key in
+                        ('observed_list_bindings', 'observed_scalar_bindings')}
+            if sum(observed.values()) != 1:
+                raise AssertionError('Expected exactly one observed source binding')
+            expected.update(observed)
         if self.pending or self.counts != expected:
             raise AssertionError('Scope cursor workload differs from fixed contract')
         return dict(self.counts)
