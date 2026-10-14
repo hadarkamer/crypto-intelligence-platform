@@ -68,13 +68,13 @@ def summarize_fills(fills, expected_ids, quantity):
 
 
 def review_saved_trade(env, *, journal=None, http=None, history=None):
-    report = dict(status='DISABLED', environment='testnet', order_requests_sent=0,
+    report = dict(status='DISABLED', environment='mainnet', order_requests_sent=0,
         signing_tested=False, app_delivery_sent=False, stored_trade_changed=False,
         new_trade_cards_created=0, continuous_trade_result_sync=False)
     if env.get('HL_TESTNET_CONNECTION_REVIEW') != 'two_account_no_orders_v1':
         return report
     if (env.get('RENDER_SERVICE_ID') != SERVICE
-            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only', 'cancel_monitor_testnet_v1')):
+            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only', 'cancel_monitor_mainnet_v1')):
         return {**report, 'status': 'REVIEW_MODE_NOT_ALLOWED'}
     try:
         import hyperliquid_testnet_executor as sender
@@ -82,8 +82,8 @@ def review_saved_trade(env, *, journal=None, http=None, history=None):
         journal = PostgresJournal.from_env(env) if journal is None else journal
         with journal._transaction() as conn:
             rows = conn.execute('''SELECT p.manifest,a.action,a.result
-                FROM hl_testnet_execution_v1.prepared p
-                JOIN hl_testnet_execution_v1.attempts a ON a.plan_key=p.plan_key
+                FROM hl_mainnet_execution_v1.prepared p
+                JOIN hl_mainnet_execution_v1.attempts a ON a.plan_key=p.plan_key
                 WHERE p.account=%s AND p.source_id=%s''', (account, SOURCE_ID)).fetchall()
         if len(rows) != 1:
             raise checks.Blocked('EXACT_HISTORICAL_TRADE_NOT_FOUND')

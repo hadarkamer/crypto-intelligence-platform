@@ -24,7 +24,7 @@ def load_trades(env=None):
     reader.store = store
     reader.venue = Reader()
     current = []
-    if env.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_testnet_v1':
+    if env.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_mainnet_v1':
         from .experimental_live_state import TestnetExecutionState
         current = _execution_trades(TestnetExecutionState(journal))
     result = {}

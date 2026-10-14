@@ -283,7 +283,7 @@ def _validate(message):
     value = deepcopy(message)
     _require(value['version'] == VERSION and value['kind'] in RANK and value['family'] in
              ('r2732', 'maxpain', 'hype_row71205', 'sol_g65'), 'CONTRACT_VERSION')
-    _require(value['source_environment'] == 'mainnet' and value['execution_environment'] == 'testnet'
+    _require(value['source_environment'] == 'mainnet' and value['execution_environment'] == 'mainnet'
              and value['source_price_kind'] == 'TRADE_1M', 'VENUE_CONTRACT')
     _require(value['side'] in ('LONG', 'SHORT'), 'FINAL_DIRECTION_REQUIRED')
     times = {key: moment_ms(value[key]) for key in

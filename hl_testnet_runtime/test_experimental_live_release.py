@@ -56,7 +56,9 @@ class ReleaseTests(unittest.TestCase):
         for key, value in (('HL_TESTNET_LONG_ENTRY_ENABLED', 'true'),
                            ('HL_TESTNET_SHORT_ENTRY_ENABLED', 'true'),
                            ('HL_TESTNET_EXPERIMENTAL_PROTECTION_ENABLED', 'false'),
-                           ('HL_TESTNET_RUNTIME_MODE', 'long_stream_testnet_v1'),
+                           ('HL_TESTNET_RUNTIME_MODE', 'long_stream_mainnet_v1'),
+                           ('HL_TESTNET_RUNTIME_MODE', 'experimental_testnet_v1'),
+                           ('HL_TESTNET_EXPERIMENTAL_DISPATCH', 'approved_testnet_v1'),
                            ('HL_TESTNET_SHORT_ACCOUNT_ADDRESS', '0x' + '1' * 40)):
             with self.subTest(key=key):
                 env = environment(); env[key] = value

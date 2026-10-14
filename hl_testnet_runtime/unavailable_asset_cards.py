@@ -8,7 +8,7 @@ from copy import deepcopy
 import alert_cards_wire as wire
 from .risk_policy import card_profile
 
-VERSION = 'testnet-unavailable-source-card-v1'
+VERSION = 'mainnet-unavailable-source-card-v1'
 STATE = 'RECORDED_ASSET_UNAVAILABLE'
 REASON = 'ASSET_UNAVAILABLE'
 
@@ -18,8 +18,8 @@ def prepare(value, *, _historical_risk_usd=None):
     from .trade_cards import checksum, ROLES
     spec = wire.normalize(value)
     source = spec['signal']
-    card = dict(version=VERSION, environment='testnet',
-        card_id=checksum(['testnet', spec['source_stream'], source['event_id']]),
+    card = dict(version=VERSION, environment='mainnet',
+        card_id=checksum(['mainnet', spec['source_stream'], source['event_id']]),
         source_stream=spec['source_stream'], event_id=source['event_id'],
         record_kind='received_alert',
         rule=dict(id=spec['rule_id'], threshold_pct=spec['threshold_pct']),

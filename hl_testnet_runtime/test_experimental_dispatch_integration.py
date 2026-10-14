@@ -17,8 +17,8 @@ from experimental_execution_fixtures import r2732_message
 def legacy_view(trade,snapshot):
     binding=dict(card_id=trade['cid'],card_digest=life.digest(trade['source']),account=trade['account'],role=trade['role'],
         symbol=trade['symbol'],side=trade['side'],planned_quantity=trade['quantity'],prices=deepcopy(trade['prices']),
-        orders={k:[oid for oid,leg in trade['order_legs'].items() if leg==k] for k in ('ENTRY','STOP','TAKE_PROFIT')},environment='testnet')
-    view=dict(environment='testnet',account=trade['account'],symbol=trade['symbol'],at_ms=snapshot['at_ms'],history_complete=True,
+        orders={k:[oid for oid,leg in trade['order_legs'].items() if leg==k] for k in ('ENTRY','STOP','TAKE_PROFIT')},environment='mainnet')
+    view=dict(environment='mainnet',account=trade['account'],symbol=trade['symbol'],at_ms=snapshot['at_ms'],history_complete=True,
         orders_complete=True,position_quantity=snapshot['position_quantity'],fills=[],open_orders=[],terminal_orders=[])
     for order in snapshot['orders']:
         o=order['wire_order']; common=dict(account=trade['account'],symbol=trade['symbol'],oid=order['oid'])

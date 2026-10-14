@@ -98,7 +98,7 @@ class InfoReaderBatchTests(unittest.TestCase):
         self.assertTrue(all(connection.closed for connection in connections))
         self.assertEqual(ctor.call_count, 6)
         for call in ctor.call_args_list:
-            self.assertEqual(call, unittest.mock.call('api.hyperliquid-testnet.xyz', timeout=4))
+            self.assertEqual(call, unittest.mock.call('api.hyperliquid.xyz', timeout=4))
 
     def test_failure_joins_running_reads_before_returning_without_retry(self):
         reader = checks.InfoReader(parallel=True)
@@ -157,7 +157,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.run_case({})['status'],'WAITING_FOR_ADDRESSES')
         self.assertEqual(self.reader.calls,0)
     def test_disabled_other_modes_no_io(self):
-        for mode in ('live','testnet','send','true','',True):
+        for mode in ('live','mainnet','send','true','',True):
             self.assertEqual(self.run_case({**ENV,'HL_TESTNET_RUNTIME_MODE':mode})['status'],'READ_ONLY_RUNTIME_ONLY')
         self.assertEqual(self.reader.calls,0)
     def test_key_in_address_field_rejected_before_network(self):
@@ -338,7 +338,7 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(checks.Blocked): reader.read(kind,user=A)
         self.assertEqual(reader.calls,0)
     def test_changed_testnet_host_rejected(self):
-        with patch.object(checks,'HOST','api.hyperliquid.xyz'):
+        with patch.object(checks,'HOST','api.hyperliquid-testnet.xyz'):
             with self.assertRaises(checks.Blocked): checks.InfoReader().read('meta')
     def test_transport_fixed_url_no_secret_headers(self):
         response = Mock(status=200)
@@ -346,7 +346,7 @@ class RuntimeTests(unittest.TestCase):
         connection = Mock(); connection.getresponse.return_value=response
         with patch.object(checks.http.client,'HTTPSConnection',return_value=connection) as ctor:
             checks.InfoReader().read('meta')
-        ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+        ctor.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         args = connection.request.call_args.args
         self.assertEqual(args[:2],('POST','/info'))
         self.assertEqual(json.loads(args[2]),{'type':'meta'})
@@ -357,7 +357,7 @@ class RuntimeTests(unittest.TestCase):
         connection=Mock();connection.getresponse.return_value=response
         with patch.object(checks.http.client,'HTTPSConnection',return_value=connection) as ctor:
             checks.InfoReader().read('userRateLimit',user=A)
-        ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+        ctor.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         args=connection.request.call_args.args
         self.assertEqual(args[:2],('POST','/info'))
         self.assertEqual(json.loads(args[2]),dict(type='userRateLimit',user=A))

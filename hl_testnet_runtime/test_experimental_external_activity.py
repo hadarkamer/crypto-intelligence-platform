@@ -50,7 +50,7 @@ class PartialCloseTests(unittest.TestCase):
         self.assertEqual(trade['orders'],old['orders'])
         self.assertEqual(trade['entry_fills'],old['entry_fills'])
         self.assertEqual(trade['exit_fills'],old['exit_fills'])
-        card=cards.cards_from_state(state,domain='testnet')[0]
+        card=cards.cards_from_state(state,domain='mainnet')[0]
         self.assertEqual(Decimal(card['summary']['actual_position_quantity']),-half)
         self.assertIsNone(card['summary']['remaining_quantity'])
         self.assertEqual(card['summary']['historical_bot_remaining_quantity'],old['quantity'])

@@ -17,7 +17,7 @@ import uuid
 
 
 SERVICE = 'srv-dakptbh594qs7395460g'
-MODE = 'long_stream_testnet_v1'
+MODE = 'long_stream_mainnet_v1'
 OPT_IN = 'passive_v1'
 MAX_CAPACITY = 2048
 MAX_BATCH = 64

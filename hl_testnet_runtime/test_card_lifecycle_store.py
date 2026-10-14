@@ -138,7 +138,7 @@ print('RESTART_READBACK_PASSED')'''
         self.save(b,closed(b))
         self.assertEqual(before,self.store.load(src['card_id']))
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
         with self.assertRaises(life.LifecycleError):life.binding_from_card(src,B,{'long_account':{'account':A}},binding()['orders'])
 
     def test_archived_or_unavailable_cards_are_not_promoted(self):
@@ -151,7 +151,7 @@ print('RESTART_READBACK_PASSED')'''
         self.save(binding(),opened(binding()));self.lifecycle.initialize()
         self.assertEqual(self.history_count(),1)
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -431,6 +431,7 @@ class TransportTests(unittest.TestCase):
         self.assertFalse(feed.entry_allowed(A))
 
     def test_fixed_endpoint_two_isolated_sockets_lifecycle_no_order_action_and_bounded_shutdown(self):
+        self.assertEqual(wake.TESTNET_WS, 'wss://api.hyperliquid.xyz/ws')
         calls = []
         sockets = []
         def connector(url, **kwargs):

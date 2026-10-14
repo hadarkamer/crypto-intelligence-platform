@@ -67,7 +67,7 @@ class LiveSafetyProvider:
 
     def before_collect(self, state):
         """Capture feed generation and revision before ANY exchange account read."""
-        if state.get('domain') != 'testnet' or set(state['routes']) != {'long_account', 'short_account'}:
+        if state.get('domain') != 'mainnet' or set(state['routes']) != {'long_account', 'short_account'}:
             raise SafetyError('COMPLETE_TESTNET_ROUTES_REQUIRED')
         tokens = {role: self.feed.begin_reconciliation(account) for role, account in state['routes'].items()}
         identity = uuid.uuid4().hex
@@ -112,7 +112,7 @@ class LiveSafetyProvider:
 
     def _durable_matches(self, receipt, state, *, max_age_ms=FRESH_MS):
         context = receipt['context']
-        if (state.get('domain') != 'testnet' or state['routes'] != receipt['routes']
+        if (state.get('domain') != 'mainnet' or state['routes'] != receipt['routes']
                 or state['not_before_ms'] != receipt['not_before_ms']
                 or state['revision'] <= receipt['basis_revision']
                 or state.get('account_inventory_checkpoint') != receipt['marker']

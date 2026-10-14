@@ -13,7 +13,7 @@ from .test_card_lifecycle import A, B, T
 
 SECRET = 'private-diagnostics-' + 'a1234567890bcdef' * 2
 ENV = {'HL_TESTNET_DIAGNOSTICS_TOKEN':SECRET,'RENDER_SERVICE_ID':m.SERVICE,
-       'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1',
+       'HL_TESTNET_RUNTIME_MODE':'long_stream_mainnet_v1',
        'HL_TESTNET_LONG_ACCOUNT_ADDRESS':A,
        'HL_TESTNET_LONG_AGENT_ADDRESS':'0x'+'3'*40,
        'HL_TESTNET_SHORT_ACCOUNT_ADDRESS':B,

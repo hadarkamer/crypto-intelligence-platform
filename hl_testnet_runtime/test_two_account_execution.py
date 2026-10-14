@@ -16,7 +16,7 @@ from . import persistent_execution as p
 A='0x'+'1'*40; B='0x'+'2'*40; C=r.PHANTOM; D='0x'+'4'*40
 ENV=dict(HL_TESTNET_LONG_ACCOUNT_ADDRESS=A,HL_TESTNET_LONG_AGENT_ADDRESS=B,
     HL_TESTNET_SHORT_ACCOUNT_ADDRESS=C,HL_TESTNET_SHORT_AGENT_ADDRESS=D,
-    RENDER_SERVICE_ID=r.SERVICE,HL_TESTNET_RUNTIME_MODE='cancel_monitor_testnet_v1',
+    RENDER_SERVICE_ID=r.SERVICE,HL_TESTNET_RUNTIME_MODE='cancel_monitor_mainnet_v1',
     HL_TESTNET_CONNECTION_REVIEW='two_account_no_orders_v1')
 PLAN=dict(symbol='BTC',side='SHORT',entry='100',stop='102',take_profit='98')
 
@@ -119,12 +119,12 @@ class ConnectionTests(unittest.TestCase):
             totalMarginUsed='30',totalNtlPos='100')
         with self.assertRaisesRegex(checks.Blocked,'INITIAL_ACCOUNT_NOT_EMPTY'):
             r.budget_for_role(ENV,'short_account',C,D,PLAN,self.reader)
-        report=r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'},
+        report=r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_mainnet_v1'},
             'short_account',C,D,PLAN,self.reader)
         self.assertTrue(report['test_plan_checked'])
         self.reader.active['availableToTrade']=['1','1']
         with self.assertRaises(checks.Blocked):
-            r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'},
+            r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_mainnet_v1'},
                 'short_account',C,D,PLAN,self.reader)
     def test_insufficient_money_blocks_exact_plan(self):
         self.reader.active['availableToTrade']=['1','1']
@@ -265,10 +265,10 @@ class ConnectionTests(unittest.TestCase):
     def test_disabled_public_review_no_io(self):
         self.assertEqual(r.inspect_second({},reader=Mock(side_effect=AssertionError()))['status'],'DISABLED')
     def test_review_cannot_run_in_submission_mode(self):
-        self.assertEqual(r.inspect_second({**ENV,'HL_TESTNET_RUNTIME_MODE':'single_testnet_attempt_v1'},reader=self.reader)['status'],'REVIEW_MODE_NOT_ALLOWED')
+        self.assertEqual(r.inspect_second({**ENV,'HL_TESTNET_RUNTIME_MODE':'single_mainnet_attempt_v1'},reader=self.reader)['status'],'REVIEW_MODE_NOT_ALLOWED')
         self.assertEqual(self.reader.calls,0)
     def test_persistent_role_path_checks_identity_before_storage(self):
-        env={**ENV,'HL_TESTNET_RUNTIME_MODE':'single_testnet_attempt_v1',
+        env={**ENV,'HL_TESTNET_RUNTIME_MODE':'single_mainnet_attempt_v1',
              'HL_TESTNET_TWO_ACCOUNT_EXECUTION':'approved_single_attempt_v1'}
         src=dict(kind='SIGNAL',event_id='fixture',at=datetime.now(timezone.utc).isoformat(),**PLAN)
         with patch.dict(os.environ,env,clear=True),patch.object(p,'prepare_and_store',side_effect=AssertionError('No storage')) as store:

@@ -205,8 +205,8 @@ def plan(bindings, snapshot, context, *, now_ms):
     protective_stop_step = next((step for _, step in proposals
         if step['leg'] == 'STOP' and step['operation'] in ('CREATE_EXIT','RESIZE_EXIT')), None) \
         if reasons == {'EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE'} else None
-    return dict(version=VERSION, environment='testnet', simulation_only=True,
-        bucket=life.digest(['testnet', life.address(snapshot['account']), snapshot['symbol']]),
+    return dict(version=VERSION, environment='mainnet', simulation_only=True,
+        bucket=life.digest(['mainnet', life.address(snapshot['account']), snapshot['symbol']]),
         basis=evidence_key(bindings,snapshot,context), observed_at_ms=snapshot['at_ms'],
         valid_until_ms=min(snapshot['at_ms'],at)+15000,
         next_step=next_step, protective_stop_step=protective_stop_step,

@@ -346,7 +346,7 @@ class TestnetDomainHistoryMaintenanceTests(unittest.TestCase):
             self.assertEqual(order['status'], 'OPEN')
             self.assertEqual(order['wire_order']['s'], '1')
         report = fixture.worker.report()
-        self.assertEqual(report['domain'], 'testnet')
+        self.assertEqual(report['domain'], 'mainnet')
         self.assertEqual(report['history_maintenance_error'], 'HISTORY_MAINTENANCE_DEFERRED')
 
 

@@ -21,7 +21,7 @@ class DisplayOnlyTests(unittest.TestCase):
 
     def test_export_contains_data_only_and_no_authority(self):
         out=self.export()
-        self.assertTrue(out['read_only']);self.assertEqual(out['environment'],'testnet')
+        self.assertTrue(out['read_only']);self.assertEqual(out['environment'],'mainnet')
         card=out['cards'][0];self.assertTrue(card['closure_verified'])
         self.assertEqual(card['prices'],self.b['prices'])
         self.assertEqual(set(card),set(p.FIELDS)|{'symbol','direction','prices'})

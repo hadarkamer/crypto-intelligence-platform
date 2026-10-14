@@ -500,7 +500,7 @@ class ConfigurationTests(NoExternal):
         now_ms=int(source.timestamp()*1000)+1000
         saved.update(bucket='a'*64,account=A,symbol='DEMO',pending=None,
             entry_timing_armed={first['card_id']:now_ms-500},
-            evidence=dict(bindings=[],snapshot=dict(environment='testnet',account=A,
+            evidence=dict(bindings=[],snapshot=dict(environment='mainnet',account=A,
                 symbol='DEMO',at_ms=now_ms,history_complete=True,orders_complete=True,
                 position_quantity='0',fills=[],open_orders=[],terminal_orders=[])))
         saved['originals'][first['card_id']]['entry_rejected_no_retry']=True
@@ -555,8 +555,8 @@ class DurableLongStreamTests(NoExternal):
         super().setUp()
         self.j=PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1',
-                         'hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1',
+                         'hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap()
         self.cards=CardStore(self.j);self.cards.initialize()

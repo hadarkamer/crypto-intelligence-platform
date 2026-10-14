@@ -14,7 +14,7 @@ import time
 import threading
 from . import card_lifecycle as life, checks
 
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 DAY_MS = 86400000
 OVERLAP_MS = 60000
 MAX_CATCHUP_MS = 2*DAY_MS
@@ -129,7 +129,7 @@ class PublicReader:
 
     def _transport(self, body):
         with self._calls_lock:
-            if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
+            if HOST != 'api.hyperliquid.xyz' or self.calls >= 200:
                 raise SyncError('READ_BUDGET_EXCEEDED')
             self.calls += 1
         budget=self._observation_budget or self.budget
@@ -568,7 +568,7 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         seen_coins.add(coin); life.number(item.get('szi'),signed=True)
         if coin==symbol: matches.append(item)
     quantity = matches[0]['szi'] if matches else '0'
-    return dict(environment='testnet',account=account,symbol=symbol,at_ms=end,history_complete=True,
+    return dict(environment='mainnet',account=account,symbol=symbol,at_ms=end,history_complete=True,
         orders_complete=True,position_quantity=quantity,fills=fills,
         open_orders=sorted(opens,key=lambda r:r['oid']),terminal_orders=sorted(terminals,key=lambda r:r['oid']))
 

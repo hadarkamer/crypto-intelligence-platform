@@ -126,7 +126,7 @@ class SimpleExecutionTests(NoExternal):
     def test_unfilled_entry_polls_only_price_every_ten_seconds_and_crossing_wakes_cancel(self):
         state=state_from_case(q='0',expiry_seconds=600)
         venue=dispatch.TestnetVenue(dict(RENDER_SERVICE_ID=dispatch.roles.SERVICE,
-            HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1'))
+            HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1'))
         venue.fill_wakeups=Feed();clock=[T];venue.now=lambda:clock[0]
         with patch.object(venue,'sample',return_value=dict(mark_price='10',at_ms=T)) as sample:
             self.assertTrue(venue.waiting_entry_quiet(state))
@@ -144,7 +144,7 @@ class SimpleExecutionTests(NoExternal):
         state=state_from_case(q='100',stop='100',take='100')
         simple.checkpoint(state,{'verification_passes':1},T)
         venue=dispatch.TestnetVenue(dict(RENDER_SERVICE_ID=dispatch.roles.SERVICE,
-            HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1'))
+            HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1'))
         venue.store=MemoryStore(state)
         clock=[T+1];venue.now=lambda:clock[0]
         with patch.object(venue,'request_budget',return_value=None), \
@@ -158,7 +158,7 @@ class SimpleExecutionTests(NoExternal):
 
     def test_warm_first_entry_uses_four_http_queries_and_62_weight(self):
         env=dict(RENDER_SERVICE_ID=dispatch.roles.SERVICE,
-                 HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1')
+                 HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1')
         venue=dispatch.TestnetVenue(env);venue.now=lambda:T+1
         record=original(expiry_seconds=300)[1];card=record['card']
         state=dict(account=A,symbol='DOGE',bindings=[],originals={card['card_id']:record})
@@ -238,7 +238,7 @@ class SimpleDatabaseTests(NoExternal):
         from .trade_card_store import CardStore
         self.journal=PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         with self.journal._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.journal.bootstrap()
         self.cards=CardStore(self.journal);self.cards.initialize()

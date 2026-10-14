@@ -70,7 +70,7 @@ class DurableRecoveryTests(unittest.TestCase):
         self.journal=PostgresJournal.for_ci(CI)
         with self.journal._transaction() as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS {m.SCHEMA} CASCADE')
-            conn.execute('DROP SCHEMA IF EXISTS hl_testnet_execution_v1 CASCADE')
+            conn.execute('DROP SCHEMA IF EXISTS hl_mainnet_execution_v1 CASCADE')
         self.journal.bootstrap()
         self.store=m.RecoveryJournal(self.journal);self.store.initialize()
         self.bs,self.s,self.c=fixture()
@@ -440,7 +440,7 @@ print(json.dumps({'phase':p['request']['phase'],'reference':p['request']['client
     def test_legacy_attempts_remain_untouched(self):
         self.confirm(self.reply(self.begin(self.prepare())))
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

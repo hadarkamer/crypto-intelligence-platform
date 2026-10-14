@@ -247,7 +247,7 @@ class HistoryMixin:
                 finally:
                     conn.rollback()
             return
-        if self.domain == 'testnet':
+        if self.domain == 'mainnet':
             from .experimental_live_state import checked, PG_SCHEMA
         else:
             from .experimental_execution_state import PG_SCHEMA
@@ -261,7 +261,7 @@ class HistoryMixin:
                 actual = conn.execute('SELECT current_database()').fetchone()[0]
                 if actual != self.journal._parameters['dbname']:
                     raise JournalError('WRONG_DATABASE')
-                if self.domain == 'testnet': self._ready(conn)
+                if self.domain == 'mainnet': self._ready(conn)
                 row = conn.execute(f'SELECT value,checksum FROM {PG_SCHEMA}.state WHERE singleton').fetchone()
                 if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
                 yield _SQL(conn, PG_SCHEMA), checked(*row)
@@ -291,14 +291,14 @@ class HistoryMixin:
                 except BaseException:
                     conn.rollback(); raise
             return
-        if self.domain == 'testnet':
+        if self.domain == 'mainnet':
             from .experimental_live_state import checked, PG_SCHEMA, LOCK
         else:
             from .experimental_execution_state import PG_SCHEMA
             checked, LOCK = software_checked, 1729048361
         with self.journal._transaction() as conn:
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
-            if self.domain == 'testnet': self._ready(conn)
+            if self.domain == 'mainnet': self._ready(conn)
             row = conn.execute(f'SELECT value,checksum FROM {PG_SCHEMA}.state WHERE singleton FOR UPDATE').fetchone()
             if row is None: raise _error('EXPLICIT_ISOLATED_INITIALIZATION_REQUIRED')
             state = checked(*row)

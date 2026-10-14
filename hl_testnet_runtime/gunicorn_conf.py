@@ -13,7 +13,7 @@ def post_worker_init(worker):
     import json
     # The handover coordinator retains legacy protections on candidate startup
     # failure, and exclusively owns both phases. Do not start other workers.
-    if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_testnet_v1':
+    if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_mainnet_v1':
         from hl_testnet_runtime.experimental_live_startup import start
         start()
         return
@@ -22,12 +22,12 @@ def post_worker_init(worker):
         from hl_testnet_runtime.integrated_safety import config as safety_config
         safety_config(os.environ)
     from hl_testnet_runtime.risk_policy import CURRENT_RISK_USD, VERSION
-    print(json.dumps({'testnet_risk_policy': {'version': VERSION,
+    print(json.dumps({'risk_policy': {'version': VERSION,
         'new_entry_planned_risk_usd': CURRENT_RISK_USD,
         'fees_funding_slippage_included': False,
-        'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
+        'resizes_existing_orders': False, 'exchange_environment': 'mainnet'}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
-    if mode == 'long_stream_testnet_v1':
+    if mode == 'long_stream_mainnet_v1':
         from hl_testnet_runtime.long_stream_runtime import start
         start()
         return
@@ -40,16 +40,16 @@ def post_worker_init(worker):
         from hl_testnet_runtime.card_sync import start as start_card_sync
         start_card_sync()
     if (os.environ.get('HL_TESTNET_CONNECTION_REVIEW') == 'two_account_no_orders_v1'
-            and mode in ('read_only','cancel_monitor_testnet_v1')):
+            and mode in ('read_only','cancel_monitor_mainnet_v1')):
         import threading
         from hl_testnet_runtime.connection_review_startup import startup as connection_review
         threading.Thread(target=connection_review,daemon=True,name='connection-no-orders-review').start()
     if (os.environ.get('HL_TESTNET_CARDS_PHASE1') == 'record_only_v1'
-            and mode in ('read_only', 'cancel_monitor_testnet_v1')):
+            and mode in ('read_only', 'cancel_monitor_mainnet_v1')):
         import threading
         from hl_testnet_runtime.trade_cards_startup import startup as cards_startup
         threading.Thread(target=cards_startup,daemon=True,name='cards-record-only-probe').start()
-    if mode == 'cancel_monitor_testnet_v1':
+    if mode == 'cancel_monitor_mainnet_v1':
         from hl_testnet_runtime.pending_cancel_monitor import start
         start()
     elif (mode == 'read_only' and os.environ.get('HL_TESTNET_JOURNAL_BACKEND') == 'staging_postgres_v1'

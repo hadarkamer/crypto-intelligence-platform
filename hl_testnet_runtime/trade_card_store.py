@@ -2,7 +2,7 @@
 from . import trade_cards as cards
 from .postgres_journal import JournalError
 
-SCHEMA = 'hl_testnet_cards_v1'
+SCHEMA = 'hl_mainnet_cards_v1'
 LOCK = 1729048190
 
 
@@ -34,7 +34,7 @@ class CardStore:
                 card_id text PRIMARY KEY CHECK(length(card_id)=64),
                 source_stream text NOT NULL, event_id text NOT NULL,
                 digest text NOT NULL CHECK(length(digest)=64), manifest jsonb NOT NULL,
-                environment text NOT NULL DEFAULT 'testnet' CHECK(environment='testnet'),
+                environment text NOT NULL DEFAULT 'mainnet' CHECK(environment='mainnet'),
                 created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
                 UNIQUE(source_stream,event_id))''')
             conn.execute(f'REVOKE ALL ON SCHEMA {SCHEMA} FROM PUBLIC')
@@ -96,12 +96,12 @@ class CardStore:
         with self.journal._transaction() as conn:
             self.journal._ready(conn)
             exists = conn.execute('SELECT to_regclass(%s)',
-                ('hl_testnet_execution_v1.limit_cancel_rules',)).fetchone()[0]
+                ('hl_mainnet_execution_v1.limit_cancel_rules',)).fetchone()[0]
             if exists is None:
                 return []
             rows = conn.execute('''SELECT p.manifest,r.policy
-                FROM hl_testnet_execution_v1.prepared p
-                JOIN hl_testnet_execution_v1.limit_cancel_rules r ON r.plan_key=p.plan_key
+                FROM hl_mainnet_execution_v1.prepared p
+                JOIN hl_mainnet_execution_v1.limit_cancel_rules r ON r.plan_key=p.plan_key
                 ORDER BY p.created_at,p.plan_key LIMIT 32''').fetchall()
         reports = []
         for prepared, rule in rows:

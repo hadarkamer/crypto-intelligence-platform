@@ -112,7 +112,7 @@ def review_only(message, *, account, agent, journal=None, exit_type=None, client
     A historical source can be inspected here, but its age remains a blocker for
     dispatch. Missing exit-type or persistence is reported, never guessed away.
     """
-    report = {'version': 'budget-to-dispatch-v1', 'mode': 'testnet', 'phase': 'review_only',
+    report = {'version': 'budget-to-dispatch-v1', 'mode': 'mainnet', 'phase': 'review_only',
               'eligible_for_controlled_attempt': False, 'blockers': [], 'price_precision_fields': [],
               'prices_changed': False, 'source_time_changed': False, 'risk_rule_changed': False,
               'signing_tested': False, 'order_requests_sent': 0}

@@ -88,7 +88,7 @@ def assess(bindings, snapshot, context, link, *, now_ms, policy=PRESERVE):
     remaining = life.number(card['remaining_quantity'], signed=True)
     entered = life.number(card['entry_quantity'])
     protected = remaining > 0 and life.number(card['stop_quantity_observed']) == remaining and not reasons and not card['issues']
-    out = dict(version=VERSION, environment='testnet', simulation_only=True,
+    out = dict(version=VERSION, environment='mainnet', simulation_only=True,
         bucket=base['bucket'], card_id=cid, observed_at_ms=snapshot['at_ms'],
         valid_until_ms=base['valid_until_ms'], basis=life.digest([base['basis'], link, policy]),
         state='REVIEW_REQUIRED', reasons=[], next_step=None, recovery_proposal=None,

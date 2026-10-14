@@ -105,7 +105,7 @@ class FullConnectionTests(unittest.TestCase):
         self.store = TestnetExecutionState.for_ci(journal)
         self.store.load = self.memory.load; self.store.mutate = self.memory.mutate
         self.store.commit_attempt = self.memory.commit_attempt
-        self.release = dict(domain='testnet', release_id='a'*64, dispatch_enabled=True,
+        self.release = dict(domain='mainnet', release_id='a'*64, dispatch_enabled=True,
             protection_enabled=True, entries_enabled=True, not_before_ms=not_before,
             entry_expires_at_ms=max(T, ARM) + 86400000,
             routes={role: row['account'] for role, row in LIVE_ROUTES.items()})

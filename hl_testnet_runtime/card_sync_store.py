@@ -115,7 +115,7 @@ class SyncStore:
     def summary(self):
         safety_ok="true"
         if self.safety_enabled:
-            safety_ok="COALESCE(s.report->'safety'->>'version','')='integrated-testnet-safety-review-v1'"
+            safety_ok="COALESCE(s.report->'safety'->>'version','')='integrated-mainnet-safety-review-v1'"
         with self.journal._transaction() as conn:
             row=conn.execute(f'''SELECT count(*),
                 count(*) FILTER(WHERE s.status='VERIFIED' AND s.last_success>clock_timestamp()-interval '120 seconds'

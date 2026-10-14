@@ -19,7 +19,7 @@ from .filled_dispatch_store import DefinitelyUnsent
 from .long_stream_runtime import _validate_account_inventory
 
 VERSION = 'experimental-disabled-dispatch-boundary-v1'
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 
 
 class BoundaryError(ValueError):
@@ -162,7 +162,7 @@ def review(request, context, *, now_ms):
     It retains legacy market buckets for complete account inventory review.
     This pure result is a diagnostic, not transport or release authorization.
     """
-    if request.get('domain') not in ('software','testnet'):
+    if request.get('domain') not in ('software','mainnet'):
         raise BoundaryError('EXPLICIT_REQUEST_DOMAIN_REQUIRED')
     DefinitelyUnsent.identity(request)
     p=request['proposal']; entry=p['operation']=='ENTRY'
@@ -203,7 +203,7 @@ def review(request, context, *, now_ms):
                     or v['issues'] for v in view['cards']):
                 raise BoundaryError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
         market=context['market']
-        if market['environment']!='testnet' or market['symbol']!=p['symbol']:
+        if market['environment']!='mainnet' or market['symbol']!=p['symbol']:
             raise BoundaryError('ACTUAL_TESTNET_MARK_REQUIRED')
         _fresh(market['at_ms'],now_ms,15000,'ACTUAL_TESTNET_MARK_EXPIRED')
         mark=life.number(market['mark_price'],positive=True)

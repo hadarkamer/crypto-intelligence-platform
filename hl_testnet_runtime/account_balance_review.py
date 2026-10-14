@@ -51,7 +51,7 @@ def review_balance(account, *, expected_amount, client=None):
     successful balance read. A mode change or an overlong sample invalidates the
     combined comparison. This function never changes existing execution guards.
     """
-    report = dict(version='testnet-balance-observation-v1', environment='testnet',
+    report = dict(version='testnet-balance-observation-v1', environment='mainnet',
         status='BALANCE_READ_UNAVAILABLE', account_mode='NOT_READ',
         account_mode_resolved=False, account_mode_changed_during_read=False,
         balance_observed=False, expected_amount_observed=False,

@@ -8,7 +8,7 @@ from . import card_lifecycle as life
 from .postgres_journal import JournalError
 from .card_recovery_journal import RecoveryJournal
 
-SCHEMA = 'hl_testnet_filled_dispatch_v1'
+SCHEMA = 'hl_mainnet_filled_dispatch_v1'
 VERSION = 'filled-dispatch-store-v1'
 DONE = ('OBSERVED', 'ABORTED_UNSENT')
 PHASES = ('PREPARED', 'OUTCOME_UNKNOWN', 'ACK_UNVERIFIED', 'REJECTED', 'CONFLICT') + DONE
@@ -43,7 +43,7 @@ class DefinitelyUnsent(DispatchError):
             raise DispatchError('UNSENT_CERTIFICATE_REQUEST_INVALID')
         for field in ('request_id', 'bucket'):
             life.ident(request[field], r'[0-9a-f]{64}')
-        if request.get('domain') not in ('software', 'testnet'):
+        if request.get('domain') not in ('software', 'mainnet'):
             raise DispatchError('UNSENT_CERTIFICATE_REQUEST_INVALID')
         for field in ('nonce', 'attempt_at_ms', 'prepared_at_ms'):
             life.moment(request[field])
@@ -73,7 +73,7 @@ def checked(row):
 class DispatchStore:
     def __init__(self, journal):
         self.journal = journal
-        self.domain = 'software' if journal._ci else 'testnet'
+        self.domain = 'software' if journal._ci else 'mainnet'
 
     def ready(self, conn):
         if conn.execute(f'SELECT version,domain FROM {SCHEMA}.metadata WHERE singleton').fetchone() != (VERSION,self.domain):
@@ -185,9 +185,9 @@ class DispatchStore:
             if row[2] != revision or state['revision'] != revision or state['domain'] != self.domain:
                 raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
             # The offline recovery journal shares this lock. Never bypass its uncertainty.
-            exists=conn.execute('SELECT to_regclass(%s)',('hl_testnet_recovery_rehearsal_v1.buckets',)).fetchone()[0]
+            exists=conn.execute('SELECT to_regclass(%s)',('hl_mainnet_recovery_rehearsal_v1.buckets',)).fetchone()[0]
             if exists:
-                old=conn.execute('SELECT active_id FROM hl_testnet_recovery_rehearsal_v1.buckets WHERE bucket=%s',(bucket,)).fetchone()
+                old=conn.execute('SELECT active_id FROM hl_mainnet_recovery_rehearsal_v1.buckets WHERE bucket=%s',(bucket,)).fetchone()
                 if old and old[0] is not None:
                     raise DispatchError('PRIOR_RECOVERY_MUST_BE_RESOLVED')
             try:

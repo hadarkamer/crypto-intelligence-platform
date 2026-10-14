@@ -17,7 +17,7 @@ from .postgres_journal import JournalError
 
 ENV=dict(HL_TESTNET_CARDS_INTAKE='record_only_v1',HL_TESTNET_CARDS_INTAKE_SECRET=KEY,
     RENDER_SERVICE_ID='srv-dakptbh594qs7395460g',HL_TESTNET_CARDS_PHASE1='record_only_v1',
-    HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1',HL_TESTNET_RUNTIME_MODE='cancel_monitor_testnet_v1')
+    HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1',HL_TESTNET_RUNTIME_MODE='cancel_monitor_mainnet_v1')
 
 
 def request(value=None):
@@ -47,7 +47,7 @@ class HTTPTests(unittest.TestCase):
         with patch.dict(mod.os.environ,{},clear=True),patch.object(mod.PostgresJournal,'from_env',side_effect=AssertionError('No DB')):
             self.assertEqual(invoke(request())[0],'404 Not Found')
     def test_wrong_service_or_execution_mode_disabled(self):
-        for k,v in [('RENDER_SERVICE_ID','other'),('HL_TESTNET_RUNTIME_MODE','single_testnet_attempt_v1')]:
+        for k,v in [('RENDER_SERVICE_ID','other'),('HL_TESTNET_RUNTIME_MODE','single_mainnet_attempt_v1')]:
             with patch.dict(mod.os.environ,{k:v}):self.assertEqual(invoke(request())[0],'404 Not Found')
     def test_missing_wrong_expired_or_modified_auth_has_no_db_access(self):
         with patch.object(mod.PostgresJournal,'from_env',side_effect=AssertionError('No DB')):
@@ -156,9 +156,9 @@ class IntakePostgresTests(unittest.TestCase):
         return mod.accept(w.encoded(delivery() if value is None else value),self.receipts,read_metadata=lambda:fixtures.META)
     def counts(self):
         with self.journal._transaction() as conn:
-            return (conn.execute('SELECT count(*) FROM hl_testnet_cards_v1.cards').fetchone()[0],
-                conn.execute('SELECT count(*) FROM hl_testnet_cards_v1.delivery_receipts').fetchone()[0],
-                conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0])
+            return (conn.execute('SELECT count(*) FROM hl_mainnet_cards_v1.cards').fetchone()[0],
+                conn.execute('SELECT count(*) FROM hl_mainnet_cards_v1.delivery_receipts').fetchone()[0],
+                conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0])
     def test_delivered_to_card_to_immutable_receipt_no_trade(self):
         r=self.accept();self.assertEqual(r['status'],'RECORDED');self.assertEqual(self.counts(),(1,1,0))
         rec=self.receipts.get(r['receipt_id']);card=self.store.load(rec['card_id'])
@@ -203,7 +203,7 @@ class IntakePostgresTests(unittest.TestCase):
         v={**delivery(),'secret':'DO_NOT_PERSIST'}
         self.assertEqual(self.accept(v)['status'],'REJECTED')
         with self.journal._transaction() as conn:
-            rows=conn.execute('SELECT source,reason FROM hl_testnet_cards_v1.delivery_receipts').fetchall()
+            rows=conn.execute('SELECT source,reason FROM hl_mainnet_cards_v1.delivery_receipts').fetchall()
         self.assertNotIn('DO_NOT_PERSIST',str(rows))
     def test_metadata_failure_retains_retry_no_fake_receipt(self):
         with self.assertRaises(RuntimeError):

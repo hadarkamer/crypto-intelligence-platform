@@ -35,20 +35,20 @@ class SDKTests(unittest.TestCase):
             expected = signing.order_wires_to_order_action(sdk_orders, grouping='normalTpsl')
             # Exact serialization also checks the msgpack map-key ordering.
             self.assertEqual(json.dumps(action), json.dumps(expected))
-    def test_testnet_signature_cannot_be_replayed_as_mainnet(self):
+    def test_mainnet_signature_cannot_be_replayed_as_testnet(self):
         wallet = Account.create()  # Ephemeral, unfunded, never used on any network.
         action = adapter.build_action(signal(), META, ACCOUNT, exit_type='market')
         nonce = adapter.now_ms()
         with patch.object(signing, 'sign_l1_action', wraps=signing.sign_l1_action) as sign:
             body = adapter._signed_body(wallet, action, nonce)
-            self.assertIs(sign.call_args.args[-1], False)
+            self.assertIs(sign.call_args.args[-1], True)
             self.assertIsNone(sign.call_args.args[2])
         self.assertEqual(body['expiresAfter'], nonce + 30000)
         arguments = [body['action'], body['signature'], None, nonce, body['expiresAfter']]
         testnet = signing.recover_agent_or_user_from_l1_action(*arguments, False)
         mainnet = signing.recover_agent_or_user_from_l1_action(*arguments, True)
-        self.assertEqual(testnet.lower(), wallet.address.lower())
-        self.assertNotEqual(mainnet.lower(), wallet.address.lower())
+        self.assertNotEqual(testnet.lower(), wallet.address.lower())
+        self.assertEqual(mainnet.lower(), wallet.address.lower())
         self.assertNotIn('builder', body['action'])
     def test_agrees_with_existing_signal_contract(self):
         from paper_execution_feed import signal_message

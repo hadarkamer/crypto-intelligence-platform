@@ -20,7 +20,7 @@ from .trade_cards import account_routes
 
 MODE = 'saved_doge_shadow_v1'
 SERVICE = 'srv-dakptbh594qs7395460g'
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 
 
 def now_ms():
@@ -53,7 +53,7 @@ class PublicReader:
             pass
         else:
             raise ReviewError('PUBLIC_READ_TYPE_NOT_ALLOWED')
-        if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 12:
+        if HOST != 'api.hyperliquid.xyz' or self.calls >= 12:
             raise ReviewError('PUBLIC_READ_BOUND_EXCEEDED')
         from .request_budget import BudgetError
         try:
@@ -90,8 +90,8 @@ def load_original(journal, account):
     with journal._transaction() as conn:
         journal._ready(conn)
         rows = conn.execute('''SELECT p.plan_key,p.manifest,a.action,a.result
-            FROM hl_testnet_execution_v1.prepared p
-            JOIN hl_testnet_execution_v1.attempts a ON a.plan_key=p.plan_key AND a.account=p.account
+            FROM hl_mainnet_execution_v1.prepared p
+            JOIN hl_mainnet_execution_v1.attempts a ON a.plan_key=p.plan_key AND a.account=p.account
             WHERE p.account=%s AND p.source_id=%s''', (account, SOURCE_ID)).fetchall()
     if len(rows) != 1:
         raise ReviewError('EXACT_SAVED_DOGE_REQUIRED')
@@ -230,14 +230,14 @@ def collect(record, account, reader, *, clock=now_ms, elapsed=time.monotonic):
     evidence = observations[-1]
     identity = dict(plan_key=record['plan_key'],prepared=record['prepared'],action=action)
     binding = dict(card_id=life.digest(['legacy_executed_testnet',account,record['plan_key']]),
-        card_digest=life.digest(identity),environment='testnet',account=account,
+        card_digest=life.digest(identity),environment='mainnet',account=account,
         role='long_account',symbol='DOGE',side='LONG',planned_quantity=quantity,
         prices={key:source[key] for key in ('entry','stop','take_profit')},
         orders={leg:[evidence['ids'][leg]['oid']] for leg in life.LEGS})
     terminals = [dict(account=account,symbol='DOGE',oid=item['oid'],state=item['state'],
         filled_quantity='0' if leg=='STOP' else quantity,at_ms=item['at_ms'])
         for leg,item in evidence['ids'].items()]
-    snapshot = dict(environment='testnet',account=account,symbol='DOGE',at_ms=at,
+    snapshot = dict(environment='mainnet',account=account,symbol='DOGE',at_ms=at,
         history_complete=True,orders_complete=True,position_quantity='0',
         fills=evidence['fills'],open_orders=[],terminal_orders=terminals)
     report = life.review([binding],snapshot,now_ms=at)
@@ -252,13 +252,13 @@ def collect(record, account, reader, *, clock=now_ms, elapsed=time.monotonic):
 
 
 def run(env, *, journal=None, reader=None, clock=now_ms):
-    result = dict(status='DISABLED',environment='testnet',order_requests_sent=0,
+    result = dict(status='DISABLED',environment='mainnet',order_requests_sent=0,
         dispatch_enabled=False,signing_tested=False,app_delivery_sent=False,
         legacy_record_unchanged=None,continuous_sync_enabled=False)
     if env.get('HL_TESTNET_CLOSED_CARD_REVIEW') != MODE:
         return result
     if (env.get('RENDER_SERVICE_ID') != SERVICE
-            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_testnet_v1')
+            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_mainnet_v1')
             or env.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1'
             or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION') == 'approved_single_attempt_v1'):
         return {**result,'status':'READ_ONLY_MODE_REQUIRED'}

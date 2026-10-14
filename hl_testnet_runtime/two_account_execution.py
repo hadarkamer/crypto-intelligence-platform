@@ -22,7 +22,7 @@ ROLES = {'long_account': 'LONG', 'short_account': 'SHORT'}
 # and one reduce-only close. This is neither a reservation nor a guarantee of
 # future capacity, retry coverage, IP headroom or an implemented emergency path.
 ENTRY_ACTION_HEADROOM = 5
-CONTINUOUS_RELEASE = 'continuous_testnet_v1'
+CONTINUOUS_RELEASE = 'continuous_mainnet_v1'
 
 
 def short_entry_scope(env, card_id=None):
@@ -43,7 +43,7 @@ def short_entry_scope(env, card_id=None):
     if not trial:
         if (release != CONTINUOUS_RELEASE
                 or env.get('RENDER_SERVICE_ID') != SERVICE
-                or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_testnet_v1'
+                or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_mainnet_v1'
                 or env.get('HL_TESTNET_FILLED_DISPATCH') != 'approved_long_stream_v1'
                 or env.get('HL_TESTNET_LONG_STREAM') != 'approved_alerts_v1'
                 or env.get('HL_TESTNET_SHORT_STREAM') != 'approved_alerts_v1'
@@ -51,7 +51,7 @@ def short_entry_scope(env, card_id=None):
                 or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') not in ('true', 'false')
                 or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION') != 'disabled'
                 or env.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1'
-                or env.get('HL_TESTNET_EMERGENCY_CLOSE') != 'approved_testnet_v1'
+                or env.get('HL_TESTNET_EMERGENCY_CLOSE') != 'approved_mainnet_v1'
                 or env.get('HL_TESTNET_FILLED_CARD_ID')
                 or env.get('HL_TESTNET_SAFETY_PIPELINE')
                 or env.get('HL_TESTNET_CARD_SYNC')):
@@ -111,7 +111,7 @@ def execution_unlocked(env):
     # No call or startup path in this change sets either of these approvals.
     return (env.get('RENDER_SERVICE_ID') == SERVICE
         and env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION') == 'approved_single_attempt_v1'
-        and env.get('HL_TESTNET_RUNTIME_MODE') == 'single_testnet_attempt_v1')
+        and env.get('HL_TESTNET_RUNTIME_MODE') == 'single_mainnet_attempt_v1')
 
 
 def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exposure=False):
@@ -224,7 +224,7 @@ def budget_for_role(env, role, account, agent, plan, reader):
     mode = reader.read('userAbstraction', user=route['account'])
     if mode == 'default':
         return _default_native_snapshot(route,reader,plan['symbol'],mode,started,plan=plan,
-            allow_owned_exposure=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
+            allow_owned_exposure=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1'
                                   and role=='short_account'))
     if mode not in ('disabled', 'unifiedAccount'):
         raise checks.Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
@@ -256,13 +256,13 @@ def entry_action_headroom(account, reader):
 
 def inspect_second(env, *, reader=None):
     """No signature, no reservation and no execution imports/calls."""
-    report = dict(status='DISABLED', environment='testnet', order_requests_sent=0,
+    report = dict(status='DISABLED', environment='mainnet', order_requests_sent=0,
         signing_tested=False, entry_sending_enabled=False, key_present=False,
         key_address_verified=False, specific_order_checked=False)
     if env.get('HL_TESTNET_CONNECTION_REVIEW') != 'two_account_no_orders_v1':
         return report
     if (env.get('RENDER_SERVICE_ID') != SERVICE
-            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only', 'cancel_monitor_testnet_v1')):
+            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only', 'cancel_monitor_mainnet_v1')):
         return {**report, 'status': 'REVIEW_MODE_NOT_ALLOWED'}
     try:
         route = route_for(env, 'short_account')

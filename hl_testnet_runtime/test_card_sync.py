@@ -746,7 +746,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_public_transport_rejects_exchange_or_mainnet(self):
         with self.assertRaises(e.SyncError):e.PublicReader().read('order',A)
-        with patch.object(e,'HOST','api.hyperliquid.xyz'):
+        with patch.object(e,'HOST','api.hyperliquid-testnet.xyz'):
             with self.assertRaises(e.SyncError):e.PublicReader().read('clearinghouseState',A)
 
     def test_read_budget_checked_before_transport(self):
@@ -765,7 +765,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_trading_enabled_modes_rejected(self):
         env=dict(HL_TESTNET_CARD_SYNC=worker.MODE,RENDER_SERVICE_ID=worker.SERVICE,
-            HL_TESTNET_RUNTIME_MODE='single_testnet_attempt_v1',HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1')
+            HL_TESTNET_RUNTIME_MODE='single_mainnet_attempt_v1',HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1')
         with self.assertRaises(e.SyncError):worker.config(env)
 
     def test_loop_waits_after_completion_and_stops(self):
@@ -979,13 +979,13 @@ print('RESTART_OK')'''
     def test_new_record_only_alert_is_not_treated_as_an_executed_trade(self):
         # The scheduler only scans registered lifecycle heads, not alert payloads.
         with self.j._transaction() as conn:
-            table=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
-            before=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+            table=conn.execute("SELECT to_regclass('hl_mainnet_execution_v1.attempts')").fetchone()[0]
+            before=(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0]
                     if table is not None else None)
         self.assertEqual(self.s.summary()['registered_buckets'],1)
         with self.j._transaction() as conn:
-            current=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
-            after=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+            current=conn.execute("SELECT to_regclass('hl_mainnet_execution_v1.attempts')").fetchone()[0]
+            after=(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0]
                    if current is not None else None)
         self.assertEqual((current is not None,after),(table is not None,before))
 

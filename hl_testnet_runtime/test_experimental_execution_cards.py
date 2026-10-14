@@ -230,8 +230,8 @@ class NativeDomainCardTests(unittest.TestCase):
         for _ in range(3):
             f.cycle(entries=False)
         result = f.worker.report(); card = result['cards'][0]
-        self.assertEqual(result['domain'], 'testnet')
-        self.assertEqual(card['domain'], 'testnet')
+        self.assertEqual(result['domain'], 'mainnet')
+        self.assertEqual(card['domain'], 'mainnet')
         self.assertEqual(card['account'], f.release['routes']['long_account'])
         self.assertEqual(card['summary']['actual_average_entry'], value['entry'])
         self.assertEqual(card['summary']['remaining_quantity'], '1')

@@ -170,7 +170,7 @@ def _step(controller, bucket, state, *, reader=None, clock=None, elapsed=time.mo
     """
     clock=controller.venue.now if clock is None else clock
     now,started=life.moment(clock()),elapsed()
-    if (controller.store.domain not in ('testnet','software')
+    if (controller.store.domain not in ('mainnet','software')
             or controller.store.domain!=controller.venue.domain):
         raise RecoveryError('HISTORY_RECOVERY_TESTNET_DOMAIN_REQUIRED')
     if controller.store.load(state['bucket'])!=state:
@@ -179,7 +179,7 @@ def _step(controller, bucket, state, *, reader=None, clock=None, elapsed=time.mo
     anchor=stage['anchor']; account=state['account']; symbol=state['symbol']
     _check_anchor(controller,anchor,account,base)
     stamp=_feed_stamp(controller,account)
-    if getattr(controller.venue,'domain',None)=='testnet' and stamp is None:
+    if getattr(controller.venue,'domain',None)=='mainnet' and stamp is None:
         raise RecoveryError('HISTORY_RECOVERY_LIVE_FEED_BOUNDARY_REQUIRED')
     if KEY not in state:
         # Establish the durable account-wide ENTRY fence before any exchange

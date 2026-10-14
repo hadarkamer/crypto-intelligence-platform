@@ -14,8 +14,8 @@ import os
 import threading
 from urllib.parse import unquote, urlsplit, parse_qs
 
-SCHEMA = 'hl_testnet_execution_v1'
-VERSION = 'testnet-postgres-journal-v1'
+SCHEMA = 'hl_mainnet_execution_v1'
+VERSION = 'mainnet-postgres-journal-v1'
 STAGING_HOST = 'dpg-dab7rc2d0e5s73dkb9l0-a'
 STAGING_DB = 'crypto_intelligence_staging_db'
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}\Z')
@@ -277,7 +277,7 @@ class PostgresJournal:
         account = account_address(account)
         manifest = validate_prepared(prepared)
         source_id = manifest['source']['event_id']
-        key = digest(['testnet', account, source_id])
+        key = digest(['mainnet', account, source_id])
         checksum = digest(manifest)
         with self._transaction() as conn:
             self._ready(conn)

@@ -12,7 +12,7 @@ import re
 from . import price_precision as precision
 from .risk_policy import budget, card_profile
 
-VERSION = 'testnet-trade-card-v1'
+VERSION = 'mainnet-trade-card-v1'
 SCOPES = ('received_alert', 'historical_review', 'synthetic_test')
 ROLES = {'LONG': 'long_account', 'SHORT': 'short_account'}
 IDENTIFIER = re.compile(r'[A-Za-z0-9_.:-]{1,100}\Z')
@@ -103,8 +103,8 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
         cancel_price = None if threshold is None else text(entry * (1 + direction * threshold / 200))
         planning = dict(quantity=text(size), distance_risk_usd=text(size * abs(entry-stop)),
                         cancel_price=cancel_price, positive_quantity=size > 0)
-    card = dict(version=VERSION, environment='testnet',
-        card_id=checksum(['testnet', source_stream, execution['event_id']]),
+    card = dict(version=VERSION, environment='mainnet',
+        card_id=checksum(['mainnet', source_stream, execution['event_id']]),
         source_stream=source_stream, event_id=execution['event_id'], record_kind=record_kind,
         rule=dict(id=rule_id, threshold_pct=threshold_pct), prepared=prepared,
         account_role=ROLES[execution['side']], planning=planning,

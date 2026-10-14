@@ -79,8 +79,8 @@ def records(journal, *, start_after=None, role='long_account'):
     for _ in range(100):
         with journal._transaction() as conn:
             rows = conn.execute('''SELECT c.card_id,c.manifest,c.digest,c.created_at
-                FROM hl_testnet_cards_v1.cards c
-                WHERE EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+                FROM hl_mainnet_cards_v1.cards c
+                WHERE EXISTS (SELECT 1 FROM hl_mainnet_cards_v1.delivery_receipts r
                     WHERE r.card_id=c.card_id AND r.status='RECORDED')
                   AND (%s::text IS NULL OR c.card_id > %s)
                 ORDER BY c.card_id LIMIT 65''',(after,after)).fetchall()

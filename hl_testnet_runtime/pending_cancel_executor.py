@@ -18,8 +18,8 @@ import time
 
 from . import half_threshold_cancel as rulemod
 
-OPS = 'hl_testnet_execution_v1.limit_cancel_operations'
-HOST = 'api.hyperliquid-testnet.xyz'
+OPS = 'hl_mainnet_execution_v1.limit_cancel_operations'
+HOST = 'api.hyperliquid.xyz'
 TERMINAL_CANCEL = {'canceled', 'siblingFilledCanceled', 'reduceOnlyCanceled',
                    'scheduledCancel', 'marginCanceled', 'selfTradeCanceled'}
 
@@ -66,7 +66,7 @@ class Operations:
             self.journal._ready(conn)
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
             conn.execute(f'''CREATE TABLE IF NOT EXISTS {OPS} (
-                plan_key text NOT NULL REFERENCES hl_testnet_execution_v1.prepared(plan_key),
+                plan_key text NOT NULL REFERENCES hl_mainnet_execution_v1.prepared(plan_key),
                 phase text NOT NULL CHECK(phase IN ('cancel','repair')), action jsonb NOT NULL,
                 nonce bigint NOT NULL, outcome text NOT NULL DEFAULT 'RESERVED_OR_UNCERTAIN',
                 created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -153,7 +153,7 @@ class Exchange:
         if phase not in ('cancel','repair') or rulemod.canonical(action) != rulemod.canonical(expected):
             raise CancelError('CANCEL_ACTION_NOT_AUTHORIZED')
         sender = self.sender
-        if HOST != 'api.hyperliquid-testnet.xyz' or sender.TESTNET_HOST != HOST:
+        if HOST != 'api.hyperliquid.xyz' or sender.TESTNET_HOST != HOST:
             raise CancelError('TESTNET_ONLY')
         if not -1 <= sender.now_ms()-nonce <= 5000:
             raise CancelError('CANCEL_NONCE_EXPIRED_NO_SEND')
@@ -170,7 +170,7 @@ class Exchange:
         from hyperliquid.utils.signing import sign_l1_action
         expiry = nonce + 5000
         body = dict(action=action, nonce=nonce, expiresAfter=expiry,
-                    signature=sign_l1_action(wallet,action,None,nonce,expiry,False))
+                    signature=sign_l1_action(wallet,action,None,nonce,expiry,True))
         from .request_budget import BudgetError
         if self.budget is None:
             raise CancelError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')

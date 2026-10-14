@@ -27,7 +27,7 @@ def snapshot(bindings=None, at=1000):
             if entry:
                 fills.append(dict(fill_id='f'+order['order_id'],order_id=order['order_id'],
                                   quantity=order['quantity'],price='98',at_ms=900))
-    return dict(environment='testnet',account=ACCOUNT,account_role='long_account',symbol='HYPE',
+    return dict(environment='mainnet',account=ACCOUNT,account_role='long_account',symbol='HYPE',
         at_ms=at,history_complete=True,orders_complete=True,position_complete=True,
         position_quantity=str(len(bindings)),orders=orders,fills=fills)
 
@@ -174,7 +174,7 @@ class AllocationTests(unittest.TestCase):
 
     def test_malformed_and_nan_evidence_cannot_authorize(self):
         for field,value in (('position_quantity','NaN'),('position_quantity','Infinity'),('orders',None),
-                            ('account','invalid'),('at_ms',True),('environment','mainnet')):
+                            ('account','invalid'),('at_ms',True),('environment','testnet')):
             sample=snapshot();sample[field]=value
             self.assertEqual(allocations.assess([binding()],sample,now_ms=1000)['status'],'QUARANTINED')
 

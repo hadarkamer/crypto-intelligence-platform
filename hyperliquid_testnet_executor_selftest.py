@@ -62,7 +62,7 @@ class FakeExchange:
         self.status_code = 200
         self.too_large = False
     def connection(self, host, timeout):
-        if host != 'api.hyperliquid-testnet.xyz' or timeout != 4:
+        if host != 'api.hyperliquid.xyz' or timeout != 4:
             raise AssertionError('Only the fixed TESTNET destination is allowed')
         owner = self
         class Connection:
@@ -116,7 +116,7 @@ class FakeRequestBudget:
     """Offline HTTP fixtures still exercise weighted admission before transport."""
     def __init__(self):
         self.calls = []
-    def acquire(self, path, body, *, priority='background', host='api.hyperliquid-testnet.xyz'):
+    def acquire(self, path, body, *, priority='background', host='api.hyperliquid.xyz'):
         from hl_testnet_runtime.request_budget import Permit, request_weight
         weight = request_weight(path, body, host=host)
         self.calls.append((path, weight, priority))
@@ -237,7 +237,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.submit(enabled=False)['status'], 'DISABLED')
         self.assertFalse(self.server.calls); self.wallet.assert_not_called(); self.assertFalse(self.journal.exists())
     def test_truthy_strings_cannot_activate(self):
-        for enabled in ('true', 'testnet', 1, None):
+        for enabled in ('true', 'mainnet', 1, None):
             self.assertEqual(self.submit(enabled=enabled)['status'], 'DISABLED')
         self.assertFalse(self.server.calls)
     def test_success_requires_read_back_all_three(self):
@@ -319,7 +319,7 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(mod.TestnetError): self.submit(msg)
         self.wallet.assert_not_called(); self.assertFalse(self.server.calls)
     def test_changed_host_cannot_send(self):
-        with patch.object(mod, 'TESTNET_HOST', 'api.hyperliquid.xyz'):
+        with patch.object(mod, 'TESTNET_HOST', 'api.hyperliquid-testnet.xyz'):
             with self.assertRaisesRegex(mod.TestnetError, 'HOST_CHANGED'): self.submit()
         self.assertFalse(self.server.calls)
     def test_http_redirect_is_not_followed(self):

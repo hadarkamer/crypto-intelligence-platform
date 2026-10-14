@@ -218,7 +218,7 @@ class RoutingIntegrationTests(unittest.TestCase):
         fake.import_legacy_reviews.return_value = []
         env = {**config(), 'HL_TESTNET_CARDS_PHASE1':'record_only_v1',
             'RENDER_SERVICE_ID':'srv-dakptbh594qs7395460g',
-            'HL_TESTNET_RUNTIME_MODE':'cancel_monitor_testnet_v1',
+            'HL_TESTNET_RUNTIME_MODE':'cancel_monitor_mainnet_v1',
             'HL_TESTNET_JOURNAL_BACKEND':'staging_postgres_v1'}
         with patch.object(trade_cards_startup, 'review_routes', return_value={'order_requests_sent':0}) as read, \
              patch('hl_testnet_runtime.trade_card_store.CardStore', return_value=fake):

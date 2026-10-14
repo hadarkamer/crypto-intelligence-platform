@@ -33,7 +33,7 @@ class EntryReadReuseTests(unittest.TestCase):
         message['occurrence_id'] = contract.occurrence_id(message)
         message = contract.validate(message)
         record, _ = reduce_source(None, message, now=contract.iso_ms(self.exchange.t),
-            not_before=contract.iso_ms(self.state['not_before_ms']), domain='testnet')
+            not_before=contract.iso_ms(self.state['not_before_ms']), domain='mainnet')
         self.state['sources'][message['occurrence_id']] = record
         account = self.state['routes']['long_account' if side == 'LONG' else 'short_account']
         self.exchange.mark[runtime._lane(account, symbol)] = message['entry']
@@ -145,11 +145,11 @@ class EntryReadReuseTests(unittest.TestCase):
         legacy=maxpain_message(created_ms=T-300000)
         cid=legacy['occurrence_id']
         record,_=reduce_source(None,legacy,now=contract.iso_ms(T-300000),
-            not_before=contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+            not_before=contract.iso_ms(self.state['not_before_ms']),domain='mainnet')
         for stamp in [*range(T-240000,self.exchange.t,60000),self.exchange.t]:
             heartbeat=maxpain_message(created_ms=T-300000,as_of_ms=stamp,kind='HEARTBEAT')
             record,_=reduce_source(record,heartbeat,now=contract.iso_ms(stamp),
-                not_before=contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+                not_before=contract.iso_ms(self.state['not_before_ms']),domain='mainnet')
         self.state['sources'][cid]=record
         approved=self.candidate(symbol='SOL')
         account=self.state['routes']['long_account']
@@ -157,7 +157,7 @@ class EntryReadReuseTests(unittest.TestCase):
         paths=self.exchange.collect(self.state)['ranges'][cid]
         self.provider.prices=SimpleNamespace(source_range=lambda *args:paths['source'],
             mark_window=lambda *args:paths['testnet'])
-        release=dict(domain='testnet',release_id='a'*64,dispatch_enabled=True,
+        release=dict(domain='mainnet',release_id='a'*64,dispatch_enabled=True,
             protection_enabled=True,entries_enabled=True,routes=self.state['routes'],
             not_before_ms=self.state['not_before_ms'],entry_policy=CONTINUOUS_ENTRY,
             entry_expires_at_ms=None)

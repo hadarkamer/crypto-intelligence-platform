@@ -100,7 +100,7 @@ class U21IntakeTests(unittest.TestCase):
         source_at=timestamp(value()['source_at'])
         account='0x'+'1'*40
         class Store:
-            domain='testnet'
+            domain='mainnet'
             journal=object()
             def __init__(self): self.state=dict(originals={},pending=None,revision=0,bucket='a'*64)
             def create_bucket(self,account,symbol): return self.state
@@ -108,7 +108,7 @@ class U21IntakeTests(unittest.TestCase):
                 update(None,self.state)
                 return self.state
         class Venue:
-            domain='testnet'
+            domain='mainnet'
             at=int((source_at+timedelta(seconds=30)).timestamp()*1000)
             def now(self): return self.at
             def metadata(self): return {'universe':[{'name':'XRP','szDecimals':1}]}

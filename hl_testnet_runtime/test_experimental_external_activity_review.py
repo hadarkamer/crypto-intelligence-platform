@@ -250,12 +250,12 @@ class ReviewTests(unittest.TestCase):
         from .experimental_plan_store import PlanStoreError, reduce_source
         original=maxpain_alert(approved_ms=T)
         now=contract.iso_ms(T+10000);not_before=contract.iso_ms(T-60000)
-        record,_=reduce_source(None,original,now=now,not_before=not_before,domain='testnet')
+        record,_=reduce_source(None,original,now=now,not_before=not_before,domain='mainnet')
         reapproved=maxpain_alert(approved_ms=T+60000)
         self.assertEqual(original['occurrence_id'],reapproved['occurrence_id'])
         with self.assertRaisesRegex(PlanStoreError,'IMMUTABLE_PLAN_CHANGED'):
             reduce_source(record,reapproved,now=contract.iso_ms(T+70000),
-                not_before=not_before,domain='testnet')
+                not_before=not_before,domain='mainnet')
 
 
 class IntegratedReviewTests(unittest.TestCase):

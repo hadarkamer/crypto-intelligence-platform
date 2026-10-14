@@ -20,8 +20,8 @@ from . import experimental_execution_dispatch as boundary
 from . import experimental_live_release as releases
 from . import filled_quantity_dispatch as wire, two_account_execution as roles
 
-HOST = 'api.hyperliquid-testnet.xyz'
-APPROVAL = 'approved_testnet_v1'
+HOST = 'api.hyperliquid.xyz'
+APPROVAL = 'approved_mainnet_v1'
 
 
 class LiveDispatchError(wire.DispatchError):
@@ -58,7 +58,7 @@ def _signature(value):
 
 
 class LiveDispatchPort:
-    domain = 'testnet'
+    domain = 'mainnet'
     software_only = False
 
     def __init__(self, env, *, context_loader, request_loader, release_loader, claim_transport,
@@ -91,7 +91,7 @@ class LiveDispatchPort:
         try:
             value = deepcopy(self.release_loader())
             expected = {role: roles.route_for(self.env, role)['account'] for role in roles.ROLES}
-            valid = (isinstance(value, dict) and value.get('domain') == 'testnet'
+            valid = (isinstance(value, dict) and value.get('domain') == 'mainnet'
                 and value.get('dispatch_enabled') is True and value.get('protection_enabled') is True
                 and type(value.get('entries_enabled')) is bool
                 and value.get('routes') == expected
@@ -121,7 +121,7 @@ class LiveDispatchPort:
         return admission
 
     def _durable(self, request):
-        if request.get('domain') != 'testnet':
+        if request.get('domain') != 'mainnet':
             raise LiveDispatchError('DURABLE_TESTNET_REQUEST_REQUIRED')
         wire.DefinitelyUnsent.identity(request)
         try:
@@ -190,7 +190,7 @@ class LiveDispatchPort:
                 from hyperliquid.utils.signing import sign_l1_action
                 action = deepcopy(first['action'])
                 expires = value['nonce'] + 15000
-                signature = _signature(sign_l1_action(wallet, action, None, value['nonce'], expires, False))
+                signature = _signature(sign_l1_action(wallet, action, None, value['nonce'], expires, True))
             except Exception:
                 raise LiveDispatchError('ROLE_LOCAL_SIGNING_FAILED') from None
             if action != first['action']:

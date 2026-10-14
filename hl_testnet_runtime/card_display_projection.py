@@ -9,7 +9,7 @@ installed by this module; those must be verified before connecting the UI.
 from copy import deepcopy
 from . import card_lifecycle as life
 
-VERSION = 'testnet-card-display-only-v1'
+VERSION = 'mainnet-card-display-only-v1'
 FIELDS = ('card_id', 'role', 'state', 'entry_quantity', 'exit_quantity',
           'remaining_quantity', 'fees_by_token', 'gross_pnl_usdc',
           'net_before_funding_usdc', 'funding_usdc', 'final_net_usdc',
@@ -27,7 +27,7 @@ def project(bindings, snapshot, *, revision, now_ms):
         value = {name: deepcopy(view[name]) for name in FIELDS}
         value.update(symbol=b['symbol'], direction=b['side'], prices=deepcopy(b['prices']))
         cards.append(value)
-    body = dict(version=VERSION, environment='testnet', read_only=True,
+    body = dict(version=VERSION, environment='mainnet', read_only=True,
         revision=revision, observed_at_ms=snapshot['at_ms'],
         bucket_issues=deepcopy(report['bucket_issues']), cards=cards)
     # Independent from execution request IDs, addresses and client references.

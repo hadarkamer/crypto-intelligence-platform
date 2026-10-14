@@ -309,7 +309,7 @@ class ColdLegacyAcceptanceTests(unittest.TestCase):
         self.msg = alert(symbol='SOL', approved_ms=T, cycle='cold-doge-fresh-sol')
         self.fx.state['sources'][self.msg['occurrence_id']] = reduce_source(None, self.msg,
             now=isolated.contract.iso_ms(self.fx.exchange.t),
-            not_before=isolated.contract.iso_ms(self.fx.state['not_before_ms']), domain='testnet')[0]
+            not_before=isolated.contract.iso_ms(self.fx.state['not_before_ms']), domain='mainnet')[0]
         self.fx.exchange.mark[isolated._lane(owner['account'], 'SOL')] = self.msg['entry']
 
     def test_final_doge_gap_does_not_read_old_history_or_block_sol(self):

@@ -50,7 +50,7 @@ def review_routes(routes, *, client=None):
     different balance system merely because an account address was configured.
     Failure of this observation must not disable the existing order monitor.
     """
-    report = dict(version='public-account-assignment-v1', environment='testnet',
+    report = dict(version='public-account-assignment-v1', environment='mainnet',
         checked_at_utc=datetime.now(timezone.utc).isoformat(),
         order_requests_sent=0, signing_tested=False, ownership_verified=False,
         entry_sending_enabled=False, balance_checked=False, accounts={})

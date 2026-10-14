@@ -39,7 +39,7 @@ class Connection:
             def fetchone(self): return self.row
         if query == 'SELECT current_database()': return Cursor(('hl_journal_ci',))
         if query.startswith('SELECT pg_advisory_xact_lock'): return Cursor((None,))
-        if query.startswith('SELECT version,domain FROM '+state.PG_SCHEMA): return Cursor((state.VERSION,'testnet'))
+        if query.startswith('SELECT version,domain FROM '+state.PG_SCHEMA): return Cursor((state.VERSION,'mainnet'))
         if query.startswith('SELECT version,domain FROM '+LEGACY_SCHEMA):
             from .filled_dispatch_store import VERSION
             return Cursor((VERSION,'software'))
@@ -61,22 +61,36 @@ class StateUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError,'TESTNET_STATE_INTEGRITY_FAILURE'):
             state.checked(value,life.digest(value))
 
+    def test_demo_state_and_schema_cannot_be_reused_for_mainnet(self):
+        from .postgres_journal import SCHEMA as journal_schema
+        self.assertEqual(state.PG_SCHEMA, 'hl_experimental_mainnet_worker_v1')
+        self.assertEqual(journal_schema, 'hl_mainnet_execution_v1')
+        self.assertEqual(LEGACY_SCHEMA, 'hl_mainnet_filled_dispatch_v1')
+        value=state.initial(LIVE_ROUTES,T-60000)
+        for changes in ({'domain':'testnet'},
+                        {'version':'experimental-testnet-execution-state-v1'}):
+            old={**value, **changes}; before=deepcopy(old)
+            with self.subTest(changes=changes),self.assertRaisesRegex(StateError,'INTEGRITY'):
+                state.checked(old,life.digest(old))
+            self.assertEqual(old,before)
+
     def test_r2732_software_and_testnet_views_cannot_cross_domains(self):
         from . import r2732_entry
         software=r2732_entry.initial(LIVE_ROUTES,not_before_ms=T)
         live=r2732_entry.initial_testnet(LIVE_ROUTES,not_before_ms=T)
         self.assertEqual(r2732_entry._copy(software),software)
-        self.assertEqual(r2732_entry._copy(live,domain='testnet'),live)
+        self.assertEqual(r2732_entry._copy(live,domain='mainnet'),live)
         with self.assertRaisesRegex(r2732_entry.EntryError,'STATE_INVALID'):
             r2732_entry._copy(live)
         with self.assertRaisesRegex(r2732_entry.EntryError,'STATE_INVALID'):
-            r2732_entry._copy(software,domain='testnet')
+            r2732_entry._copy(software,domain='mainnet')
 
     def test_nested_software_request_or_source_rejected_even_with_matching_checksum(self):
-        for key in ('sources','requests'):
-            value=state.initial(LIVE_ROUTES,T-60000);value[key]['x']={'domain':'software'}
-            with self.subTest(key=key),self.assertRaisesRegex(StateError,'INTEGRITY'):
-                state.checked(value,life.digest(value))
+        for domain in ('software','testnet'):
+            for key in ('sources','requests'):
+                value=state.initial(LIVE_ROUTES,T-60000);value[key]['x']={'domain':domain}
+                with self.subTest(key=key,domain=domain),self.assertRaisesRegex(StateError,'INTEGRITY'):
+                    state.checked(value,life.digest(value))
 
     def test_constructor_requires_explicit_ci_method(self):
         with self.assertRaisesRegex(StateError,'EXPLICIT_TESTNET_POSTGRES_JOURNAL_REQUIRED'):
@@ -145,7 +159,7 @@ class StatePostgresTests(unittest.TestCase):
     def test_testnet_domain_persists_and_reopens_without_software_translation(self):
         self.store.mutate(lambda value:value['events'].append(dict(kind='CI_REOPEN')))
         other=state.TestnetExecutionState.for_ci(PostgresJournal.for_ci(CI))
-        self.assertEqual(other.load()['domain'],'testnet')
+        self.assertEqual(other.load()['domain'],'mainnet')
         self.assertEqual(other.load()['events'],[dict(kind='CI_REOPEN')])
 
     def test_reinitialization_cannot_change_agent_route_or_activation(self):

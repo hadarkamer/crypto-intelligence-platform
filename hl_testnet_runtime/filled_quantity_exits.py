@@ -43,7 +43,7 @@ def prepare_entry(card, metadata, account, routes, *, _historical_risk_usd=None)
         raise life.LifecycleError('FILLED_ENTRY_QUANTITY_MISMATCH')
     entry = deepcopy(native['orders'][0])
     entry['c'] = '0x'+life.digest([POLICY,account,card['card_id'],'ENTRY'])[:32]
-    return dict(version=VERSION,policy=POLICY,environment='testnet',card_id=card['card_id'],
+    return dict(version=VERSION,policy=POLICY,environment='mainnet',card_id=card['card_id'],
         card_digest=cards.checksum(card),account=account,role=card['account_role'],
         symbol=source['symbol'],side=source['side'],planned_quantity=entry['s'],
         prices={key:source[key] for key in ('entry','stop','take_profit')},

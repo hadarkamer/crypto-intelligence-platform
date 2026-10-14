@@ -20,7 +20,7 @@ from . import passive_timing
 from .card_sync_evidence import normalize_fill
 
 
-TESTNET_WS = 'wss://api.hyperliquid-testnet.xyz/ws'
+TESTNET_WS = 'wss://api.hyperliquid.xyz/ws'
 CHANNELS = frozenset(('userFills', 'orderUpdates'))
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_BATCH_ROWS = 10000

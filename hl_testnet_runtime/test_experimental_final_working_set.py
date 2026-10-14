@@ -20,9 +20,9 @@ class FinalWorkingSetTests(unittest.TestCase):
     def final_trade(self):
         fixture=integration.DispatchIntegrationTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
         fixture.test_worker_entry_partial_fill_stops_take_cleanup_uses_same_wire_boundary()
-        value=fixture.store.load();value['domain']='testnet'
-        for row in value['requests'].values():row['domain']='testnet'
-        for row in value['sources'].values():row['domain']='testnet'
+        value=fixture.store.load();value['domain']='mainnet'
+        for row in value['requests'].values():row['domain']='mainnet'
+        for row in value['sources'].values():row['domain']='mainnet'
         self.state.update(deepcopy(value))
         cid=fixture.msg['occurrence_id'];trade=self.state['trades'][cid]
         lane=runtime._lane(trade['account'],trade['symbol'])
@@ -34,7 +34,7 @@ class FinalWorkingSetTests(unittest.TestCase):
     def candidate_same_lane(self, trade):
         msg=r2732_message(entry=2.3,decision_ms=(self.exchange.t//60000-1)*60000)
         row,_=reduce_source(None,msg,now=contract.iso_ms(self.exchange.t),
-            not_before=contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+            not_before=contract.iso_ms(self.state['not_before_ms']),domain='mainnet')
         self.state['sources'][msg['occurrence_id']]=row
         self.exchange.mark[runtime._lane(trade['account'],trade['symbol'])]=msg['entry']
         cid=msg['occurrence_id']

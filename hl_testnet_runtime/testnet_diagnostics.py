@@ -14,16 +14,16 @@ import time
 
 from .postgres_journal import PostgresJournal, SCHEMA, VERSION as JOURNAL_VERSION
 
-VERSION = 'testnet-readonly-diagnostics-v1'
+VERSION = 'mainnet-readonly-diagnostics-v1'
 SERVICE = 'srv-dakptbh594qs7395460g'
 MAX_BYTES = 262144
 MAX_RECENT = 20
 MAX_EVENTS = 40
-CARD_TABLE = 'hl_testnet_cards_v1.cards'
-RECEIPTS = 'hl_testnet_cards_v1.delivery_receipts'
-BUCKETS = 'hl_testnet_filled_dispatch_v1.buckets'
-REQUESTS = 'hl_testnet_filled_dispatch_v1.requests'
-EVENTS = 'hl_testnet_filled_dispatch_v1.events'
+CARD_TABLE = 'hl_mainnet_cards_v1.cards'
+RECEIPTS = 'hl_mainnet_cards_v1.delivery_receipts'
+BUCKETS = 'hl_mainnet_filled_dispatch_v1.buckets'
+REQUESTS = 'hl_mainnet_filled_dispatch_v1.requests'
+EVENTS = 'hl_mainnet_filled_dispatch_v1.events'
 TABLES = (SCHEMA + '.metadata', SCHEMA + '.prepared', SCHEMA + '.attempts',
           CARD_TABLE, RECEIPTS, BUCKETS, REQUESTS, EVENTS,
           SCHEMA + '.request_budget_policy', SCHEMA + '.request_budget_tickets')
@@ -31,9 +31,9 @@ HEX = re.compile(r'[0-9a-f]{64}\Z')
 TOKEN = re.compile(r'[A-Za-z0-9_-]{32,256}\Z')
 PRIVATE_TOKEN_NAMES = ('HL_TESTNET_CARDS_INTAKE_SECRET',
                        'HL_TESTNET_REPORT_API_TOKEN', 'HL_TESTNET_APP_SIGNING_KEY')
-MODES = ('read_only', 'single_testnet_attempt_v1', 'filled_card_controlled_v1',
-         'long_stream_testnet_v1', 'cancel_monitor_testnet_v1',
-         'cancel_rehearsal_testnet_v1')
+MODES = ('read_only', 'single_mainnet_attempt_v1', 'filled_card_controlled_v1',
+         'long_stream_mainnet_v1', 'cancel_monitor_mainnet_v1',
+         'cancel_rehearsal_mainnet_v1')
 ENUM_CONFIG = {
     'HL_TESTNET_RUNTIME_MODE': MODES,
     'HL_TESTNET_JOURNAL_BACKEND': ('staging_postgres_v1',),
@@ -47,8 +47,8 @@ ENUM_CONFIG = {
     'HL_TESTNET_FILLED_DISPATCH': ('approved_long_stream_v1', 'approved_single_card_v1'),
     'HL_TESTNET_FILLED_AFTER_EXIT_POLICY': ('cancel_remainder_after_exit_v1',),
     'HL_TESTNET_TWO_ACCOUNT_EXECUTION': ('disabled',),
-    'HL_TESTNET_EMERGENCY_CLOSE': ('approved_testnet_v1',),
-    'HL_TESTNET_EMERGENCY_RELEASE': ('continuous_testnet_v1',),
+    'HL_TESTNET_EMERGENCY_CLOSE': ('approved_mainnet_v1',),
+    'HL_TESTNET_EMERGENCY_RELEASE': ('continuous_mainnet_v1',),
     'HL_TESTNET_LONG_ACCOUNT_SOURCE': ('existing_single_account_v1',),
     'HL_TESTNET_CONNECTION_REVIEW': ('two_account_no_orders_v1',),
     'HL_TESTNET_CARD_SYNC': ('registered_readonly_v1',),
@@ -314,7 +314,7 @@ def load_diagnostics(env=None):
     except ValueError:
         roles, route_summary = {}, {'status':'ACCOUNT_CONFIGURATION_INVALID'}
     now_ms = time.time_ns()//1000000
-    result = dict(version=VERSION,environment='testnet',generated_at_ms=now_ms,
+    result = dict(version=VERSION,environment='mainnet',generated_at_ms=now_ms,
         config=_config(env),account_roles=route_summary,
         order_requests_sent=0,signing_tested=False,exchange_calls=0,
         snapshot_semantics='persisted_history_only_not_current_exchange_authority')

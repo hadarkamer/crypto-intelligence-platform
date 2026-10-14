@@ -32,7 +32,7 @@ ROUTES2={k:{**v,'agent':AGENT} for k,v in ROUTES.items()}
 
 def state_from_case(**kw):
     bs,s,c,originals=case(**kw)
-    return dict(bucket=life.digest(['testnet',s['account'],s['symbol']]),account=s['account'],symbol=s['symbol'],
+    return dict(bucket=life.digest(['mainnet',s['account'],s['symbol']]),account=s['account'],symbol=s['symbol'],
         revision=1,bindings=bs,originals=originals,pending=None,
         evidence=dict(bindings=bs,snapshot=s))
 
@@ -47,7 +47,7 @@ class Venue:
     def metadata(self): return META
     def sample(self,account,symbol): return dict(mark_price='10',at_ms=self.t)
     def empty_snapshot(self,account,symbol):
-        return dict(environment='testnet',account=account,symbol=symbol,at_ms=self.t,
+        return dict(environment='mainnet',account=account,symbol=symbol,at_ms=self.t,
             history_complete=True,orders_complete=True,position_quantity='0',fills=[],open_orders=[],terminal_orders=[])
     def authorize(self,state,proposal,policy): pass
     def send(self,request):
@@ -212,7 +212,7 @@ class DispatchPureTests(NoExternal):
         self.assertEqual(proposal['operation'],'ENTRY')
 
     def test_exact_short_trial_rejects_any_other_entry_at_final_gate(self):
-        env=dict(HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+        env=dict(HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1',
                  HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
                  HL_TESTNET_LONG_STREAM='approved_alerts_v1',
                  HL_TESTNET_SHORT_STREAM='approved_alerts_v1',
@@ -238,8 +238,8 @@ class DispatchPureTests(NoExternal):
         state=dict(bindings=[],originals={cid:dict(card=card)},
                    evidence=dict(snapshot=dict()))
         proposal=dict(card_id=cid,operation='ENTRY',role='short_account',account=B,observed_at_ms=T)
-        venue=m.TestnetVenue({'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'})
-        store=type('Store',(),{'domain':'testnet',
+        venue=m.TestnetVenue({'HL_TESTNET_RUNTIME_MODE':'long_stream_mainnet_v1'})
+        store=type('Store',(),{'domain':'mainnet',
             'for_account':lambda self,account:[]})()
         m.Controller(store,venue,ROUTES2)
         budget=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',
@@ -492,7 +492,7 @@ class DispatchPureTests(NoExternal):
         source=inspect.getsource(m)
         self.assertNotIn('scheduleCancel',source);self.assertNotIn('mainnet_enabled=True',source)
     def test_real_signature_source_explicitly_uses_testnet_domain(self):
-        self.assertIn("sign_l1_action(wallet,action,None,request['nonce'],expires,False)",inspect.getsource(m.TestnetVenue.send))
+        self.assertIn("sign_l1_action(wallet,action,None,request['nonce'],expires,True)",inspect.getsource(m.TestnetVenue.send))
     def test_two_same_symbol_cards_remain_separate(self):
         one=state_from_case();two=state_from_case(n=2,q='100',stop='100',take='100')
         one['bindings']+=two['bindings'];one['originals'].update(two['originals'])
@@ -946,7 +946,7 @@ class DispatchDatabaseTests(NoExternal):
     def setUp(self):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=Venue()
@@ -1413,7 +1413,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
     def setUp(self):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();cards=CardStore(self.j);cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize()
@@ -1485,7 +1485,7 @@ class EntryPreflightBoundaryTests(NoExternal):
     def setup_case(self,side='LONG',expiry_seconds=600):
         b,record=original(side=side,expiry_seconds=expiry_seconds)
         snapshot=Venue().empty_snapshot(b['account'],'DOGE')
-        state=dict(bucket=life.digest(['testnet',b['account'],'DOGE']),revision=1,
+        state=dict(bucket=life.digest(['mainnet',b['account'],'DOGE']),revision=1,
             bindings=[],originals={b['card_id']:record},pending=None,
             account=b['account'],symbol='DOGE',evidence=dict(bindings=[],snapshot=snapshot))
         self.clock=T
@@ -1529,7 +1529,7 @@ class EntryPreflightBoundaryTests(NoExternal):
         def metadata():
             barrier.wait(timeout=2)
             return META
-        store=Mock(domain='testnet');store.load.return_value=state
+        store=Mock(domain='mainnet');store.load.return_value=state
         controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
         with patch.object(controller,'refresh',return_value=state), \
                 patch.object(venue,'sample',side_effect=sample), \
@@ -1543,7 +1543,7 @@ class EntryPreflightBoundaryTests(NoExternal):
     def test_latched_emergency_yields_before_every_public_preparation_read(self):
         state,venue,_=self.setup_case()
         state['emergency']=dict(phase='ACTIVE')
-        store=Mock(domain='testnet');store.load.return_value=state
+        store=Mock(domain='mainnet');store.load.return_value=state
         controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
         with patch.object(controller,'refresh',side_effect=AssertionError('NO_PUBLIC_REFRESH')) as refresh, \
                 patch.object(venue,'sample',side_effect=AssertionError('NO_PUBLIC_SAMPLE')) as sample, \
@@ -1574,7 +1574,7 @@ class EntryPreflightBoundaryTests(NoExternal):
                 {('frontendOpenOrders',A),('clearinghouseState',A)})
     def stream_authorization_case(self):
         state,venue,proposal=self.setup_case()
-        venue.env['HL_TESTNET_RUNTIME_MODE']='long_stream_testnet_v1'
+        venue.env['HL_TESTNET_RUNTIME_MODE']='long_stream_mainnet_v1'
         card=state['originals'][proposal['card_id']]['card']
         card.update(record_kind='received_alert',account_role=proposal['role'])
         venue.store=Mock()
@@ -1647,7 +1647,7 @@ class EntryPreflightBoundaryTests(NoExternal):
             reader.assert_not_called();budget.assert_not_called();headroom.assert_not_called()
     def test_slow_budget_blocks_before_controller_reservation_or_send(self):
         state,venue,proposal=self.setup_case()
-        store=Mock(domain='testnet')
+        store=Mock(domain='mainnet')
         store.load.return_value=state
         controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
         def slow(*args):
@@ -1710,7 +1710,7 @@ class EntryInfoAdmissionTests(NoExternal):
     def test_whole_trial_refusal_precedes_every_read_and_durable_attempt(self):
         from .request_budget import BudgetError
         state,venue,proposal=self.trial_case()
-        venue.store.domain='testnet'
+        venue.store.domain='mainnet'
         controller=m.Controller(venue.store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
         venue.store.load.return_value=state
         with patch.object(venue,'_fund_info_plan',side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')) as fund, \

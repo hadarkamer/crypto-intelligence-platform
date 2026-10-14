@@ -30,7 +30,7 @@ def final_state(*,side='LONG',n=1,zero=False):
     if zero:
         snap['fills']=[]
         snap['terminal_orders']=[terminal(binding,leg,'0') for leg in life.LEGS]
-    return dict(version='fixture',domain='software',bucket=life.digest(['testnet',binding['account'],'DOGE']),
+    return dict(version='fixture',domain='software',bucket=life.digest(['mainnet',binding['account'],'DOGE']),
         account=binding['account'],symbol='DOGE',revision=1,originals={binding['card_id']:record},
         bindings=[binding],evidence=dict(bindings=[binding],snapshot=snap),pending=None,last_request=None)
 
@@ -211,7 +211,7 @@ class RecoveryPureTests(NoExternal):
 
     def test_canceled_only_bucket_uses_old_owned_same_account_other_symbol_anchor(self):
         target=final_state(zero=True);source=final_state(n=2)
-        source['symbol']='ETH';source['bucket']=life.digest(['testnet',source['account'],'ETH'])
+        source['symbol']='ETH';source['bucket']=life.digest(['mainnet',source['account'],'ETH'])
         # Prepare a real immutable ETH original rather than rewriting a binding.
         from . import trade_cards,filled_quantity_exits
         source_card=deepcopy(source['originals'][source['bindings'][0]['card_id']]['card'])
@@ -328,7 +328,7 @@ class RecoveryPostgresTests(NoExternal):
     def setUp(self):
         super().setUp();self.journal=PostgresJournal.for_ci(CI)
         with self.journal._transaction() as conn:
-            for schema in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_execution_v1'):
+            for schema in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {schema} CASCADE')
         self.journal.bootstrap();self.store=DispatchStore(self.journal);self.store.initialize()
         self.venue=Venue();self.venue.t=T+3*evidence.DAY_MS

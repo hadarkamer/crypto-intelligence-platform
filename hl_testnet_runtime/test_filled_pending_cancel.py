@@ -115,7 +115,7 @@ class HalfThresholdPureTests(fx.NoExternal):
 
     def test_final_adapter_checks_ten_second_bound_without_reading_key(self):
         p=self.select(fx.state_from_case(q='0'),'10.08')
-        req=dict(proposal=p,domain='testnet',phase='OUTCOME_UNKNOWN',attempts=1,
+        req=dict(proposal=p,domain='mainnet',phase='OUTCOME_UNKNOWN',attempts=1,
             prepared_at_ms=T+9000,attempt_at_ms=T+9001,nonce=T+9001)
         venue=m.TestnetVenue({})
         with patch.object(venue,'now',return_value=T+10001),patch.object(venue,'_gate',return_value=fx.ROUTES2['long_account']),\
@@ -135,7 +135,7 @@ class HalfThresholdDatabaseTests(fx.NoExternal):
     def setUp(self):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=fx.Venue();self.mark='10'

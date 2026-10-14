@@ -42,7 +42,7 @@ def fixture():
     plan=dict(symbol='XRP',side='SHORT',entry='2',stop='2.01',take_profit='1.84')
     context=dict(source=source,current_source=dict(source=source,plan_digest=contract.plan_digest(source),entry_permission='WAITING',cancellation=None),env=deepcopy(ENV),agent=D,host=boundary.HOST,metadata=meta,
         safety=dict(account=C,role='short_account',at_ms=now,entry_enabled=True,emergency_healthy=True,feed_reconciled=True,entry_circuit_clear=True,supervisor_at_ms=now,not_before_ms=now-60001),
-        buckets=[],open_orders=[],positions={'assetPositions':[]},market=dict(environment='testnet',symbol='XRP',at_ms=now,mark_price='2'),
+        buckets=[],open_orders=[],positions={'assetPositions':[]},market=dict(environment='mainnet',symbol='XRP',at_ms=now,mark_price='2'),
         entry_account=dict(account=C,agent=D,at_ms=now,action_headroom=5))
     return request,context,now
 
@@ -71,7 +71,7 @@ def approved_fixture(*, side='LONG', entry='93.544', mark='93.544'):
     plan={k:levels[k] for k in ('symbol','side','entry','stop','take_profit')}
     context.update(source=source,current_source=dict(source=source,plan_digest=approved.plan_digest(source),
         entry_permission='WAITING',cancellation=None),metadata=meta,agent=route['agent'],
-        market=dict(environment='testnet',symbol='HYPE',at_ms=now,mark_price=mark),
+        market=dict(environment='mainnet',symbol='HYPE',at_ms=now,mark_price=mark),
         entry_account=dict(account=route['account'],agent=route['agent'],at_ms=now,action_headroom=5))
     context['safety'].update(account=route['account'],role=role,at_ms=now,
         supervisor_at_ms=now,not_before_ms=approved.moment_ms(source['created_at'])-1)
@@ -113,9 +113,9 @@ class DispatchBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(boundary.BoundaryError,'FROZEN_PROSPECTIVE_SOURCE_CHANGED'): self.send()
         self.assertEqual(self.signer.calls,[])
     def test_actual_mark_must_come_from_testnet_and_within_exits(self):
-        self.context['market']['environment']='mainnet'
+        self.context['market']['environment']='testnet'
         with self.assertRaisesRegex(boundary.BoundaryError,'ACTUAL_TESTNET_MARK_REQUIRED'): self.send()
-        self.context['market']['environment']='testnet'; self.context['market']['mark_price']='2.02'
+        self.context['market']['environment']='mainnet'; self.context['market']['mark_price']='2.02'
         with self.assertRaisesRegex(boundary.BoundaryError,'OUTSIDE_FROZEN_EXITS'): self.send()
     def test_unknown_account_order_and_position_close_entry_lane(self):
         self.context['open_orders']=[dict(coin='XRP',oid=44)]
@@ -129,7 +129,7 @@ class DispatchBoundaryTests(unittest.TestCase):
     def test_wrong_signer_and_real_transport_fail_before_any_signing(self):
         self.signer.address=C
         with self.assertRaisesRegex(boundary.BoundaryError,'ROLE_SIGNER_MISMATCH'): self.send()
-        self.signer.address=D; self.transport.domain='testnet'
+        self.signer.address=D; self.transport.domain='mainnet'
         with self.assertRaisesRegex(boundary.BoundaryError,'ISOLATED_SIGNER_AND_TRANSPORT_REQUIRED'): self.send()
         self.assertEqual(self.signer.calls,[])
     def test_entry_account_must_bind_signer_and_preserve_exit_headroom(self):

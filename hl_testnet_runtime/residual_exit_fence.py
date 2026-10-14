@@ -32,7 +32,7 @@ def _read(state, now_ms):
     bs = state['bindings']; snap = state['evidence']['snapshot']
     account, symbol = life.validate_snapshot(snap)
     if (state['evidence']['bindings'] != bs or state['account'] != account
-            or state['symbol'] != symbol or state['bucket'] != life.digest(['testnet', account, symbol])):
+            or state['symbol'] != symbol or state['bucket'] != life.digest(['mainnet', account, symbol])):
         raise FenceError('RESIDUAL_BUCKET_IDENTITY_MISMATCH')
     life.moment(now_ms)
     if not snap['history_complete'] or not snap['orders_complete'] or not 0 <= now_ms-snap['at_ms'] <= 15000:

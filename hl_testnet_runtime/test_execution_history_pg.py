@@ -59,7 +59,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.oracle_requests = {}
         self.replayed_entries = []
         self.dispatch_errors = []
-        self.release = dict(domain='testnet', release_id='a' * 64,
+        self.release = dict(domain='mainnet', release_id='a' * 64,
             dispatch_enabled=True, protection_enabled=True, entries_enabled=True,
             entry_policy=releases.CONTINUOUS_ENTRY, entry_expires_at_ms=None,
             not_before_ms=BASE - 60000,
@@ -83,7 +83,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
             public_reader=self.raw, lookup_reader=self.raw.lookup,
             safety_provider=SyntheticSafety(self.release))
         self.port = object.__new__(LiveDispatchPort)
-        self.port.domain = 'testnet'
+        self.port.domain = 'mainnet'
         self.port.now = self.oracle.now
         self.port.reserve_transport = lambda proposal: wire.TransportAdmission(
             proposal, core._Permit(self.oracle.now, self.oracle.now()))
@@ -155,7 +155,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         value, _ = self.close_first()
         cid = value['occurrence_id']
         expected = self.worker.trade_card(cid)['card']
-        self.assertEqual(expected['domain'], 'testnet')
+        self.assertEqual(expected['domain'], 'mainnet')
         self.assertEqual(self.worker.report()['cards'], [expected])
         self.compact(); self.reconnect()
         self.assertEqual(self.worker.trade_card(cid)['card'], expected)
@@ -178,12 +178,12 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertEqual(self.store.load()['archived_request_count'], count)
         self.reconnect()
         bundle = self.store.archive_record(cid)
-        self.assertEqual(bundle['domain'], 'testnet')
-        self.assertEqual(bundle['source']['domain'], 'testnet')
-        self.assertEqual({row['domain'] for row in bundle['requests'].values()}, {'testnet'})
+        self.assertEqual(bundle['domain'], 'mainnet')
+        self.assertEqual(bundle['source']['domain'], 'mainnet')
+        self.assertEqual({row['domain'] for row in bundle['requests'].values()}, {'mainnet'})
         self.assertEqual(bundle['requests'], before['requests'])
         self.assertEqual(bundle['trade'], before['trades'][cid])
-        self.assertEqual(self.worker.history_report()['domain'], 'testnet')
+        self.assertEqual(self.worker.history_report()['domain'], 'mainnet')
         self.assertEqual(self.worker.history_report()['trades'][0]['status'], 'CLOSED')
         self.assertNotIn(cid, self.store.load()['trades'])
 
@@ -228,7 +228,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertNotIn(cid, hot['trades'])
         self.assertEqual(hot['history']['archived_count'], 1)
         self.assertEqual(hot['archived_request_count'], len(before['requests']))
-        self.assertEqual(cold['current_source']['domain'], 'testnet')
+        self.assertEqual(cold['current_source']['domain'], 'mainnet')
         self.assertEqual(cold['current_source']['entry_permission'], 'RETIRED')
         self.assertEqual(cold['current_source']['cancellation'], cancel)
         prior_count = len(self.oracle.requests)
@@ -267,7 +267,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertTrue(self.store.load()['blocked_lanes'])
         self.assertIn('ARCHIVED_TERMINAL_FILL_CHANGED',
                       self.provider._last['context']['blocked_lanes'].values())
-        self.assertEqual(self.store.archive_record(first['occurrence_id'])['domain'], 'testnet')
+        self.assertEqual(self.store.archive_record(first['occurrence_id'])['domain'], 'mainnet')
         # The immutable original is retained. A restored consistent observation
         # can reconcile the lane again and admit unrelated ETH normally.
         old_fill['price'] = original_price
@@ -336,7 +336,7 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
         self.store, self.memory = store, memory
         self.oracle = CurrentOnlyExchange(BASE + 1000)
         self.oracle_requests, self.replayed_entries, self.dispatch_errors = {}, [], []
-        self.release = dict(domain='testnet', release_id='a' * 64,
+        self.release = dict(domain='mainnet', release_id='a' * 64,
             dispatch_enabled=True, protection_enabled=True, entries_enabled=True,
             entry_policy=releases.CONTINUOUS_ENTRY, entry_expires_at_ms=None,
             not_before_ms=BASE - 60000,
@@ -345,7 +345,7 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
 
     def test_real_provider_closure_waits_for_cancel_settlement_and_final_snapshot(self):
         value, state = self.close_first()
-        self.assertEqual(state['domain'], 'testnet')
+        self.assertEqual(state['domain'], 'mainnet')
         self.assertEqual(state['trades'][value['occurrence_id']]['phase'], 'CLOSED')
         self.assertEqual(len(state['requests']), 4)
         self.assertEqual(len(self.replayed_entries), 1)

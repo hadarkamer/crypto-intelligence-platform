@@ -64,7 +64,7 @@ class ResidualPureTests(NoExternal):
     def unsent_entry_case(self):
         binding, record = original(7, expiry_seconds=30)
         account = binding['account']
-        state = dict(bucket=life.digest(['testnet',account,'DOGE']), account=account,
+        state = dict(bucket=life.digest(['mainnet',account,'DOGE']), account=account,
             symbol='DOGE',revision=2,bindings=[],originals={binding['card_id']:record},
             evidence=dict(bindings=[],snapshot=Venue().empty_snapshot(account,'DOGE')),
             pending=None)
@@ -255,7 +255,7 @@ class ResidualDatabaseTests(NoExternal):
     def setUp(self):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=Venue()

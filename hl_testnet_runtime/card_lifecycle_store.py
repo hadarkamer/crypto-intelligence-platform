@@ -6,7 +6,7 @@ execution queue. Source cards and the legacy order journal are never overwritten
 from . import card_lifecycle as life
 from .postgres_journal import JournalError
 
-SCHEMA = 'hl_testnet_card_lifecycle_v1'
+SCHEMA = 'hl_mainnet_card_lifecycle_v1'
 
 
 class LifecycleStorageError(JournalError, life.LifecycleError):
@@ -74,7 +74,7 @@ class LifecycleStore:
 
     @staticmethod
     def bucket(account, symbol):
-        return life.digest(['testnet', life.address(account), life.ident(symbol, r'[A-Z][A-Z0-9]{0,19}')])
+        return life.digest(['mainnet', life.address(account), life.ident(symbol, r'[A-Z][A-Z0-9]{0,19}')])
 
     @staticmethod
     def verify(evidence, checksum):

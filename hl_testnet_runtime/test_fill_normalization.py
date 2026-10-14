@@ -34,7 +34,7 @@ class FillNormalizationTests(unittest.TestCase):
         self.assertEqual(normalize(websocket), expected)
         self.assertEqual(evidence.merge_fills([], [rest], ACCOUNT, 'SOL', AT-1000, AT+1000),
                          [expected])
-        snapshot = dict(environment='testnet', account=ACCOUNT, symbol='SOL', at_ms=AT,
+        snapshot = dict(environment='mainnet', account=ACCOUNT, symbol='SOL', at_ms=AT,
             history_complete=False, orders_complete=False, position_quantity='0',
             fills=[expected], open_orders=[], terminal_orders=[])
         self.assertEqual(life.validate_snapshot(snapshot), (ACCOUNT, 'SOL'))

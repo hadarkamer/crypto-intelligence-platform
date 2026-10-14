@@ -28,7 +28,7 @@ from . import checks, two_account_execution as roles
 
 VERSION = 'connected-filled-quantity-dispatch-v1'
 AFTER_EXIT = 'cancel_remainder_after_exit_v1'
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 NORMAL_OBSERVATION_JOIN_SECONDS = 1.0
 EMERGENCY_OBSERVATION_JOIN_MS = 250
 QUIET_COMPLETED_OBSERVATION_SHARE_MS = 1000
@@ -1354,7 +1354,7 @@ class Controller:
 
 def _historical_timing_candidate(state,env,card_id,now_ms,*,require_fresh=True):
     """Only a fresh exact unattempted trial in an entirely final flat market."""
-    if (env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1'
+    if (env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_mainnet_v1'
             or not isinstance(card_id,str) or not re.fullmatch(r'[0-9a-f]{64}',card_id)
             or env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID')!=card_id
             or not state['bindings'] or state['pending'] is not None
@@ -1458,7 +1458,7 @@ class TestnetVenue:
 
     Independent same-market OCO is not assumed; later cards wait for finality.
     """
-    domain='testnet'
+    domain='mainnet'
     parallel_preflight=True
     def __init__(self,env):
         from .simple_execution import enabled
@@ -1615,7 +1615,7 @@ class TestnetVenue:
             yield active[1]
             return
         batch=self._fund_info_plan(self._entry_info_bodies(account,agent,symbol,
-            stream=self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1',
+            stream=self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1',
             whole_cycle=whole_cycle,historical_checkpoint=historical_checkpoint))
         token=_ENTRY_INFO_SCOPE.set((self,batch))
         try:
@@ -1661,7 +1661,7 @@ class TestnetVenue:
                 finally:
                     _TERMINAL_TRIAL_SCOPE.reset(token)
     def reserve_transport(self,proposal):
-        if HOST!='api.hyperliquid-testnet.xyz':
+        if HOST!='api.hyperliquid.xyz':
             raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
         # A public-read plan can never authorize exchange transport. Acquire
         # the existing independent one-use permit at the final attempt boundary.
@@ -1765,12 +1765,12 @@ class TestnetVenue:
                            life.number(p['position']['szi'],signed=True)!=0
                            for p in state['assetPositions'])):
                 raise DispatchError('UNOWNED_SYMBOL_EXPOSURE_REQUIRES_REVIEW')
-            if self.env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1' and (
+            if self.env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_mainnet_v1' and (
                     orders or any(life.number(p['position']['szi'],signed=True)!=0
                                   for p in state['assetPositions'])):
                 raise DispatchError('FIRST_TRIAL_REQUIRES_EMPTY_DEDICATED_ACCOUNT')
         if self.now()-start>15000: raise DispatchError('PRE_ENTRY_CHECKPOINT_EXPIRED')
-        return dict(environment='testnet',account=account,symbol=symbol,at_ms=start,history_complete=True,
+        return dict(environment='mainnet',account=account,symbol=symbol,at_ms=start,history_complete=True,
             orders_complete=True,position_quantity='0',fills=[],open_orders=[],terminal_orders=[])
     def rejected_entry_evidence(self,state,request,cloid):
         """Independent public observations; no signer and no order endpoint."""
@@ -1844,7 +1844,7 @@ class TestnetVenue:
                 if (not re.fullmatch(r'[0-9a-f]{64}',trial) or trial!=proposal.get('card_id')
                         or not 0<trial_expires-self.now()<=120000):
                     raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
-        stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
+        stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
             and (proposal['role']=='long_account' or
@@ -1907,14 +1907,14 @@ class TestnetVenue:
         route=self._gate(proposal,after_exit_policy)
         if proposal['operation']=='ENTRY':
             self._fresh_entry_evidence(proposal)
-        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1':
             # A missing or mismatched signer must fail before a durable attempt
             # is begun, where its outcome would otherwise remain uncertain.
             roles.wallet_for_role(self.env,proposal['role'],route['account'],route['agent'])
         if (self.env.get('HL_TESTNET_RUNTIME_MODE')=='filled_card_controlled_v1'
                 and any(b['card_id']!=proposal['card_id'] for b in state['bindings'])):
             raise DispatchError('SHARED_MARKET_TRIAL_ISOLATION_NOT_VERIFIED')
-        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1':
             original=state['originals'][proposal['card_id']]['card']
             if (original['record_kind']!='received_alert'
                     or original['account_role']!=proposal['role']
@@ -1946,7 +1946,7 @@ class TestnetVenue:
                 def budget():
                     return roles.budget_for_role(self.env,proposal['role'],route['account'],
                         route['agent'],plan,reader)
-                if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+                if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_mainnet_v1':
                     # Independent ownership/capacity probes share admission,
                     # never responses. Their whole finite plan is funded first.
                     from .long_stream_runtime import _account_owned
@@ -1995,7 +1995,7 @@ class TestnetVenue:
         freshness. A slow local preparation cannot extend either freshness bound.
         This is a guard, not permission or proof that quantities cannot change.
         """
-        if (not isinstance(request,dict) or request.get('domain')!='testnet'
+        if (not isinstance(request,dict) or request.get('domain')!='mainnet'
                 or request.get('phase')!='OUTCOME_UNKNOWN'
                 or type(request.get('attempts')) is not int or request['attempts']!=1):
             raise DispatchError('DURABLE_TESTNET_REQUEST_REQUIRED')
@@ -2037,9 +2037,9 @@ class TestnetVenue:
         from hyperliquid.utils.signing import sign_l1_action
         expires=request['nonce']+15000
         action=canonical_wire_action(p['action'])
-        if HOST!='api.hyperliquid-testnet.xyz':
+        if HOST!='api.hyperliquid.xyz':
             raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
-        signature=sign_l1_action(wallet,action,None,request['nonce'],expires,False)
+        signature=sign_l1_action(wallet,action,None,request['nonce'],expires,True)
         body=json.dumps(dict(action=action,nonce=request['nonce'],signature=signature,expiresAfter=expires)).encode()
         if len(body)>16384: raise DispatchError('REQUEST_TOO_LARGE')
         self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))

@@ -11,7 +11,7 @@ def r2732_message(*, entry=100., decision_ms=BASE, as_of_ms=None, kind='PLAN', c
     risk = abs(entry - stop)
     value = dict(version=c.VERSION, kind=kind, family='r2732',
         rule_id='R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', symbol='XRP', side='SHORT',
-        source_environment='mainnet', execution_environment='testnet', source_price_kind='TRADE_1M',
+        source_environment='mainnet', execution_environment='mainnet', source_price_kind='TRADE_1M',
         source_at=c.iso_ms(entry_at), created_at=c.iso_ms(entry_at), arm_at=c.iso_ms(entry_at),
         expires_at=c.iso_ms(entry_at + 90_000), entry=c.price(entry), stop=c.price(stop),
         take_profit=c.price(entry * .92), original_target=None,
@@ -32,7 +32,7 @@ def maxpain_message(*, created_ms=BASE+10_000, as_of_ms=None, kind='PLAN', cance
     as_of = created_ms if as_of_ms is None else as_of_ms
     arm = (created_ms // 60_000 + 1) * 60_000
     value = dict(version=c.VERSION, kind=kind, family='maxpain', rule_id='HYPE_MAXPAIN_DIST05_15_LONG_TF',
-        symbol='HYPE', side='LONG', source_environment='mainnet', execution_environment='testnet',
+        symbol='HYPE', side='LONG', source_environment='mainnet', execution_environment='mainnet',
         source_price_kind='TRADE_1M', source_at=c.iso_ms(created_ms), created_at=c.iso_ms(created_ms),
         arm_at=c.iso_ms(arm), expires_at=c.iso_ms(arm+86400_000),
         entry='98.0', stop='95.0', take_profit='100.5', original_target='101.0',
@@ -69,7 +69,7 @@ def sol_g65_message(*, reference=100., decision_ms=BASE, as_of_ms=None, kind='PL
     entry, take = reference * 1.005, reference * .9825
     distance = entry - take
     value = dict(version=c.VERSION, kind=kind, family='sol_g65', rule_id='SOL_G65_K49_PROFIT_LOCK',
-        symbol='SOL', side='SHORT', source_environment='mainnet', execution_environment='testnet',
+        symbol='SOL', side='SHORT', source_environment='mainnet', execution_environment='mainnet',
         source_price_kind='TRADE_1M', source_at=c.iso_ms(reference_at), created_at=c.iso_ms(reference_at),
         arm_at=c.iso_ms(reference_at), expires_at=None, entry=c.price(entry),
         stop=c.price(reference*1.0125), take_profit=c.price(take), original_target=None,

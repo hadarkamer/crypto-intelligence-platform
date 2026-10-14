@@ -123,7 +123,7 @@ class ProviderTests(unittest.TestCase):
         for target in ('http.client.HTTPSConnection','socket.socket.connect','hl_testnet_runtime.two_account_execution.wallet_for_role'):
             p=patch(target,side_effect=AssertionError('NO_EXTERNAL_IO'));p.start();self.addCleanup(p.stop)
         self.exchange=SoftwareExchange(T+10000)
-        self.state=dict(domain='testnet',revision=0,not_before_ms=T-60000,routes={r:x['account'] for r,x in ROUTES.items()},
+        self.state=dict(domain='mainnet',revision=0,not_before_ms=T-60000,routes={r:x['account'] for r,x in ROUTES.items()},
             sources={},trades={},requests={},snapshots={},budget=[],events=[])
         self.store=FixtureStore(self.state);self.legacy=LegacyFixture();self.budget=object()
         self.raw=RawTestnetFixture(self.exchange,self.store.load,self.budget)
@@ -135,7 +135,7 @@ class ProviderTests(unittest.TestCase):
         from .experimental_plan_store import reduce_source
         msg=r2732_message(entry=2.3,decision_ms=T-60000)
         record,_=reduce_source(None,msg,now=runtime.contract.iso_ms(self.exchange.t),
-            not_before=runtime.contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+            not_before=runtime.contract.iso_ms(self.state['not_before_ms']),domain='mainnet')
         self.state['sources'][msg['occurrence_id']]=record
         return msg
 
@@ -144,7 +144,7 @@ class ProviderTests(unittest.TestCase):
         from .experimental_plan_store import reduce_source
         msg=maxpain_alert(approved_ms=T)
         record,_=reduce_source(None,msg,now=runtime.contract.iso_ms(self.exchange.t),
-            not_before=runtime.contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+            not_before=runtime.contract.iso_ms(self.state['not_before_ms']),domain='mainnet')
         self.state['sources'][msg['occurrence_id']]=record
         account=self.state['routes']['long_account']
         self.exchange.mark[runtime._lane(account,msg['symbol'])]=msg['entry']
@@ -158,8 +158,8 @@ class ProviderTests(unittest.TestCase):
         h.worker.receive([h.msg])
         for _ in range(steps):h.worker.run_once()
         state=h.store.load()
-        self.state.update(deepcopy(state));self.state['domain']='testnet'
-        for request in self.state['requests'].values():request['domain']='testnet'
+        self.state.update(deepcopy(state));self.state['domain']='mainnet'
+        for request in self.state['requests'].values():request['domain']='mainnet'
         # The raw /info oracle maps software IDs to numeric venue tids. The
         # copied durable testnet fixture must already use those same canonical
         # identities; a real prior fill may never be renamed during collection.

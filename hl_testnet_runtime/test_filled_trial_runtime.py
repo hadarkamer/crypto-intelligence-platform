@@ -103,7 +103,7 @@ class PreparationBoundaryTests(fixture.NoExternal):
                     m.configuration(changed,sending=True)
         self.assertTrue(intake.enabled(env))
         self.assertFalse(intake.enabled({**env,'HL_TESTNET_FILLED_AUTOWAIT':''}))
-        self.assertFalse(intake.enabled({**env,'HL_TESTNET_RUNTIME_MODE':'single_testnet_attempt_v1'}))
+        self.assertFalse(intake.enabled({**env,'HL_TESTNET_RUNTIME_MODE':'single_mainnet_attempt_v1'}))
 
     def test_future_worker_branch_does_not_start_legacy_tasks(self):
         with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':m.EXECUTE}, clear=True),\
@@ -142,7 +142,7 @@ class ApprovedRemainderDriverTests(fixture.NoExternal):
         super().setUp()
         self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=fixture.Venue()

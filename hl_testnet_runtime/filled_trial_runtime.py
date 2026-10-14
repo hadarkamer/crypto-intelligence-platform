@@ -69,7 +69,7 @@ def inspect_preparation(env, *, journal=None, public_venue=None, capacity_reader
     No existing card or execution record is edited. It is never run every tick.
     Test injection must use both a disposable journal and a software venue.
     """
-    report = dict(version=VERSION, status='DISABLED', environment='testnet',
+    report = dict(version=VERSION, status='DISABLED', environment='mainnet',
         selected_after_exit_policy=POLICY, cancel_after_first_confirmed_exit=True,
         keep_pending_entry_before_exit=True, policy_is_order_authorization=False,
         storage_ready=False, empty_account_verified=False, balance_usd=None,
@@ -167,10 +167,10 @@ def _next_u21_card(controller, not_before):
     now=datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
     with journal._transaction() as conn:
         CardStore(journal).ready(conn)
-        rows=conn.execute('''SELECT card_id,manifest,digest FROM hl_testnet_cards_v1.cards
+        rows=conn.execute('''SELECT card_id,manifest,digest FROM hl_mainnet_cards_v1.cards
             WHERE source_stream LIKE %s AND created_at >= %s
               AND (manifest->>'source_expires_at')::timestamptz > %s
-              AND EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+              AND EXISTS (SELECT 1 FROM hl_mainnet_cards_v1.delivery_receipts r
                   WHERE r.card_id=cards.card_id AND r.status='RECORDED')
             ORDER BY created_at,card_id LIMIT 32''',('u21_xrp_short:%',not_before,now)).fetchall()
     for cid,raw,checksum in rows:

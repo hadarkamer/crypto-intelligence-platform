@@ -46,7 +46,7 @@ class UnpreparedCardTests(unittest.TestCase):
         self.assertNotEqual(unprepared.prepare(delivery(identity='a'))['card_id'],
                             unprepared.prepare(delivery(identity='b'))['card_id'])
     def test_tampered_cards_are_rejected(self):
-        for field,value in [('dispatch_enabled',True),('environment','mainnet'),
+        for field,value in [('dispatch_enabled',True),('environment','testnet'),
                 ('state','RECORDED_ONLY'),('actual_execution',{}),('account_role','short_account')]:
             card=unprepared.prepare(delivery());card[field]=value
             with self.assertRaises(cards.CardError):cards.validate_card(card)
@@ -87,7 +87,7 @@ class UnavailableIntakePostgresTests(unittest.TestCase):
         return identity
     def audit_rows(self):
         with self.journal._transaction() as conn:
-            return conn.execute('SELECT previous_status,previous_reason,source FROM hl_testnet_cards_v1.asset_receipt_resolutions').fetchall()
+            return conn.execute('SELECT previous_status,previous_reason,source FROM hl_mainnet_cards_v1.asset_receipt_resolutions').fetchall()
     def test_missing_asset_records_one_unprepared_card_without_orders(self):
         result=self.accept_absent();self.assertEqual(result['status'],'RECORDED')
         self.assertEqual(result['card_state'],unprepared.STATE);self.assertEqual(self.counts(),(1,1,0))
@@ -115,13 +115,13 @@ class UnavailableIntakePostgresTests(unittest.TestCase):
     def test_old_asset_rejection_has_preserved_audit_and_original_received_time(self):
         identity=self.old_rejection()
         with self.journal._transaction() as conn:
-            old_time=conn.execute('SELECT received_at FROM hl_testnet_cards_v1.delivery_receipts').fetchone()[0]
+            old_time=conn.execute('SELECT received_at FROM hl_mainnet_cards_v1.delivery_receipts').fetchone()[0]
         self.assertEqual(self.accept_absent()['status'],'RECORDED')
         self.assertEqual(self.accept_absent()['status'],'DUPLICATE')
         self.assertEqual(self.audit_rows(),[('REJECTED','ASSET_UNAVAILABLE',delivery())])
         with self.journal._transaction() as conn:
-            now_time=conn.execute('SELECT received_at FROM hl_testnet_cards_v1.delivery_receipts').fetchone()[0]
-            audit_time=conn.execute('SELECT previous_received_at FROM hl_testnet_cards_v1.asset_receipt_resolutions').fetchone()[0]
+            now_time=conn.execute('SELECT received_at FROM hl_mainnet_cards_v1.delivery_receipts').fetchone()[0]
+            audit_time=conn.execute('SELECT previous_received_at FROM hl_mainnet_cards_v1.asset_receipt_resolutions').fetchone()[0]
         self.assertEqual(old_time,now_time);self.assertEqual(old_time,audit_time)
         self.assertEqual(self.receipts.get(identity)['status'],'RECORDED')
     def test_concurrent_recovery_has_one_resolution(self):

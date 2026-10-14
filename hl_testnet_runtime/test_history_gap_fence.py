@@ -102,7 +102,7 @@ class HistoryGapFenceTests(NoExternal):
         card = trade_cards.prepare_card(signal, meta, rule_id='SOFTWARE_TEST',
                                         threshold_pct='1.5', record_kind='synthetic_test')
         binding = life.binding_from_card(card, A, ROUTES2, other['bindings'][0]['orders'])
-        other.update(symbol='ETH', bucket=life.digest(['testnet', A, 'ETH']),
+        other.update(symbol='ETH', bucket=life.digest(['mainnet', A, 'ETH']),
                      bindings=[binding], originals={card['card_id']: dict(card=card,
                          draft=exits.prepare_entry(card, meta, A, ROUTES2))})
         snap = closed(binding)
@@ -145,8 +145,8 @@ class HistoryGapFencePostgresTests(NoExternal):
         super().setUp()
         self.journal = PostgresJournal.for_ci(CI)
         with self.journal._transaction() as conn:
-            for schema in (SCHEMA, 'hl_testnet_recovery_rehearsal_v1',
-                           'hl_testnet_cards_v1', 'hl_testnet_execution_v1'):
+            for schema in (SCHEMA, 'hl_mainnet_recovery_rehearsal_v1',
+                           'hl_mainnet_cards_v1', 'hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {schema} CASCADE')
         self.journal.bootstrap()
         self.cards = CardStore(self.journal)

@@ -221,13 +221,13 @@ class PureTests(unittest.TestCase):
             with self.assertRaises(budget.BudgetError):
                 budget.request_weight(path, body)
         with self.assertRaises(budget.BudgetError):
-            budget.request_weight('/info', {'type': 'meta'}, host='api.hyperliquid.xyz')
+            budget.request_weight('/info', {'type': 'meta'}, host='api.hyperliquid-testnet.xyz')
 
     def test_only_unconfigured_isolated_readonly_tools_are_optional(self):
         self.assertIsNone(budget.Budget.from_env({}))
         self.assertIsNone(budget.Budget.from_env({'HL_TESTNET_RUNTIME_MODE': 'read_only'}))
         for env in ({'HL_TESTNET_JOURNAL_BACKEND': 'staging_postgres_v1'},
-                    {'HL_TESTNET_RUNTIME_MODE': 'long_stream_testnet_v1'},
+                    {'HL_TESTNET_RUNTIME_MODE': 'long_stream_mainnet_v1'},
                     {'RENDER_SERVICE_ID': 'srv-dakptbh594qs7395460g'},
                     {'HL_TESTNET_DATABASE_URL': 'DO_NOT_EXPOSE'}):
             with self.assertRaises(budget.BudgetError) as caught:
@@ -306,7 +306,7 @@ class ObservationBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
                 batch.acquire('/info',altered,priority='protection')
         for path,host,priority in (('/exchange',budget.HOST,'protection'),
-                ('/info','api.hyperliquid.xyz','protection'),
+                ('/info','api.hyperliquid-testnet.xyz','protection'),
                 ('/info',budget.HOST,'background')):
             with self.assertRaisesRegex(budget.BudgetError,'MISMATCH'):
                 batch.acquire(path,body,priority=priority,host=host)
@@ -503,7 +503,7 @@ class InfoPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
                 plan.acquire('/info',dict(type='activeAssetData',user='0x'+'1'*40,coin='ETH'))
             for path,host,priority in (('/exchange',budget.HOST,'background'),
-                    ('/info','api.hyperliquid.xyz','background'),
+                    ('/info','api.hyperliquid-testnet.xyz','background'),
                     ('/info',budget.HOST,'protection')):
                 with self.assertRaisesRegex(budget.BudgetError,'MISMATCH'):
                     plan.acquire(path,dict(type='meta'),host=host,priority=priority)

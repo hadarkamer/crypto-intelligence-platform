@@ -30,8 +30,8 @@ import uuid
 
 from .postgres_journal import JournalError, PostgresJournal, SCHEMA
 
-HOST = 'api.hyperliquid-testnet.xyz'
-VERSION = 'testnet-shared-rest-weight-v1'
+HOST = 'api.hyperliquid.xyz'
+VERSION = 'mainnet-shared-rest-weight-v1'
 LIMIT = 1200
 BACKGROUND_LIMIT = 800
 WINDOW_MS = 69000

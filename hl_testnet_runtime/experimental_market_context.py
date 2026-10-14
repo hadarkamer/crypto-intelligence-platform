@@ -73,7 +73,7 @@ class MarketSnapshot:
 
     def mark(self, *, account, symbol, now_ms):
         life.address(account)
-        return dict(environment='testnet', account=account, symbol=symbol,
+        return dict(environment='mainnet', account=account, symbol=symbol,
             at_ms=self._at_ms, mark_price=self._mark(symbol, now_ms))
 
     def active_asset_data(self, raw, *, account, symbol, now_ms):
