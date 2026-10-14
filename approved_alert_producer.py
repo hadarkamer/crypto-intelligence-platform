@@ -111,7 +111,7 @@ def _approved_intent(intent, state, current, *, now_ms, fence_ms):
     kind = 'CANCEL' if reason else 'ALERT'
     value = dict(version=contract.VERSION, kind=kind, family='maxpain',
         rule_id=p['rule_id'], symbol=p['coin'], side='LONG' if p['direction'] == 1 else 'SHORT',
-        source_environment='mainnet', execution_environment='testnet', source_price_kind='TRADE_1M',
+        source_environment='mainnet', execution_environment='mainnet', source_price_kind='TRADE_1M',
         source_at=contract.iso_ms(p['source_observed_ms']), created_at=contract.iso_ms(p['decision_ms']),
         approved_at=contract.iso_ms(approved), arm_at=contract.iso_ms(approved),
         expires_at=contract.iso_ms(expiry), entry=displayed_price(p['fill_price']),
@@ -248,7 +248,7 @@ def _formula_intent(intent, state, current, *, now_ms, fence_ms):
         raise contract.ContractError('FUTURE_SOURCE_STATE')
     kind = 'CANCEL' if reason else 'ALERT'
     value = dict(version=contract.VERSION, kind=kind, family=family, rule_id=p['rule_id'],
-        symbol=p['symbol'], side=p['direction'], source_environment='mainnet', execution_environment='testnet',
+        symbol=p['symbol'], side=p['direction'], source_environment='mainnet', execution_environment='mainnet',
         source_price_kind='TRADE_1M', source_at=contract.iso_ms(reference), created_at=contract.iso_ms(reference),
         approved_at=contract.iso_ms(approved), arm_at=contract.iso_ms(approved), expires_at=contract.iso_ms(expiry),
         entry=entry, stop=stop, take_profit=take, original_target=None, policy=policy, proof=proof,

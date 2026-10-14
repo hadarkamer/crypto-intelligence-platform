@@ -191,7 +191,7 @@ def capture_maxpain_evidence(state, decoded, prior, *, config_sha256, max_bytes=
 
 def _base(family, rule, symbol, side, source, created, arm, expiry, entry, stop, take, target, policy, proof):
     value = dict(version=contract.VERSION, family=family, rule_id=rule, symbol=symbol, side=side,
-        source_environment='mainnet', execution_environment='testnet', source_price_kind='TRADE_1M',
+        source_environment='mainnet', execution_environment='mainnet', source_price_kind='TRADE_1M',
         source_at=contract.iso_ms(source), created_at=contract.iso_ms(created),
         arm_at=contract.iso_ms(arm), expires_at=None if expiry is None else contract.iso_ms(expiry), entry=contract.price(entry),
         stop=contract.price(stop), take_profit=contract.price(take),

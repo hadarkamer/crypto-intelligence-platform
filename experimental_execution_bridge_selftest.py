@@ -350,7 +350,7 @@ class BridgeTests(unittest.TestCase):
     def test_contract_rejects_tampered_type_price_geometry_identity_and_venues(self):
         good = r2732_message()
         changes = [('entry', 'NaN'), ('entry', True), ('stop', '99'), ('occurrence_id', 'f'*64),
-                   ('source_environment', 'testnet'), ('execution_environment', 'mainnet'),
+                   ('source_environment', 'testnet'), ('execution_environment', 'testnet'),
                    ('source_sequence', True), ('source_price_kind', 'MARK'), ('source_state', 'OPEN')]
         for key, value in changes:
             with self.subTest(key=key, value=value):

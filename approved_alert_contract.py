@@ -78,7 +78,7 @@ def _validate_approved(message):
         require((value['rule_id'], value['symbol']) == FORMULAS[value['family']]
                 and value['side'] == 'SHORT', 'APPROVED_ALERT_IDENTITY')
     require(value['source_environment'] == 'mainnet'
-            and value['execution_environment'] == 'testnet'
+            and value['execution_environment'] == 'mainnet'
             and value['source_price_kind'] == 'TRADE_1M', 'VENUE_CONTRACT')
 
     times = {key: moment_ms(value[key]) for key in ('source_at', 'created_at',
