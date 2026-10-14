@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hadarkamer/crypto-intelligence-platform
-          ref: 919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20
+          ref: 30da26f6eefd17e1082466b87144d03f41c36e71
           path: .ci/receiver
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -73,14 +73,18 @@ jobs:
             /hl_testnet_runtime/
             /experimental_execution_contract.py
             /experimental_execution_fixtures.py
+            /approved_alert_contract.py
+            /approved_alert_fixtures.py
       - name: Verify receiver dependency provenance
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C .ci/receiver rev-parse HEAD)" = "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20"
-          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "490b4d6676b1ef9715a4fdf484c475c87258ad2c"
+          test "$(git -C .ci/receiver rev-parse HEAD)" = "30da26f6eefd17e1082466b87144d03f41c36e71"
+          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "b1fad3eea4a17e0ea9b960a30e476b956f111ce3"
           cmp experimental_execution_contract.py .ci/receiver/experimental_execution_contract.py
           cmp experimental_execution_fixtures.py .ci/receiver/experimental_execution_fixtures.py
+          cmp approved_alert_contract.py .ci/receiver/approved_alert_contract.py
+          cmp approved_alert_fixtures.py .ci/receiver/approved_alert_fixtures.py
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
