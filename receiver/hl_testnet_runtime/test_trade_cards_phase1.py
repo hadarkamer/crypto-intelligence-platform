@@ -130,7 +130,7 @@ class CardTests(unittest.TestCase):
 
     def test_changed_card_fields_fail_validation(self):
         for key,value in [('account_role','short_account'),('dispatch_enabled',True),
-                          ('environment','mainnet'),('actual_execution',{}),('revision',2)]:
+                          ('environment','testnet'),('actual_execution',{}),('revision',2)]:
             item=card();item[key]=value
             with self.assertRaises(c.CardError):c.validate_card(item)
 
@@ -200,23 +200,23 @@ class CardPostgresTests(unittest.TestCase):
         self.journal=PostgresJournal.for_ci(CI)
         with psycopg.connect(**self.journal._parameters) as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS {SCHEMA} CASCADE')
-            conn.execute('DROP SCHEMA IF EXISTS hl_testnet_execution_v1 CASCADE')
+            conn.execute('DROP SCHEMA IF EXISTS hl_mainnet_execution_v1 CASCADE')
         self.journal.bootstrap();self.store=CardStore(self.journal);self.store.initialize()
         p=patch('http.client.HTTPSConnection',side_effect=AssertionError('No exchange access'))
         p.start();self.addCleanup(p.stop)
 
     def count(self):
         with self.journal._transaction() as conn:
-            return conn.execute('SELECT count(*) FROM hl_testnet_cards_v1.cards').fetchone()[0]
+            return conn.execute('SELECT count(*) FROM hl_mainnet_cards_v1.cards').fetchone()[0]
 
     def test_duplicate_has_one_record_and_preserves_timestamp(self):
         item=card();one=self.store.record(item)
         with self.journal._transaction() as conn:
-            stamp=conn.execute('SELECT created_at FROM hl_testnet_cards_v1.cards').fetchone()[0]
+            stamp=conn.execute('SELECT created_at FROM hl_mainnet_cards_v1.cards').fetchone()[0]
         two=self.store.record(item)
         self.assertTrue(one['created']);self.assertTrue(two['duplicate']);self.assertEqual(self.count(),1)
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT created_at FROM hl_testnet_cards_v1.cards').fetchone()[0],stamp)
+            self.assertEqual(conn.execute('SELECT created_at FROM hl_mainnet_cards_v1.cards').fetchone()[0],stamp)
 
     def test_record_survives_independent_process(self):
         item=card();self.store.record(item)
@@ -248,7 +248,7 @@ print('RESTART_AND_DUPLICATE_VERIFIED')'''
         for n in range(40):self.assertTrue(self.store.record(card(source(f'event-{n}')))['created'])
         self.assertEqual(self.count(),40)
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
 
     def test_lost_commit_reply_cannot_create_second_card(self):
         from .postgres_journal import JournalError
@@ -265,7 +265,7 @@ print('RESTART_AND_DUPLICATE_VERIFIED')'''
         from .postgres_journal import JournalError
         item=card();self.store.record(item)
         with self.journal._transaction() as conn:
-            conn.execute("UPDATE hl_testnet_cards_v1.cards SET manifest=jsonb_set(manifest,'{account_role}','\"short_account\"')")
+            conn.execute("UPDATE hl_mainnet_cards_v1.cards SET manifest=jsonb_set(manifest,'{account_role}','\"short_account\"')")
         with self.assertRaises(JournalError):self.store.load(item['card_id'])
 
     def test_startup_imports_archived_source_without_new_execution(self):
@@ -273,10 +273,10 @@ print('RESTART_AND_DUPLICATE_VERIFIED')'''
         key,_=self.journal.save_prepared(A,prepared)
         rule=dict(event_id=source()['event_id'],source_digest=c.checksum(source()),rule_id='C1',threshold_pct='1.5')
         with self.journal._transaction() as conn:
-            conn.execute('CREATE TABLE hl_testnet_execution_v1.limit_cancel_rules(plan_key text PRIMARY KEY,policy jsonb)')
-            conn.execute('INSERT INTO hl_testnet_execution_v1.limit_cancel_rules VALUES(%s,%s::jsonb)',(key,json.dumps(rule)))
+            conn.execute('CREATE TABLE hl_mainnet_execution_v1.limit_cancel_rules(plan_key text PRIMARY KEY,policy jsonb)')
+            conn.execute('INSERT INTO hl_mainnet_execution_v1.limit_cancel_rules VALUES(%s,%s::jsonb)',(key,json.dumps(rule)))
         env=dict(HL_TESTNET_CARDS_PHASE1='record_only_v1',RENDER_SERVICE_ID='srv-dakptbh594qs7395460g',
-            HL_TESTNET_RUNTIME_MODE='cancel_monitor_testnet_v1',HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1')
+            HL_TESTNET_RUNTIME_MODE='cancel_monitor_mainnet_v1',HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1')
         result=startup.run(env,journal=self.journal)
         self.assertEqual(result['status'],'CARD_STORAGE_AND_ROUTING_REVIEW_PASSED',result)
         self.assertEqual(result['new_review_cards'],1)
@@ -287,12 +287,12 @@ print('RESTART_AND_DUPLICATE_VERIFIED')'''
         self.assertFalse(result['entry_sending_enabled'])
         self.assertEqual(self.count(),1)
         with self.journal._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
-            self.assertEqual(conn.execute('SELECT manifest FROM hl_testnet_execution_v1.prepared').fetchone()[0],prepared)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
+            self.assertEqual(conn.execute('SELECT manifest FROM hl_mainnet_execution_v1.prepared').fetchone()[0],prepared)
 
     def test_unsafe_runtime_modes_cannot_initialize_storage(self):
         from .trade_card_store import CardStore
-        for mode in ('mainnet','single_testnet_attempt_v1','cancel_rehearsal_testnet_v1'):
+        for mode in ('mainnet','single_mainnet_attempt_v1','cancel_rehearsal_mainnet_v1'):
             env=dict(HL_TESTNET_CARDS_PHASE1='record_only_v1',RENDER_SERVICE_ID='srv-dakptbh594qs7395460g',
                 HL_TESTNET_RUNTIME_MODE=mode,HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1')
             with patch.object(CardStore,'initialize',side_effect=AssertionError('No storage setup')):

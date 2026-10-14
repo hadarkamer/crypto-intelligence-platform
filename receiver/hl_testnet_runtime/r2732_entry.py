@@ -15,7 +15,7 @@ from .experimental_plan_store import reduce_source
 from .risk_policy import budget, VERSION as RISK_VERSION
 
 VERSION = 'r2732-entry-admission-software-v1'
-TESTNET_VERSION = 'r2732-entry-admission-testnet-v1'
+TESTNET_VERSION = 'r2732-entry-admission-mainnet-v1'
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'REJECTED_FINAL'))
 PHASES = FINAL | frozenset(('PREPARED', 'OUTCOME_UNKNOWN', 'ACK_UNVERIFIED',
                            'OPEN', 'PARTIALLY_OPEN', 'PARTIALLY_CLOSED'))
@@ -34,7 +34,7 @@ def initial(routes, *, not_before_ms):
             raise EntryError('R2732_INDEPENDENT_ACCOUNTS_REQUIRED')
     except (KeyError, TypeError):
         raise EntryError('R2732_TWO_EXPLICIT_ACCOUNT_ROUTES_REQUIRED') from None
-    return dict(version=VERSION, environment='testnet', account=account,
+    return dict(version=VERSION, environment='mainnet', account=account,
         account_role='short_account', not_before_ms=not_before_ms,
         latest_source_ms=0, revision=0, records={})
 
@@ -49,8 +49,8 @@ def initial_testnet(routes, *, not_before_ms):
 def _copy(state, *, domain='software'):
     life.shape(state, 'version environment account account_role not_before_ms '
                'latest_source_ms revision records')
-    if (domain not in ('software', 'testnet')
-            or state['version'] != (VERSION if domain == 'software' else TESTNET_VERSION) or state['environment'] != 'testnet'
+    if (domain not in ('software', 'mainnet')
+            or state['version'] != (VERSION if domain == 'software' else TESTNET_VERSION) or state['environment'] != 'mainnet'
             or state['account_role'] != 'short_account'
             or type(state['revision']) is not int or state['revision'] < 0
             or type(state['latest_source_ms']) is not int or state['latest_source_ms'] < 0
@@ -111,7 +111,7 @@ def receive(state, message, *, now_ms):
 
 def _ownership(state, evidence, *, now_ms):
     life.shape(evidence, 'environment account account_role at_ms complete unresolved_request occurrences')
-    if (evidence['environment'] != 'testnet' or evidence['account'] != state['account']
+    if (evidence['environment'] != 'mainnet' or evidence['account'] != state['account']
             or evidence['account_role'] != 'short_account' or evidence['complete'] is not True
             or evidence['unresolved_request'] is not False
             or not isinstance(evidence['occurrences'], list)
@@ -148,7 +148,7 @@ def _range(value, *, now_ms, reference, source, account=None):
     fields = ('environment symbol reference_at_ms at_ms history_complete high low price '
               + ('price_source' if source else 'account price_kind'))
     life.shape(value, fields)
-    if (value['environment'] != ('mainnet' if source else 'testnet')
+    if (value['environment'] != ('mainnet' if source else 'mainnet')
             or value['symbol'] != 'XRP' or value['reference_at_ms'] != reference
             or value['history_complete'] is not True
             or source and value['price_source'] != condition.SOURCE
@@ -170,7 +170,7 @@ def entry_admission(state, cid, metadata, market, source_market, ownership, *, n
 
 def testnet_entry_admission(state, cid, metadata, market, source_market, ownership, *, now_ms):
     return _entry_admission(state, cid, metadata, market, source_market, ownership,
-                            now_ms=now_ms, domain='testnet')
+                            now_ms=now_ms, domain='mainnet')
 
 
 def _entry_admission(state, cid, metadata, market, source_market, ownership, *, now_ms, domain):
@@ -238,7 +238,7 @@ def _entry_admission(state, cid, metadata, market, source_market, ownership, *, 
         if quantity <= 0 or quantity*entry < 10:
             raise EntryError('R2732_VALID_MINIMUM_ENTRY_SIZE_REQUIRED')
         risk = quantity*abs(entry-stop)
-    proposal = dict(version=state['version'], kind='UNSIGNED_ENTRY', environment='testnet',
+    proposal = dict(version=state['version'], kind='UNSIGNED_ENTRY', environment='mainnet',
         account=state['account'], account_role='short_account', occurrence_id=cid,
         source=deepcopy(value), execution=execution, quantity=life.text(quantity),
         planned_risk_usd=life.text(risk), risk_policy=RISK_VERSION,

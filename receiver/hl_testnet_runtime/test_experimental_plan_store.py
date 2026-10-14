@@ -26,7 +26,7 @@ def maxpain_plan():
     observed = contract.moment_ms('2026-10-06T10:00:00+00:00')
     message = dict(version=contract.VERSION, kind='PLAN', family='maxpain',
         occurrence_id='', rule_id='HYPE_MAXPAIN_DIST05_15_LONG_TF', symbol='HYPE', side='LONG',
-        source_environment='mainnet', execution_environment='testnet', source_price_kind='TRADE_1M',
+        source_environment='mainnet', execution_environment='mainnet', source_price_kind='TRADE_1M',
         source_at=contract.iso_ms(observed), created_at=CREATED, arm_at=ARM,
         expires_at='2026-10-07T10:01:00+00:00', entry='98.0', stop='95.0',
         take_profit='100.5', original_target='101.0',
@@ -106,9 +106,9 @@ class SourceReducerTests(unittest.TestCase):
         source = maxpain_plan()
         state, _ = reduce(None, source)
         with self.assertRaisesRegex(store.PlanStoreError, 'IMMUTABLE_PLAN_CHANGED'):
-            reduce(state, source, domain='testnet')
+            reduce(state, source, domain='mainnet')
         with self.assertRaisesRegex(store.PlanStoreError, 'DOMAIN_INVALID'):
-            reduce(None, source, domain='mainnet')
+            reduce(None, source, domain='testnet')
 
     def test_duplicate_does_not_reset_clocks_or_increment_revision(self):
         source = maxpain_plan()
@@ -409,7 +409,7 @@ class TransactionBoundaryTests(unittest.TestCase):
         cached = self.store.change_strategy(identity, received['revision'], strategy, now=NOW)
         arm_ms = contract.moment_ms(ARM)
         metadata = {'universe': [{'name': 'HYPE', 'szDecimals': 2}]}
-        market = dict(environment='testnet', symbol='HYPE', at_ms=arm_ms, mark_price='100')
+        market = dict(environment='mainnet', symbol='HYPE', at_ms=arm_ms, mark_price='100')
         ownership = dict(account_role='long_account', symbol='HYPE',
             all_prior_cards_final=True, unresolved_request=False)
         proposal = execution.entry_admission(cached['strategy'], identity, metadata,

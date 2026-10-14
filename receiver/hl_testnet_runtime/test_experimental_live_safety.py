@@ -432,7 +432,7 @@ class LiveSafetyTests(unittest.TestCase):
         self.ready_feed(); self.observed()
         self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
         account = self.fx.release['routes']['short_account']
-        request = dict(request_id='entry', phase='OUTCOME_UNKNOWN', domain='testnet',
+        request = dict(request_id='entry', phase='OUTCOME_UNKNOWN', domain='mainnet',
             proposal=dict(operation='ENTRY', account=account, role='short_account'))
         self.fx.store.mutate(lambda state: state['requests'].update(entry=deepcopy(request)))
         context = self.fx.provider._last['context']

@@ -126,7 +126,7 @@ def cards_from_state(state, *, domain):
     """Project a verified domain-specific snapshot; do not mutate or reload it."""
     from .experimental_execution_state import VERSION as SOFTWARE_VERSION
     from .experimental_live_state import VERSION as TESTNET_VERSION
-    versions = {'software': SOFTWARE_VERSION, 'testnet': TESTNET_VERSION}
+    versions = {'software': SOFTWARE_VERSION, 'mainnet': TESTNET_VERSION}
     if domain not in versions or state.get('domain') != domain or state.get('version') != versions[domain]:
         raise CardError('VERIFIED_TRADE_CARD_DOMAIN_REQUIRED')
     return [_card(state, cid) for cid in sorted(state['trades'])]
@@ -134,7 +134,7 @@ def cards_from_state(state, *, domain):
 
 def card_from_record(record, *, domain):
     """Project the original immutable archive bundle, including pre-close waits."""
-    if domain not in ('software', 'testnet') or record.get('domain') != domain:
+    if domain not in ('software', 'mainnet') or record.get('domain') != domain:
         raise CardError('VERIFIED_TRADE_CARD_DOMAIN_REQUIRED')
     cid = record['occurrence_id']
     if record['trade'] is None:

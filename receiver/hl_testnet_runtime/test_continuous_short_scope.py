@@ -12,7 +12,7 @@ OTHER = 'b' * 64
 
 def continuous_env():
     return dict(RENDER_SERVICE_ID=roles.SERVICE,
-        HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+        HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1',
         HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
         HL_TESTNET_LONG_STREAM='approved_alerts_v1',
         HL_TESTNET_SHORT_STREAM='approved_alerts_v1',
@@ -21,7 +21,7 @@ def continuous_env():
         HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
         HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1',
         HL_TESTNET_EMERGENCY_RELEASE=roles.CONTINUOUS_RELEASE,
-        HL_TESTNET_EMERGENCY_CLOSE='approved_testnet_v1')
+        HL_TESTNET_EMERGENCY_CLOSE='approved_mainnet_v1')
 
 
 class ContinuousShortScopeTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class ContinuousShortScopeTests(unittest.TestCase):
                 roles.short_entry_scope(env, CARD)
         for key, value in (
                 ('RENDER_SERVICE_ID', 'mainnet_service'),
-                ('HL_TESTNET_RUNTIME_MODE', 'single_testnet_attempt_v1'),
+                ('HL_TESTNET_RUNTIME_MODE', 'single_mainnet_attempt_v1'),
                 ('HL_TESTNET_EMERGENCY_RELEASE', 'mainnet'),
                 ('HL_TESTNET_EMERGENCY_CLOSE', 'disabled'),
                 ('HL_TESTNET_SHORT_ENTRY_ENABLED', 'TRUE'),

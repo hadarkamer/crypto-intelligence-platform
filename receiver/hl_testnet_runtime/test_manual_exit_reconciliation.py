@@ -353,7 +353,7 @@ class ManualExitDatabaseTests(unittest.TestCase):
         self.schema=SCHEMA
         self.j=PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.store=DispatchStore(self.j);self.store.initialize()
         state,self.reader=fixture()
@@ -401,7 +401,7 @@ class AutomaticManualExitDatabaseTests(unittest.TestCase):
         from .trade_card_store import CardStore
         self.j=PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize()

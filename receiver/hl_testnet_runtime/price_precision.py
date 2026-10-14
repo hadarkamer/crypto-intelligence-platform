@@ -162,7 +162,7 @@ def review_rounded_signal(message, *, account, agent, journal=None, exit_type=No
     This function neither persists an execution journal nor enables a sender.
     """
     from . import checks, guarded_execution
-    report = {'phase': 'review_only', 'mode': 'testnet', 'rounding_policy': POLICY,
+    report = {'phase': 'review_only', 'mode': 'mainnet', 'rounding_policy': POLICY,
               'eligible_for_controlled_attempt': False, 'order_requests_sent': 0,
               'signing_tested': False, 'prices_changed': False, 'blockers': []}
     reader = None

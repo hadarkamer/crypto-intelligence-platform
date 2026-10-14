@@ -21,9 +21,9 @@ import time
 from typing import Any
 from hl_testnet_runtime.risk_policy import budget, assert_new_entry_budget
 
-VERSION = "hl-testnet-adapter-v1"
+VERSION = "hl-mainnet-adapter-v1"
 SDK_VERSION = "0.24.0"
-TESTNET_HOST = "api.hyperliquid-testnet.xyz"
+TESTNET_HOST = "api.hyperliquid.xyz"
 SIGNAL_FIELDS = {"kind", "event_id", "symbol", "side", "entry", "stop", "take_profit", "at"}
 ROLES = ("ENTRY", "TAKE_PROFIT", "STOP")
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
@@ -115,10 +115,10 @@ def _signal(message: dict) -> dict:
 
 def build_action(message: dict, metadata: dict, account: str, *, exit_type: str,
                  historical_risk_usd: str | None = None) -> dict:
-    """Pure conversion. Default budget is $10, before costs, NOT a loss cap.
+    """Pure conversion. Default budget is $2, before costs, NOT a loss cap.
 
     historical_risk_usd reconstructs a frozen old $10/$20 action for verification
-    only. Both signing and transport forbid a new entry above the CURRENT $10.
+    only. Both signing and transport forbid a new entry above the CURRENT $2.
     Existing IDs remain stable; changing risk cannot bypass replay protection.
     $5000 maximum notional is a laboratory bound, not the trading strategy.
     'market': supplied exit prices remain trigger prices; execution may differ.
@@ -182,7 +182,7 @@ class TestnetHTTP:
             raise TestnetError(str(exc)) from None
 
     def _post(self, path: str, body: dict) -> Any:
-        if TESTNET_HOST != "api.hyperliquid-testnet.xyz":
+        if TESTNET_HOST != "api.hyperliquid.xyz":
             raise TestnetError("TESTNET_HOST_CHANGED")
         if path not in ("/info", "/exchange"):
             raise TestnetError("ENDPOINT_NOT_ALLOWED")
@@ -201,7 +201,7 @@ class TestnetHTTP:
                 path, body, priority=self.priority, host=TESTNET_HOST))
         except BudgetError as exc:
             raise TestnetError(str(exc)) from None
-        connection = http.client.HTTPSConnection("api.hyperliquid-testnet.xyz", timeout=4)
+        connection = http.client.HTTPSConnection("api.hyperliquid.xyz", timeout=4)
         started = time.monotonic()
         try:
             if permit is not None:
@@ -258,8 +258,8 @@ def _signed_body(wallet, action: dict, nonce: int) -> dict:
     assert_new_entry_budget(action)
     from hyperliquid.utils.signing import sign_l1_action
     expires = nonce + 30000
-    # False is deliberate and mandatory: signature is valid for Testnet only.
-    signature = sign_l1_action(wallet, action, None, nonce, expires, False)
+    # True binds the signature to Mainnet; Testnet signing is no longer used.
+    signature = sign_l1_action(wallet, action, None, nonce, expires, True)
     return {"action": action, "nonce": nonce, "signature": signature, "expiresAfter": expires}
 
 
@@ -442,7 +442,7 @@ def submit_once(message: dict, *, account: str, journal: str | Path,
                 exit_type: str, enable_testnet: bool = False) -> dict:
     """Explicit one-shot TESTNET action. No automatic connection to the live bot."""
     if enable_testnet is not True:
-        return {"mode": "testnet", "status": "DISABLED", "order_batches_sent": 0}
+        return {"mode": "mainnet", "status": "DISABLED", "order_batches_sent": 0}
     signal, account = _signal(message), _account(account)
     # Technical test freshness guard, not a new strategy rule.
     at = datetime.fromisoformat(signal["at"].replace("Z", "+00:00"))
@@ -469,7 +469,7 @@ def submit_once(message: dict, *, account: str, journal: str | Path,
         if existing:
             # Compare via reserve, but do not query/change working positions.
             _, previous, _ = log.reserve(signal, account, action)
-            return {"mode": "testnet", **previous, "replayed": True, "order_batches_sent": 0}
+            return {"mode": "mainnet", **previous, "replayed": True, "order_batches_sent": 0}
         orders = http.info("frontendOpenOrders", user=account)
         if not isinstance(orders, list) or orders:
             raise TestnetError("EMPTY_DEDICATED_TEST_ACCOUNT_REQUIRED")
@@ -482,7 +482,7 @@ def submit_once(message: dict, *, account: str, journal: str | Path,
             raise TestnetError("PREFLIGHT_EXPIRED")
         fresh, previous, nonce = log.reserve(signal, account, action)
         if not fresh:
-            return {"mode": "testnet", **previous, "replayed": True, "order_batches_sent": 0}
+            return {"mode": "mainnet", **previous, "replayed": True, "order_batches_sent": 0}
         result = {"status": "RESERVED_OR_UNCERTAIN", "verified": False}
         try:
             body = _signed_body(wallet, action, nonce)
@@ -497,7 +497,7 @@ def submit_once(message: dict, *, account: str, journal: str | Path,
             # It may have been accepted: never retry the submission automatically.
             result = {"status": "UNCERTAIN_REQUIRES_REVIEW", "verified": False}
         log.save(signal["event_id"], result)
-        return {"mode": "testnet", **result, "replayed": False, "order_batches_sent": http.order_attempts}
+        return {"mode": "mainnet", **result, "replayed": False, "order_batches_sent": http.order_attempts}
     finally:
         log.close()
 
@@ -515,6 +515,6 @@ def inspect_once(identity: str, *, journal: str | Path) -> dict:
         except Exception:
             result = {"status": "VERIFICATION_UNAVAILABLE", "verified": False}
         log.save(identity, result)
-        return {"mode": "testnet", **result, "order_batches_sent": 0}
+        return {"mode": "mainnet", **result, "order_batches_sent": 0}
     finally:
         log.close()

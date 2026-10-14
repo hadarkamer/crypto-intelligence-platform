@@ -96,7 +96,7 @@ def binding_from_card(card, account, routes, orders):
         role=role, symbol=signal['symbol'], side=signal['side'],
         planned_quantity=card['planning']['quantity'],
         prices={key: signal[key] for key in ('entry', 'stop', 'take_profit')},
-        orders=deepcopy(orders), environment='testnet')
+        orders=deepcopy(orders), environment='mainnet')
     validate_bindings([binding])
     return binding
 
@@ -113,7 +113,7 @@ def validate_bindings(bindings):
             raise LifecycleError('DUPLICATE_CARD_ID')
         ids.add(cid)
         account = address(b['account'])
-        if b['environment'] != 'testnet' or ROLES.get(b['role']) != b['side']:
+        if b['environment'] != 'mainnet' or ROLES.get(b['role']) != b['side']:
             raise LifecycleError('TESTNET_FINAL_DIRECTION_REQUIRED')
         if account in account_roles and account_roles[account] != b['role']:
             raise LifecycleError('OPPOSITE_ROLES_REQUIRE_DIFFERENT_ACCOUNTS')
@@ -140,7 +140,7 @@ def validate_bindings(bindings):
 
 def validate_snapshot(snapshot):
     shape(snapshot, 'environment account symbol at_ms history_complete orders_complete position_quantity fills open_orders terminal_orders')
-    if snapshot['environment'] != 'testnet':
+    if snapshot['environment'] != 'mainnet':
         raise LifecycleError('TESTNET_ONLY')
     account, symbol = address(snapshot['account']), ident(snapshot['symbol'], r'[A-Z][A-Z0-9]{0,19}')
     at = moment(snapshot['at_ms'])
@@ -337,7 +337,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
         v['closure_verified'] = v['state'] == 'CLOSED' and not issues and not v['issues']
         if not v['closure_verified']:
             v['gross_pnl_usdc'] = v['net_before_funding_usdc'] = None
-    return dict(version=VERSION, environment='testnet', evidence_at_ms=snapshot['at_ms'],
+    return dict(version=VERSION, environment='mainnet', evidence_at_ms=snapshot['at_ms'],
         account=account, symbol=symbol, bucket_issues=sorted(issues), cards=views,
         needs_review=bool(issues or any(v['issues'] for v in views)),
         order_requests_sent=0, dispatch_enabled=False, app_delivery_enabled=False)

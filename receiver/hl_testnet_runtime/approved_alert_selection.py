@@ -31,10 +31,10 @@ def next_cards(journal, *, not_before, now=None):
         raise DispatchError('ALERT_SELECTION_START_IN_FUTURE')
     with journal._transaction() as conn:
         CardStore(journal).ready(conn)
-        rows = conn.execute('''SELECT card_id,manifest,digest FROM hl_testnet_cards_v1.cards
+        rows = conn.execute('''SELECT card_id,manifest,digest FROM hl_mainnet_cards_v1.cards
             WHERE created_at >= %s
               AND (manifest->>'source_expires_at')::timestamptz > %s
-              AND EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+              AND EXISTS (SELECT 1 FROM hl_mainnet_cards_v1.delivery_receipts r
                   WHERE r.card_id=cards.card_id AND r.status='RECORDED')
             ORDER BY created_at,card_id LIMIT 65''', (not_before, now)).fetchall()
     if len(rows) > 64:
@@ -68,10 +68,10 @@ def page(journal, *, not_before, now, after=None):
     with journal._transaction() as conn:
         CardStore(journal).ready(conn)
         rows = conn.execute('''SELECT created_at,card_id,manifest,digest
-            FROM hl_testnet_cards_v1.cards
+            FROM hl_mainnet_cards_v1.cards
             WHERE created_at >= %s
               AND (manifest->>'source_expires_at')::timestamptz > %s
-              AND EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+              AND EXISTS (SELECT 1 FROM hl_mainnet_cards_v1.delivery_receipts r
                   WHERE r.card_id=cards.card_id AND r.status='RECORDED')
               AND (%s::timestamptz IS NULL OR (created_at,card_id) > (%s::timestamptz,%s))
             ORDER BY created_at,card_id LIMIT 65''',

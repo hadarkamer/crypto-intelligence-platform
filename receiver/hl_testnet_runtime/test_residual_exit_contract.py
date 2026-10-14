@@ -167,7 +167,7 @@ class ResidualWireDatabaseTests(NoExternal):
     def setUp(self):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();cards=CardStore(self.j);cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=Venue()

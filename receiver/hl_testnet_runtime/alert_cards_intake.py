@@ -17,8 +17,8 @@ from . import trade_cards as cards
 from .trade_card_store import CardStore
 from .postgres_journal import PostgresJournal, JournalError
 
-TABLE='hl_testnet_cards_v1.delivery_receipts'
-RESOLUTIONS='hl_testnet_cards_v1.asset_receipt_resolutions'
+TABLE='hl_mainnet_cards_v1.delivery_receipts'
+RESOLUTIONS='hl_mainnet_cards_v1.asset_receipt_resolutions'
 _LOCK=threading.Lock()
 _META=None
 _META_AT=0.0
@@ -55,7 +55,7 @@ def enabled(env):
         and not env.get('HL_TESTNET_SAFETY_PIPELINE')
         and not env.get('HL_TESTNET_CARD_SYNC')
         and env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='disabled')
-    long_intake=(mode=='long_stream_testnet_v1'
+    long_intake=(mode=='long_stream_mainnet_v1'
         and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
         and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
         and env.get('HL_TESTNET_LONG_ENTRY_ENABLED') in ('true','false')
@@ -68,7 +68,7 @@ def enabled(env):
         and env.get('RENDER_SERVICE_ID')=='srv-dakptbh594qs7395460g'
         and env.get('HL_TESTNET_CARDS_PHASE1')=='record_only_v1'
         and env.get('HL_TESTNET_JOURNAL_BACKEND')=='staging_postgres_v1'
-        and (mode in ('read_only','cancel_monitor_testnet_v1') or controlled_intake or long_intake)
+        and (mode in ('read_only','cancel_monitor_mainnet_v1') or controlled_intake or long_intake)
         and bool(wire.HEX.fullmatch(env.get('HL_TESTNET_CARDS_INTAKE_SECRET',''))))
 
 
@@ -79,7 +79,7 @@ def initialize(journal):
         conn.execute(f'''CREATE TABLE IF NOT EXISTS {TABLE} (
             receipt_id text PRIMARY KEY CHECK(length(receipt_id)=64),
             status text NOT NULL CHECK(status IN ('RECORDED','REJECTED')),
-            card_id text REFERENCES hl_testnet_cards_v1.cards(card_id),
+            card_id text REFERENCES hl_mainnet_cards_v1.cards(card_id),
             source jsonb, reason text, received_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
         conn.execute(f'REVOKE ALL ON {TABLE} FROM PUBLIC')
         # A reprocessed valid source may become a DATA card, never executable.
@@ -90,7 +90,7 @@ def initialize(journal):
             previous_reason text NOT NULL CHECK(previous_reason='ASSET_UNAVAILABLE'),
             previous_received_at timestamptz NOT NULL,
             source jsonb NOT NULL,
-            card_id text NOT NULL REFERENCES hl_testnet_cards_v1.cards(card_id),
+            card_id text NOT NULL REFERENCES hl_mainnet_cards_v1.cards(card_id),
             resolved_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
         conn.execute(f'REVOKE ALL ON {RESOLUTIONS} FROM PUBLIC')
 

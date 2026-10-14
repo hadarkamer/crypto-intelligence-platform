@@ -21,7 +21,7 @@ _CYCLE = ContextVar('testnet_simple_cycle_reads', default=None)
 
 def enabled(env):
     return (env.get('RENDER_SERVICE_ID') == 'srv-dakptbh594qs7395460g'
-            and env.get('HL_TESTNET_RUNTIME_MODE') == 'long_stream_testnet_v1'
+            and env.get('HL_TESTNET_RUNTIME_MODE') == 'long_stream_mainnet_v1'
             and not env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID'))
 
 

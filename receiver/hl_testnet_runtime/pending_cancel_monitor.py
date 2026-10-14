@@ -14,10 +14,10 @@ import re
 import threading
 import time
 
-MODE = 'cancel_monitor_testnet_v1'
+MODE = 'cancel_monitor_mainnet_v1'
 SERVICE = 'srv-dakptbh594qs7395460g'
 POLICY = 'favorable-half-formula-threshold-v1'
-STATE = 'hl_testnet_execution_v1.limit_cancel_monitor_state'
+STATE = 'hl_mainnet_execution_v1.limit_cancel_monitor_state'
 MAX_RULES = 32
 INTERVAL_SECONDS = 5
 TERMINAL = frozenset({'ENTRY_ALREADY_FILLED_NO_CANCEL', 'FILL_OBSERVED_DO_NOT_CANCEL',
@@ -65,19 +65,19 @@ class Store:
             self.journal._ready(conn)
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
             for table in ('limit_cancel_rules','limit_cancel_operations'):
-                if conn.execute('SELECT to_regclass(%s)', ('hl_testnet_execution_v1.' + table,)).fetchone()[0] is None:
+                if conn.execute('SELECT to_regclass(%s)', ('hl_mainnet_execution_v1.' + table,)).fetchone()[0] is None:
                     raise MonitorError('REGISTERED_CANCEL_STORAGE_REQUIRED')
             conn.execute(f'''CREATE TABLE IF NOT EXISTS {STATE} (
-                plan_key text PRIMARY KEY REFERENCES hl_testnet_execution_v1.prepared(plan_key),
+                plan_key text PRIMARY KEY REFERENCES hl_mainnet_execution_v1.prepared(plan_key),
                 status text NOT NULL, terminal boolean NOT NULL,
                 observed_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
             conn.execute(f'REVOKE ALL ON {STATE} FROM PUBLIC')
 
     def active_keys(self):
         with self.journal._transaction() as conn:
-            rows = conn.execute(f'''SELECT r.plan_key FROM hl_testnet_execution_v1.limit_cancel_rules r
-                JOIN hl_testnet_execution_v1.prepared p ON p.plan_key=r.plan_key
-                JOIN hl_testnet_execution_v1.attempts a ON a.plan_key=r.plan_key AND a.account=p.account
+            rows = conn.execute(f'''SELECT r.plan_key FROM hl_mainnet_execution_v1.limit_cancel_rules r
+                JOIN hl_mainnet_execution_v1.prepared p ON p.plan_key=r.plan_key
+                JOIN hl_mainnet_execution_v1.attempts a ON a.plan_key=r.plan_key AND a.account=p.account
                 LEFT JOIN {STATE} m ON m.plan_key=r.plan_key
                 WHERE p.account=%s AND NOT coalesce(m.terminal,false)
                 ORDER BY r.created_at,r.plan_key LIMIT %s''', (self.account,MAX_RULES+1)).fetchall()
@@ -92,7 +92,7 @@ class Store:
         # by an older in-flight pass from a different process during deployment.
         with self.journal._transaction() as conn:
             count = conn.execute(f'''INSERT INTO {STATE} AS saved(plan_key,status,terminal)
-                SELECT plan_key,%s,%s FROM hl_testnet_execution_v1.prepared
+                SELECT plan_key,%s,%s FROM hl_mainnet_execution_v1.prepared
                 WHERE plan_key=%s AND account=%s
                 ON CONFLICT(plan_key) DO UPDATE SET
                   status=CASE WHEN saved.terminal THEN saved.status ELSE EXCLUDED.status END,

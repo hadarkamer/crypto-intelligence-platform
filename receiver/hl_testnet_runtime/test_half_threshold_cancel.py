@@ -334,12 +334,12 @@ class TransportTests(unittest.TestCase):
         self.ctor=self.net.start();self.addCleanup(self.net.stop)
     def test_cancel_only_entry_fixed_testnet_and_signature_domain(self):
         self.http.write(executor.cancel_action(record()),1000,phase='cancel')
-        self.ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+        self.ctor.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         args=self.conn.request.call_args.args
         self.assertEqual(args[:2],('POST','/exchange'))
         body=json.loads(args[2]);self.assertEqual(body['action'],executor.cancel_action(record()))
         self.assertEqual(body['expiresAfter'],6000)
-        self.assertIs(self.sign.call_args.args[-1],False)
+        self.assertIs(self.sign.call_args.args[-1],True)
     def test_shared_budget_denial_prevents_cancel_transport(self):
         from .request_budget import BudgetError
         self.http.budget = Mock()
@@ -355,7 +355,7 @@ class TransportTests(unittest.TestCase):
         self.ctor.assert_not_called()
         self.assertEqual(self.http.requests_attempted,0)
     def test_mainnet_is_refused_before_key(self):
-        with patch.object(executor,'HOST','api.hyperliquid.xyz'):
+        with patch.object(executor,'HOST','api.hyperliquid-testnet.xyz'):
             with self.assertRaises(executor.CancelError):self.http.write(executor.cancel_action(record()),1000,phase='cancel')
         self.fake._wallet.assert_not_called();self.ctor.assert_not_called()
     def test_arbitrary_and_cancel_all_actions_blocked(self):

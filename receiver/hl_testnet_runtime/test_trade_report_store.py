@@ -10,7 +10,7 @@ class PrivateReportTests(unittest.TestCase):
     def test_root_health_uses_current_runtime_entry_status(self):
         for running, enabled in ((True, True), (True, False), (False, True)):
             with self.subTest(running=running, enabled=enabled), \
-                 patch.dict('os.environ', {'HL_TESTNET_RUNTIME_MODE':'experimental_testnet_v1'}), \
+                 patch.dict('os.environ', {'HL_TESTNET_RUNTIME_MODE':'experimental_mainnet_v1'}), \
                  patch('hl_testnet_runtime.experimental_live_startup.health', return_value={
                      'running':running, 'new_entries_enabled':enabled}):
                 body = b''.join(app.application({'REQUEST_METHOD':'GET', 'PATH_INFO':'/'}, lambda *a:None))
@@ -81,7 +81,7 @@ class CurrentJournalReportTests(unittest.TestCase):
         value, oid = self.f.start(); self.f.protect(value, oid, '1')
         current, = report._execution_trades(self.f.store)
         older = {**current, 'card_id': 'f'*64}
-        env = {**ENV, 'HL_TESTNET_RUNTIME_MODE': 'experimental_testnet_v1'}
+        env = {**ENV, 'HL_TESTNET_RUNTIME_MODE': 'experimental_mainnet_v1'}
         with patch.object(report.PostgresJournal, 'from_env'), patch.object(report, 'DispatchStore'), \
              patch('hl_testnet_runtime.experimental_live_state.TestnetExecutionState', return_value=self.f.store), \
              patch.object(report, 'observed_trades', side_effect=lambda *a, role, **kw: [older,current] if role=='long_account' else []):

@@ -65,10 +65,10 @@ class OutboxDatabase(MemoryDatabase):
                                     if key == params[0] and not v['canceled'])
                     if sql.startswith('SELECT count(*)'):
                         return Rows([{'count': sum(v['payload_json'] is not None for v in db.outbox.values())}])
-                    if sql.startswith('SELECT occurrence_id FROM approved_alert_execution_outbox'):
+                    if sql.startswith('SELECT occurrence_id FROM approved_alert_execution_outbox_mainnet'):
                         return Rows(v for (key, identity), v in db.outbox.items()
                                     if key == params[0] and identity in params[1])
-                    if sql.startswith('INSERT INTO approved_alert_execution_outbox'):
+                    if sql.startswith('INSERT INTO approved_alert_execution_outbox_mainnet'):
                         key, identity, position, raw, sequence, canceled = params
                         old = db.outbox.get((key, identity))
                         if old and (old['canceled'] or old['source_sequence'] >= sequence): return Rows()
@@ -76,11 +76,11 @@ class OutboxDatabase(MemoryDatabase):
                             source_position_id=position, payload_json=raw, source_sequence=sequence,
                             canceled=canceled, acknowledged_sequence=old['acknowledged_sequence'] if old else 0)
                         return Rows([{'occurrence_id': identity}])
-                    if sql.startswith('SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox'):
+                    if sql.startswith('SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox_mainnet'):
                         found = [v for (key, _), v in db.outbox.items() if key == params[0]
                                  and v['acknowledged_sequence'] < v['source_sequence']]
                         return Rows(sorted(found, key=lambda v: (not v['canceled'], v['source_sequence']))[:params[1]])
-                    if sql.startswith('UPDATE approved_alert_execution_outbox'):
+                    if sql.startswith('UPDATE approved_alert_execution_outbox_mainnet'):
                         seq, keys, identity, exact = params
                         for key in keys:
                             row = db.outbox.get((key, identity))
@@ -352,7 +352,7 @@ class ApprovedOutboxPostgreSQLTests(unittest.TestCase):
         with self.connect() as conn:
             approval, = outbox.read(conn, [key])
             self.assertEqual(approval['kind'], 'ALERT')
-            self.assertEqual(conn.execute('SELECT count(*) AS count FROM approved_alert_execution_outbox').fetchone()['count'], 1)
+            self.assertEqual(conn.execute('SELECT count(*) AS count FROM approved_alert_execution_outbox_mainnet').fetchone()['count'], 1)
         ended = deepcopy(state); ended.update(active=[], history=[], intents=[], bar_cursor_ms=base+4*M)
         with self.assertRaisesRegex(RuntimeError, 'ROLLBACK_SOURCE'):
             with self.connect() as conn:
@@ -370,7 +370,7 @@ class ApprovedOutboxPostgreSQLTests(unittest.TestCase):
         with self.connect() as conn:
             self.assertEqual(outbox.read(conn, [key]), [])
             outbox.synchronize(conn, key, state, now)
-            row = conn.execute('SELECT canceled,payload_json FROM approved_alert_execution_outbox').fetchone()
+            row = conn.execute('SELECT canceled,payload_json FROM approved_alert_execution_outbox_mainnet').fetchone()
             self.assertTrue(row['canceled']); self.assertIsNone(row['payload_json'])
 
 

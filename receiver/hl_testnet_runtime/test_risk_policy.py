@@ -139,7 +139,7 @@ class RiskPolicyTests(unittest.TestCase):
         with patch.object(sender,'_wallet',side_effect=AssertionError('No key')):
             self.assertEqual(sender.submit_once(source(),account=ACCOUNT,journal='/no-file',exit_type='tp_limit_sl_market')['status'],'DISABLED')
     def test_testnet_host_stays_fixed(self):
-        self.assertEqual(sender.TESTNET_HOST,'api.hyperliquid-testnet.xyz')
+        self.assertEqual(sender.TESTNET_HOST,'api.hyperliquid.xyz')
     def test_old_card_and_exit_draft_remain_exact_after_risk_reduction(self):
         from . import trade_cards as cards, filled_quantity_exits as exits
         routes={'long_account':{'account':ACCOUNT}}
@@ -183,7 +183,7 @@ class RiskMigrationPostgresTests(unittest.TestCase):
         key,new,old=self.pair();self.journal.reserve(key,new)
         # Simulate a pre-upgrade stored action in DISPOSABLE localhost CI only.
         with self.journal._transaction() as conn:
-            conn.execute('UPDATE hl_testnet_execution_v1.attempts SET action=%s::jsonb WHERE plan_key=%s',(pg.canonical(old),key))
+            conn.execute('UPDATE hl_mainnet_execution_v1.attempts SET action=%s::jsonb WHERE plan_key=%s',(pg.canonical(old),key))
         other=pg.PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         before=other.load(key)
         self.assertEqual(pg.validate_action(before['action'],before['prepared'],ACCOUNT),old)
@@ -203,7 +203,7 @@ class RiskMigrationPostgresTests(unittest.TestCase):
     def test_old_ten_record_survives_restart_without_resize_or_resend(self):
         key,new,old=self.pair('10');self.journal.reserve(key,new)
         with self.journal._transaction() as conn:
-            conn.execute('UPDATE hl_testnet_execution_v1.attempts SET action=%s::jsonb WHERE plan_key=%s',(pg.canonical(old),key))
+            conn.execute('UPDATE hl_mainnet_execution_v1.attempts SET action=%s::jsonb WHERE plan_key=%s',(pg.canonical(old),key))
         other=pg.PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
         before=other.load(key)
         self.assertEqual(pg.validate_action(before['action'],before['prepared'],ACCOUNT),old)

@@ -69,7 +69,7 @@ def assess(bindings, snapshot, *, now_ms, previous=None):
 def _assess(bindings, snapshot, *, now_ms, previous):
     _shape(snapshot, 'environment account account_role symbol at_ms history_complete orders_complete '
                      'position_complete position_quantity orders fills')
-    if (snapshot['environment'] != 'testnet'
+    if (snapshot['environment'] != 'mainnet'
             or snapshot['account_role'] not in ('long_account','short_account')
             or any(snapshot[k] is not True for k in ('history_complete','orders_complete','position_complete'))
             or type(now_ms) is not int or type(snapshot['at_ms']) is not int

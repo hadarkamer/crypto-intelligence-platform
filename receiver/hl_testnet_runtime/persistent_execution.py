@@ -65,7 +65,7 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
     approved rollout to remove that gate; no health/app reply can remove it.
     Role-bound calls additionally require the default-locked role switch.
     """
-    result = {'mode': 'testnet', 'status': 'DISABLED', 'order_requests_sent': 0,
+    result = {'mode': 'mainnet', 'status': 'DISABLED', 'order_requests_sent': 0,
               'signing_tested': False, 'verified': False}
     if os.environ.get('HL_TESTNET_SAFETY_PIPELINE'):
         return {**result, 'status': 'INTEGRATED_SAFETY_NO_SEND'}
@@ -182,4 +182,4 @@ def inspect_persisted(key, *, journal=None):
     report = sender.verify_orders(sender.TestnetHTTP(), {'signal': record['prepared']['execution'],
         'account': record['account'], 'action': record['action']})
     journal.save_result(key, report)
-    return {**report, 'mode': 'testnet', 'order_requests_sent': 0, 'signing_tested': False}
+    return {**report, 'mode': 'mainnet', 'order_requests_sent': 0, 'signing_tested': False}

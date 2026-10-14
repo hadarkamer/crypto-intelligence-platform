@@ -67,12 +67,12 @@ def _terms(message):
 
 
 def initial():
-    return dict(version=VERSION, environment='testnet', revision=0, records={})
+    return dict(version=VERSION, environment='mainnet', revision=0, records={})
 
 
 def _copy(state):
     if (not isinstance(state, dict) or set(state) != {'version', 'environment', 'revision', 'records'}
-            or state['version'] != VERSION or state['environment'] != 'testnet'
+            or state['version'] != VERSION or state['environment'] != 'mainnet'
             or type(state['revision']) is not int or state['revision'] < 0
             or not isinstance(state['records'], dict) or len(state['records']) > 4096):
         raise PlanError('INVALID_MAXPAIN_STATE')
@@ -242,7 +242,7 @@ def _source_relation(incoming, peer):
 def _market(market, plan, now_ms):
     if (not isinstance(market, dict)
             or set(market) != {'environment', 'symbol', 'at_ms', 'mark_price'}
-            or market['environment'] != 'testnet' or market['symbol'] != plan['symbol']
+            or market['environment'] != 'mainnet' or market['symbol'] != plan['symbol']
             or type(market['at_ms']) is not int or not 0 <= now_ms-market['at_ms'] <= 15000):
         raise PlanError('FRESH_EXACT_TESTNET_MARKET_REQUIRED')
     return _number(market['mark_price'])
@@ -399,7 +399,7 @@ def observe_entry(state, cid, evidence, *, now_ms):
     required = {'environment', 'symbol', 'side', 'request_id', 'order_id', 'at_ms',
                 'status', 'history_complete', 'fills'}
     if (req is None or not isinstance(evidence, dict) or set(evidence) != required
-            or evidence['environment'] != 'testnet' or evidence['symbol'] != record['plan']['symbol']
+            or evidence['environment'] != 'mainnet' or evidence['symbol'] != record['plan']['symbol']
             or evidence['side'] != record['plan']['side'] or evidence['request_id'] != req['request_id']
             or evidence['history_complete'] is not True
             or not isinstance(evidence['order_id'], str)
@@ -573,7 +573,7 @@ def observe_exit(state, cid, request_id, evidence, *, now_ms):
     required = {'environment', 'account_role', 'symbol', 'side', 'request_id', 'order_id',
                 'at_ms', 'status', 'history_complete', 'reduce_only', 'fills'}
     if (request is None or not isinstance(evidence, dict) or set(evidence) != required
-            or evidence['environment'] != 'testnet' or evidence['account_role'] != role
+            or evidence['environment'] != 'mainnet' or evidence['account_role'] != role
             or evidence['symbol'] != record['plan']['symbol']
             or evidence['side'] != ('SELL' if record['plan']['side'] == 'LONG' else 'BUY')
             or evidence['request_id'] != request_id or evidence['reduce_only'] is not True
@@ -640,7 +640,7 @@ def reconcile_finality(state, cid, evidence, *, now_ms):
                 'orders_complete', 'position_complete', 'position_quantity', 'open_order_ids',
                 'terminal_order_ids'}
     if (not isinstance(evidence, dict) or set(evidence) != required
-            or evidence['environment'] != 'testnet' or evidence['account_role'] != role
+            or evidence['environment'] != 'mainnet' or evidence['account_role'] != role
             or evidence['symbol'] != record['plan']['symbol']
             or any(evidence[k] is not True for k in ('history_complete','orders_complete','position_complete'))
             or type(evidence['at_ms']) is not int or not 0 <= now_ms-evidence['at_ms'] <= 15000

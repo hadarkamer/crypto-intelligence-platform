@@ -45,17 +45,17 @@ class SoftwareExchange:
             orders=[deepcopy(o['view']) for o in self.orders.values() if o['account']==account and o['symbol']==symbol and o['view']['oid']!=self.omit_order]
             position=sum((sum((Decimal(f['quantity']) for f in o['view']['fills']),Decimal(0))*(1 if o['view']['wire_order']['b'] else -1)
                 for o in self.orders.values() if o['account']==account and o['symbol']==symbol),Decimal(0))
-            snapshots.append(dict(environment='testnet',account=account,symbol=symbol,at_ms=self.t,history_complete=True,
+            snapshots.append(dict(environment='mainnet',account=account,symbol=symbol,at_ms=self.t,history_complete=True,
                 orders_complete=True,position_complete=True,position_quantity=str(position),orders=orders))
         for cid,s in state['sources'].items():
             msg=s['source'];account=state['routes']['long_account' if msg['side']=='LONG' else 'short_account'];key=self._key(account,msg['symbol'])
             origin=msg['proof'].get('source_price',msg['entry'])
             if msg['family']=='sol_g65':origin=msg['proof']['reference_price']
-            price=self.mark.get(key,str(origin));marks[key]=dict(environment='testnet',account=account,symbol=msg['symbol'],at_ms=self.t,mark_price=price)
+            price=self.mark.get(key,str(origin));marks[key]=dict(environment='mainnet',account=account,symbol=msg['symbol'],at_ms=self.t,mark_price=price)
             values=dict(low=price,high=price,price=price)
             src=dict(environment='mainnet',symbol=msg['symbol'],reference_at_ms=contract.moment_ms(msg['source_at']),at_ms=self.t,
                 history_complete=True,price_source=msg['policy']['source_price'],**values)
-            demo=dict(environment='testnet',symbol=msg['symbol'],reference_at_ms=contract.moment_ms(msg['source_at']),at_ms=self.t,
+            demo=dict(environment='mainnet',symbol=msg['symbol'],reference_at_ms=contract.moment_ms(msg['source_at']),at_ms=self.t,
                 history_complete=True,account=account,price_kind='MARK',**values)
             ranges[cid]=deepcopy(self.paths.get(cid,dict(source=src,testnet=demo)))
             for v in ranges[cid].values():v['at_ms']=self.t
@@ -361,7 +361,7 @@ class RuntimeTests(unittest.TestCase):
     def test_no_live_adapter_or_default_startup(self):
         with self.assertRaisesRegex(runtime.RuntimeError,'EXPLICIT_ISOLATED'):
             runtime.IsolatedExecutionRuntime(self.store,self.venue)
-        self.venue.domain='testnet'
+        self.venue.domain='mainnet'
         with self.assertRaisesRegex(runtime.RuntimeError,'SOFTWARE_EXCHANGE'):
             runtime.IsolatedExecutionRuntime(self.store,self.venue,mode=runtime.MODE)
 

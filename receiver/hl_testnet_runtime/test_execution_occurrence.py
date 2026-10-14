@@ -135,10 +135,10 @@ class ExecutionOccurrenceTests(unittest.TestCase):
         first, second = two_cards()
         at = int(datetime.fromisoformat(first['prepared']['source']['at']).timestamp() * 1000)
         now = at + 1000
-        saved = dict(bucket=life.digest(['testnet', account, 'DEMO']),
+        saved = dict(bucket=life.digest(['mainnet', account, 'DEMO']),
             account=account, symbol='DEMO', revision=1, bindings=[], pending=None,
             originals={}, entry_timing_armed={first['card_id']: at},
-            evidence=dict(bindings=[], snapshot=dict(environment='testnet', account=account,
+            evidence=dict(bindings=[], snapshot=dict(environment='mainnet', account=account,
                 symbol='DEMO', at_ms=now, history_complete=True, orders_complete=True,
                 position_quantity='0', fills=[], open_orders=[], terminal_orders=[])))
         for item in (first, second):
@@ -177,9 +177,9 @@ class ExecutionOccurrenceTests(unittest.TestCase):
                      terminal(bound, 'TAKE_PROFIT', quantity)]
             for item in terms:
                 item['at_ms'] = at + 500
-            saved = dict(bucket=life.digest(['testnet', account, 'DEMO']), account=account,
+            saved = dict(bucket=life.digest(['mainnet', account, 'DEMO']), account=account,
                 symbol='DEMO', revision=1, pending=None, bindings=[bound], originals={},
-                evidence=dict(bindings=[bound], snapshot=dict(environment='testnet',
+                evidence=dict(bindings=[bound], snapshot=dict(environment='mainnet',
                     account=account, symbol='DEMO', at_ms=now, history_complete=True,
                     orders_complete=True, position_quantity='0', fills=fills,
                     open_orders=[], terminal_orders=terms)))

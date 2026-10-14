@@ -11,7 +11,7 @@ def review(identity, journal):
         raise JournalError('EXACT_RECEIPT_ID_REQUIRED')
     with journal._transaction() as conn:
         row = conn.execute('''SELECT status,reason,card_id,source
-            FROM hl_testnet_cards_v1.delivery_receipts WHERE receipt_id=%s''',
+            FROM hl_mainnet_cards_v1.delivery_receipts WHERE receipt_id=%s''',
             (identity,)).fetchone()
     report = dict(receipt_id=identity, status='RECEIPT_NOT_FOUND', order_requests_sent=0,
                   source_matches_card=False, stored_source_hash_matches=False)

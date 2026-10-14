@@ -88,7 +88,7 @@ class FilledQuantityTests(NoOrders):
             before = deepcopy(ev)
             self.assertEqual(assess(ev)['next_step']['leg'],leg)
             bs,s,_,originals = ev
-            state = dict(bucket=life.digest(['testnet',B,'XRP']),account=B,symbol='XRP',
+            state = dict(bucket=life.digest(['mainnet',B,'XRP']),account=B,symbol='XRP',
                 revision=1,bindings=bs,originals=originals,pending=None,
                 evidence=dict(bindings=bs,snapshot=s))
             proposal = dispatch.choose(state,ROUTES,metadata,
@@ -310,7 +310,7 @@ class DurableFilledQuantityTests(NoOrders):
         super().setUp();self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS {durable.SCHEMA} CASCADE')
-            conn.execute('DROP SCHEMA IF EXISTS hl_testnet_execution_v1 CASCADE')
+            conn.execute('DROP SCHEMA IF EXISTS hl_mainnet_execution_v1 CASCADE')
         self.j.bootstrap();self.store=durable.RecoveryJournal(self.j);self.store.initialize()
 
     def test_partial_entry_through_existing_durable_stop_and_take_chain(self):

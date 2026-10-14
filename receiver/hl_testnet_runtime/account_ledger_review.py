@@ -13,7 +13,7 @@ import time
 
 from . import checks
 
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 KINDS = ('userNonFundingLedgerUpdates', 'userFillsByTime', 'userFunding')
 WEEK_MS = 7 * 24 * 60 * 60 * 1000
 AMOUNTS = ('usdc', 'amount', 'fee', 'usdcValue', 'gas', 'gasFee',
@@ -27,7 +27,7 @@ class HistoryReader:
         self.budget = default_budget() if budget is None else budget
 
     def read(self, kind, account, start, end):
-        if (HOST != 'api.hyperliquid-testnet.xyz' or kind not in KINDS
+        if (HOST != 'api.hyperliquid.xyz' or kind not in KINDS
                 or type(start) is not int or type(end) is not int
                 or not 0 <= start < end or end-start > WEEK_MS):
             raise checks.Blocked('PUBLIC_HISTORY_QUERY_REQUIRED')
@@ -39,7 +39,7 @@ class HistoryReader:
                 '/info', body, priority='background', host=HOST)
         except BudgetError as exc:
             raise checks.Blocked(str(exc)) from None
-        connection = http.client.HTTPSConnection('api.hyperliquid-testnet.xyz', timeout=4)
+        connection = http.client.HTTPSConnection('api.hyperliquid.xyz', timeout=4)
         started = time.monotonic()
         try:
             if permit is not None:
@@ -110,7 +110,7 @@ def review_history(account, *, client=None, end_ms=None):
     Ledger excerpt is limited to 32 entries; truncation is explicit. Fill/funding
     counts only describe returned rows within the specified time window.
     """
-    report = dict(environment='testnet', version='balance-ledger-observation-v1',
+    report = dict(environment='mainnet', version='balance-ledger-observation-v1',
         status='PUBLIC_HISTORY_UNAVAILABLE', order_requests_sent=0, transfers_sent=0,
         account_settings_changes=0, signing_tested=False, fee_cause_inferred=False,
         public_reads=0, ledger_entries=[], reads={})

@@ -11,7 +11,7 @@ from .card_lifecycle_store import _continues
 from .postgres_journal import JournalError
 
 VERSION = 'offline-durable-card-recovery-v1'
-SCHEMA = 'hl_testnet_recovery_rehearsal_v1'
+SCHEMA = 'hl_mainnet_recovery_rehearsal_v1'
 TERMINAL = ('OBSERVED', 'ABORTED_NOT_SENT')
 PHASES = ('PREPARED_NOT_SENT', 'OUTCOME_UNKNOWN', 'WAITING_FOR_EVIDENCE',
           'REJECTED_DO_NOT_RETRY', 'CONFLICT_RECONCILIATION_REQUIRED') + TERMINAL
@@ -69,7 +69,7 @@ class RecoveryJournal:
 
     @staticmethod
     def bucket(account, symbol):
-        return life.digest(['testnet', life.address(account), life.ident(symbol, r'[A-Z][A-Z0-9]{0,19}')])
+        return life.digest(['mainnet', life.address(account), life.ident(symbol, r'[A-Z][A-Z0-9]{0,19}')])
 
     def initialize(self):
         """Call explicitly in isolated software tests; not from a recurring task."""
@@ -92,7 +92,7 @@ class RecoveryJournal:
                 bucket text NOT NULL REFERENCES {SCHEMA}.buckets(bucket),
                 phase text NOT NULL CHECK(phase IN {str(PHASES)}),
                 data jsonb NOT NULL, checksum text NOT NULL,
-                environment text NOT NULL DEFAULT 'testnet' CHECK(environment='testnet'),
+                environment text NOT NULL DEFAULT 'mainnet' CHECK(environment='mainnet'),
                 simulation_only boolean NOT NULL DEFAULT true CHECK(simulation_only))''')
             conn.execute(f'''CREATE UNIQUE INDEX recovery_one_unresolved_per_bucket
                 ON {SCHEMA}.requests(bucket) WHERE phase NOT IN ('OBSERVED','ABORTED_NOT_SENT')''')
@@ -122,7 +122,7 @@ class RecoveryJournal:
         bucket, phase, data, checksum = row
         if (life.digest(data) != checksum or data.get('request_id') != request_id
                 or data.get('bucket') != bucket or data.get('phase') != phase
-                or data.get('version') != VERSION or data.get('environment') != 'testnet'
+                or data.get('version') != VERSION or data.get('environment') != 'mainnet'
                 or data.get('simulation_only') is not True):
             raise RecoveryStorageError('RECOVERY_RECORD_INTEGRITY_FAILURE')
         return data
@@ -210,7 +210,7 @@ class RecoveryJournal:
             if proposal['state'] != 'PROPOSED_OFFLINE' or proposal['bucket'] != bucket:
                 raise RecoveryStorageError('FRESH_SAFE_CORRECTION_PROPOSAL_REQUIRED')
             request_id = life.digest([VERSION,bucket,proposal['next_step']['intent_id'],revision+1])
-            return dict(version=VERSION,environment='testnet',simulation_only=True,
+            return dict(version=VERSION,environment='mainnet',simulation_only=True,
                 request_id=request_id,bucket=bucket,phase='PREPARED_NOT_SENT',
                 client_reference='0x'+request_id[:32],proposal=proposal,original_evidence=evidence,
                 prepared_at_ms=now_ms,last_event_at_ms=now_ms,attempt_started_at_ms=None,

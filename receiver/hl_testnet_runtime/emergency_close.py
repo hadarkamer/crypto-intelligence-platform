@@ -15,9 +15,9 @@ from .filled_dispatch_store import DispatchError, DefinitelyUnsent, SCHEMA
 from .card_lifecycle_store import _continues
 from .dispatch_concurrency import market_lane
 
-VERSION = 'testnet-emergency-close-v1'
-APPROVAL = 'approved_testnet_v1'
-CONTINUOUS_RELEASE = 'continuous_testnet_v1'
+VERSION = 'mainnet-emergency-close-v1'
+APPROVAL = 'approved_mainnet_v1'
+CONTINUOUS_RELEASE = 'continuous_mainnet_v1'
 DEADLINE_MS = 5000  # Testnet experiment setting, not a Mainnet latency guarantee.
 SLIPPAGE = Decimal('0.01')
 LOCK = 1729048241
@@ -42,7 +42,7 @@ def continuous_configuration(env):
     if (release != CONTINUOUS_RELEASE
             or env.get('HL_TESTNET_EMERGENCY_CLOSE') != APPROVAL
             or env.get('RENDER_SERVICE_ID') != dispatch.roles.SERVICE
-            or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_testnet_v1'
+            or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_mainnet_v1'
             or env.get('HL_TESTNET_FILLED_DISPATCH') != 'approved_long_stream_v1'
             or env.get('HL_TESTNET_LONG_STREAM') != 'approved_alerts_v1'
             or env.get('HL_TESTNET_SHORT_STREAM') != 'approved_alerts_v1'
@@ -68,9 +68,9 @@ def continuous_storage(venue, *, verify_schema=False):
     from .postgres_journal import PostgresJournal
     from .request_budget import Budget, ready
     store = vars(venue).get('store')
-    if (venue.domain != 'testnet' or not isinstance(store, dispatch.DispatchStore)
-            or store.domain != 'testnet' or not isinstance(store.journal, PostgresJournal)
-            or store.journal._ci is not False or dispatch.HOST != 'api.hyperliquid-testnet.xyz'):
+    if (venue.domain != 'mainnet' or not isinstance(store, dispatch.DispatchStore)
+            or store.domain != 'mainnet' or not isinstance(store.journal, PostgresJournal)
+            or store.journal._ci is not False or dispatch.HOST != 'api.hyperliquid.xyz'):
         raise DispatchError('CONTINUOUS_EMERGENCY_DURABLE_TESTNET_STORE_REQUIRED')
     budget = Budget.from_env(venue.env)
     if budget is None or budget.journal._parameters != store.journal._parameters:
@@ -589,7 +589,7 @@ class Controller:
         life.ident(incident_id,r'[0-9a-f]{64}')
         env=getattr(self.normal.venue,'env',{})
         expected=dict(HL_TESTNET_EMERGENCY_CLOSE=APPROVAL,
-            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1',
             HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
             HL_TESTNET_LONG_STREAM='approved_alerts_v1',HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
             HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
@@ -1135,7 +1135,7 @@ class Venue(dispatch.TestnetVenue):
         env=self.env
         if (env.get('HL_TESTNET_EMERGENCY_CLOSE')!=APPROVAL
                 or env.get('RENDER_SERVICE_ID')!=dispatch.roles.SERVICE
-                or env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1'
+                or env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_mainnet_v1'
                 or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')!='disabled'
                 or env.get('HL_TESTNET_FILLED_DISPATCH')!='approved_long_stream_v1'
                 or env.get('HL_TESTNET_LONG_STREAM')!='approved_alerts_v1'

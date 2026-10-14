@@ -13,8 +13,8 @@ from .experimental_execution_archive import HistoryMixin
 from .postgres_journal import PostgresJournal, STAGING_DB, STAGING_HOST
 from .filled_dispatch_store import DispatchStore, SCHEMA as DISPATCH_SCHEMA
 
-VERSION = 'experimental-testnet-execution-state-v1'
-PG_SCHEMA = 'hl_experimental_testnet_worker_v1'
+VERSION = 'experimental-mainnet-execution-state-v1'
+PG_SCHEMA = 'hl_experimental_mainnet_worker_v1'
 LOCK = 1729048461
 
 
@@ -23,7 +23,7 @@ def initial(routes, not_before_ms):
     accounts = {r: life.address(routes[r]['account']) for r in ('long_account', 'short_account')}
     if len(set(accounts.values())) != 2:
         raise StateError('INDEPENDENT_TESTNET_ACCOUNTS_REQUIRED')
-    return dict(version=VERSION, domain='testnet', revision=0,
+    return dict(version=VERSION, domain='mainnet', revision=0,
                 not_before_ms=not_before_ms, routes=accounts,
                 agents={r: life.address(routes[r]['agent']) for r in accounts},
                 sources={}, trades={}, requests={}, snapshots={}, events=[])
@@ -33,10 +33,10 @@ def checked(raw, checksum):
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
         if (life.digest(value) != checksum or value.get('version') != VERSION
-                or value.get('domain') != 'testnet'
+                or value.get('domain') != 'mainnet'
                 or type(value.get('revision')) is not int or value['revision'] < 0
-                or any(s.get('domain') != 'testnet' for s in value['sources'].values())
-                or any(r.get('domain') != 'testnet' for r in value['requests'].values())):
+                or any(s.get('domain') != 'mainnet' for s in value['sources'].values())
+                or any(r.get('domain') != 'mainnet' for r in value['requests'].values())):
             raise ValueError()
         return deepcopy(value)
     except (ValueError, KeyError, TypeError):
@@ -49,7 +49,7 @@ class TestnetExecutionState(HistoryMixin):
     for_ci is explicit loopback support for tests of the TESTNET data format;
     it never reopens or translates a software-domain state.
     """
-    domain = 'testnet'
+    domain = 'mainnet'
 
     def __init__(self, journal):
         if (type(journal) is not PostgresJournal or journal._ci is not False
@@ -72,7 +72,7 @@ class TestnetExecutionState(HistoryMixin):
 
     def _ready(self, conn):
         row = conn.execute(f'SELECT version,domain FROM {PG_SCHEMA}.metadata WHERE singleton').fetchone()
-        if row != (VERSION, 'testnet'):
+        if row != (VERSION, 'mainnet'):
             raise StateError('EXPLICIT_TESTNET_INITIALIZATION_REQUIRED')
 
     def initialize(self, routes, *, not_before_ms):
@@ -86,7 +86,7 @@ class TestnetExecutionState(HistoryMixin):
                 conn.execute(f'CREATE SCHEMA {PG_SCHEMA}')
                 conn.execute(f'CREATE TABLE {PG_SCHEMA}.metadata(singleton boolean PRIMARY KEY CHECK(singleton), version text NOT NULL, domain text NOT NULL)')
                 conn.execute(f'CREATE TABLE {PG_SCHEMA}.state(singleton boolean PRIMARY KEY CHECK(singleton), value jsonb NOT NULL, checksum text NOT NULL)')
-                conn.execute(f'INSERT INTO {PG_SCHEMA}.metadata VALUES(true,%s,%s)', (VERSION, 'testnet'))
+                conn.execute(f'INSERT INTO {PG_SCHEMA}.metadata VALUES(true,%s,%s)', (VERSION, 'mainnet'))
                 conn.execute(f'INSERT INTO {PG_SCHEMA}.state VALUES(true,%s::jsonb,%s)', (encode(expected), life.digest(expected)))
                 conn.execute(f'REVOKE ALL ON SCHEMA {PG_SCHEMA} FROM PUBLIC')
                 conn.execute(f'REVOKE ALL ON ALL TABLES IN SCHEMA {PG_SCHEMA} FROM PUBLIC')
@@ -159,7 +159,7 @@ class TestnetExecutionState(HistoryMixin):
         reply leaves the claim set and prevents re-use of this attempt forever.
         """
         life.ident(claim_token, r'[0-9a-f]{32}')
-        if request.get('domain') != 'testnet' or 'transport_claim' in request:
+        if request.get('domain') != 'mainnet' or 'transport_claim' in request:
             raise StateError('UNCLAIMED_TESTNET_ATTEMPT_REQUIRED')
         from .filled_dispatch_store import DefinitelyUnsent
         DefinitelyUnsent.identity(request)

@@ -29,7 +29,7 @@ class ProviderError(ValueError):
 
 
 def _empty(account, symbol, at_ms):
-    return dict(environment='testnet', account=account, symbol=symbol,
+    return dict(environment='mainnet', account=account, symbol=symbol,
         at_ms=at_ms, history_complete=True, orders_complete=True,
         position_quantity='0', fills=[], open_orders=[], terminal_orders=[])
 
@@ -38,7 +38,7 @@ def _binding(trade, ids):
     return dict(card_id=trade['cid'], card_digest=life.digest(trade['source']),
         account=trade['account'], role=trade['role'], symbol=trade['symbol'],
         side=trade['side'], planned_quantity=trade['quantity'],
-        prices=deepcopy(trade['prices']), orders=ids, environment='testnet')
+        prices=deepcopy(trade['prices']), orders=ids, environment='mainnet')
 
 
 def _only(snapshot, ids, *, position):
@@ -140,7 +140,7 @@ def _merge_bucket(target, cold):
 
 
 class LiveEvidenceProvider:
-    domain='testnet'
+    domain='mainnet'
 
     def __init__(self, env, *, legacy_store, experimental_store, price_evidence,
                  budget, clock=None, info_reader=None, public_reader=None,
@@ -473,7 +473,7 @@ class LiveEvidenceProvider:
         return result
 
     def collect(self, state, *, entries_enabled=False):
-        if state.get('domain')!='testnet':
+        if state.get('domain')!='mainnet':
             raise ProviderError('NATIVE_TESTNET_STATE_REQUIRED_NO_SOFTWARE_RELABELING')
         # Per-collection transport byte/call ceilings stay bounded. The durable
         # IP budget is SHARED across these fresh readers and never reset.
@@ -1050,7 +1050,7 @@ class LiveEvidenceProvider:
         if cached is None or not 0<=self.now()-cached['context']['inventory_at_ms']<=15000:
             raise ProviderError('FRESH_COLLECTOR_CHECKPOINT_REQUIRED_BEFORE_DISPATCH')
         state=self.experimental_store.load();p=request['proposal'];cid=p['card_id'];entry=p['operation']=='ENTRY'
-        if state.get('domain')!='testnet' or state['requests'].get(request['request_id'])!=request:
+        if state.get('domain')!='mainnet' or state['requests'].get(request['request_id'])!=request:
             raise ProviderError('EXACT_NATIVE_DURABLE_REQUEST_REQUIRED')
         if p['basis']!=life.digest(state['snapshots']):
             raise ProviderError('EXPERIMENTAL_OWNERSHIP_CHANGED_RECONCILE_FIRST')

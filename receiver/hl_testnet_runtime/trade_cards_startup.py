@@ -18,7 +18,7 @@ def run(env, *, journal=None):
         from .trade_card_store import CardStore
         from .postgres_journal import PostgresJournal, JournalError
         if (env.get('RENDER_SERVICE_ID') != 'srv-dakptbh594qs7395460g'
-                or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_testnet_v1')
+                or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_mainnet_v1')
                 or env.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1'):
             raise JournalError('CARD_PHASE1_SERVICE_OR_MODE_NOT_ALLOWED')
         routes = cards.account_routes(env)

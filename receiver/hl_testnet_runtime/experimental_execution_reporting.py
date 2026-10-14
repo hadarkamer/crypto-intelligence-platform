@@ -100,7 +100,7 @@ def _project_rows(state):
 
 def project_history(page, *, domain):
     """Project one checksummed archive page, never all historical state."""
-    if domain not in ('software', 'testnet'):
+    if domain not in ('software', 'mainnet'):
         raise ReportError('VERIFIED_HISTORY_DOMAIN_REQUIRED')
     from .experimental_execution_cards import card_from_record
     rows, occurrences, cards = [], [], []

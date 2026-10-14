@@ -22,7 +22,7 @@ from .trade_card_store import CardStore
 from . import trade_cards
 from . import passive_timing
 
-MODE = 'long_stream_testnet_v1'
+MODE = 'long_stream_mainnet_v1'
 RELEASE = 'approved_long_stream_v1'
 SOURCE = 'approved_alerts_v1'
 _stop = threading.Event()

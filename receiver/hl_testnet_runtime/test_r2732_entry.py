@@ -25,9 +25,9 @@ def fixture(at=T):
     state = entry.receive(entry.initial(ROUTES, not_before_ms=T-60000), msg, now_ms=at+10000)
     source = dict(environment='mainnet', symbol='XRP', reference_at_ms=at, at_ms=at+10000,
         history_complete=True, high='2.3', low='2.299', price='2.3', price_source=entry.condition.SOURCE)
-    market = dict(environment='testnet', symbol='XRP', reference_at_ms=at, at_ms=at+10000,
+    market = dict(environment='mainnet', symbol='XRP', reference_at_ms=at, at_ms=at+10000,
         history_complete=True, high='2.3', low='2.299', price='2.3', account=ACCOUNT, price_kind='MARK')
-    ownership = dict(environment='testnet', account=ACCOUNT, account_role='short_account',
+    ownership = dict(environment='mainnet', account=ACCOUNT, account_role='short_account',
         at_ms=at+10000, complete=True, unresolved_request=False, occurrences=[])
     return state, msg, market, source, ownership
 
@@ -54,7 +54,7 @@ class R2732EntryTests(unittest.TestCase):
         s,msg,m,src,own=fixture(); p=admit((s,msg,m,src,own))
         self.assertEqual(p['source'],msg)
         self.assertEqual(p['execution'],stops.prepare_execution(msg,META))
-        self.assertEqual((p['environment'],p['account_role'],p['account']),('testnet','short_account',ACCOUNT))
+        self.assertEqual((p['environment'],p['account_role'],p['account']),('mainnet','short_account',ACCOUNT))
         self.assertLessEqual(life.number(p['planned_risk_usd']),entry.budget())
         self.assertFalse(p['dispatch_enabled']);self.assertEqual(p['order_requests_sent'],0)
         self.assertNotIn('action',p)
@@ -180,7 +180,7 @@ class R2732EntryTests(unittest.TestCase):
 
     def test_contract_rule_price_direction_and_execution_venue_are_validated(self):
         for mutate in (lambda v:v.update(side='LONG'),lambda v:v.update(stop='2.32'),
-                       lambda v:v.update(execution_environment='mainnet')):
+                       lambda v:v.update(execution_environment='testnet')):
             msg=message();mutate(msg)
             with self.assertRaises(ValueError):entry.receive(entry.initial(ROUTES,not_before_ms=T-60000),msg,now_ms=NOW)
 
@@ -199,7 +199,7 @@ class R2732EntryTests(unittest.TestCase):
             with self.subTest(change=change),self.assertRaisesRegex(entry.EntryError,error):admit(values)
 
     def test_source_and_testnet_price_evidence_cannot_be_substituted(self):
-        for index,change in ((2,dict(environment='mainnet')),(3,dict(environment='testnet')),
+        for index,change in ((2,dict(environment='testnet')),(3,dict(environment='testnet')),
                             (3,dict(price_source='BINANCE_SPOT')),(2,dict(price_kind='TRADE')),
                             (2,dict(account='0x'+'1'*40)),(3,dict(reference_at_ms=T-60000))):
             values=fixture();values[index].update(change)
@@ -255,7 +255,7 @@ class R2732EntryTests(unittest.TestCase):
         binding=dict(card_id=life.digest(['r2732',msg['occurrence_id']]),card_digest=life.digest(msg),
             account=ACCOUNT,role='short_account',symbol='XRP',side='SHORT',
             planned_quantity=p['quantity'],prices=prices,
-            orders=dict(ENTRY=['10'],STOP=['11'],TAKE_PROFIT=['12']),environment='testnet')
+            orders=dict(ENTRY=['10'],STOP=['11'],TAKE_PROFIT=['12']),environment='mainnet')
         filled='40';pending=life.text(life.number(p['quantity'])-life.number(filled))
         opens=[]
         for leg,oid,q in (('ENTRY','10',pending),('STOP','11',filled),('TAKE_PROFIT','12',filled)):
@@ -264,7 +264,7 @@ class R2732EntryTests(unittest.TestCase):
                 trigger_price=None if leg=='ENTRY' else price,side='A' if leg=='ENTRY' else 'B',
                 reduce_only=leg!='ENTRY',state='ACTIVE',
                 order_type='LIMIT' if leg=='ENTRY' else 'SL_MARKET' if leg=='STOP' else 'TP_LIMIT'))
-        snapshot=dict(environment='testnet',account=ACCOUNT,symbol='XRP',at_ms=T+60000,
+        snapshot=dict(environment='mainnet',account=ACCOUNT,symbol='XRP',at_ms=T+60000,
             history_complete=True,orders_complete=True,position_quantity='-40',open_orders=opens,
             terminal_orders=[],fills=[dict(account=ACCOUNT,symbol='XRP',oid='10',fill_id='actual-partial',
                 quantity=filled,price=prices['entry'],fee='0.01',fee_token='USDC',side='A',at_ms=NOW+1000)])

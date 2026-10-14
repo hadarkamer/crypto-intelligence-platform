@@ -12,8 +12,8 @@ import experimental_execution_contract as contract
 from . import two_account_execution as roles
 from .experimental_execution_dispatch import BoundaryError
 
-MODE = 'experimental_testnet_v1'
-DISPATCH = 'approved_testnet_v1'
+MODE = 'experimental_mainnet_v1'
+DISPATCH = 'approved_mainnet_v1'
 HANDOVER = 'retain_legacy_until_flat_v1'
 BOUNDED_ENTRY = 'bounded_v1'
 CONTINUOUS_ENTRY = 'continuous_v1'
@@ -69,7 +69,7 @@ def configuration(env):
             raise ValueError()
         attested = (env.get('HL_TESTNET_EXPERIMENTAL_HANDOVER') != HANDOVER or
             env.get('HL_TESTNET_EXPERIMENTAL_PREDECESSOR_RETIRED_RELEASE') == env['HL_TESTNET_EXPERIMENTAL_RELEASE_ID'])
-        return dict(domain='testnet', release_id=env['HL_TESTNET_EXPERIMENTAL_RELEASE_ID'],
+        return dict(domain='mainnet', release_id=env['HL_TESTNET_EXPERIMENTAL_RELEASE_ID'],
                     dispatch_enabled=True, protection_enabled=True,
                     entries_enabled=env['HL_TESTNET_EXPERIMENTAL_ENTRY_ENABLED'] == 'true' and attested,
                     not_before_ms=start, entry_policy=policy,

@@ -19,8 +19,8 @@ from . import r2732_entry
 from . import experimental_live_release as releases
 import approved_alert_contract as contract
 
-VERSION = 'experimental-testnet-worker-v1'
-MODE = 'explicit_approved_testnet_worker_v1'
+VERSION = 'experimental-mainnet-worker-v1'
+MODE = 'explicit_approved_mainnet_worker_v1'
 
 # These are expected candidate refusals, not permission to swallow corrupt
 # state, missing fields, ownership conflicts or an arbitrary implementation bug.
@@ -92,7 +92,7 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
 
 
 def readiness():
-    return dict(version=VERSION, mode='testnet_explicit_release',
+    return dict(version=VERSION, mode='mainnet_explicit_release',
         live_dispatch_enabled=False, production_ready=False,
         shared_symbol_parallel_enabled=False)
 
@@ -117,7 +117,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         self._cycle_lock = threading.Lock()
         self.release_loader = release_loader
         state = store.load()
-        if state['domain'] != 'testnet':
+        if state['domain'] != 'mainnet':
             raise RuntimeError('DURABLE_TESTNET_STATE_REQUIRED')
         self._release(state, provider.now())
 
@@ -125,7 +125,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         """Expiry closes only admissions. Existing exposure keeps its exits."""
         try:
             release = deepcopy(self.release_loader())
-            if (release.get('domain') != 'testnet'
+            if (release.get('domain') != 'mainnet'
                     or release.get('dispatch_enabled') is not True
                     or release.get('protection_enabled') is not True
                     or type(release.get('entries_enabled')) is not bool
@@ -140,7 +140,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         return release
 
     def receive(self, messages):
-        return self._receive(messages, domain='testnet', status=readiness())
+        return self._receive(messages, domain='mainnet', status=readiness())
 
     def _proposal(self, state, trade, leg, action, quantity, now, *, operation):
         proposal = super()._proposal(state, trade, leg, action, quantity, now, operation=operation)
@@ -285,7 +285,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         if not orders['ENTRY']: return None
         owner=dict(card_id=trade['cid'],card_digest=life.digest(trade['source']),account=trade['account'],
             role=trade['role'],symbol=trade['symbol'],side=trade['side'],planned_quantity=trade['quantity'],
-            prices=deepcopy(trade['prices']),orders=orders,environment='testnet')
+            prices=deepcopy(trade['prices']),orders=orders,environment='mainnet')
         ids={oid for values in orders.values() for oid in values}
         snap=deepcopy(raw)
         for key in ('fills','open_orders','terminal_orders'):snap[key]=[r for r in snap[key] if r['oid'] in ids]
@@ -461,7 +461,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             raise RuntimeError(reason)
         rid = life.digest([VERSION, proposal,
             state.get('archived_request_count', 0) + len(state['requests']), now])
-        request = dict(request_id=rid, domain='testnet',
+        request = dict(request_id=rid, domain='mainnet',
             bucket=_lane(proposal['account'], proposal['symbol']), proposal=proposal,
             nonce=nonce, attempt_at_ms=now, prepared_at_ms=now, attempts=1,
             phase='OUTCOME_UNKNOWN', reply=None, observed_oid=None)
@@ -714,7 +714,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         release = self._release(state, self.venue.now())
         capabilities = readiness()
         capabilities['live_dispatch_enabled'] = release.get('dispatch_enabled') is True
-        return dict(domain='testnet', revision=state['revision'],
+        return dict(domain='mainnet', revision=state['revision'],
             entries_enabled=releases.entry_enabled(release, self.venue.now()),
             sources=len(state['sources']), trades=len(state['trades']),
             history=deepcopy(state.get('history', {})),
@@ -724,6 +724,6 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 for r in state['requests'].values()),
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
             entry_decisions=deepcopy(state.get('entry_decisions', {})),
-            cards=cards_from_state(state, domain='testnet'),
+            cards=cards_from_state(state, domain='mainnet'),
             external_activity=deepcopy(state.get('external_activity',{})),
             blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **capabilities)

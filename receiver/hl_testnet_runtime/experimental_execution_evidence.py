@@ -162,7 +162,7 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_termi
             fills=[{k:f[k] for k in ('fill_id','quantity','price','at_ms')} for f in own_fills])
     if set(observations)!=(set(opened)|set(terminal)|set(fills)):
         raise EvidenceError('UNOWNED_OR_UNPROVEN_ORDER_IN_ACCOUNT_HISTORY')
-    return dict(environment='testnet',account=snapshot['account'],symbol=snapshot['symbol'],
+    return dict(environment='mainnet',account=snapshot['account'],symbol=snapshot['symbol'],
         at_ms=snapshot['at_ms'],history_complete=True,orders_complete=True,position_complete=True,
         position_quantity=snapshot['position_quantity'],orders=[observations[k] for k in sorted(observations,key=int)])
 
@@ -185,7 +185,7 @@ def require_mark_window(window, *, account, symbol, reference_at_ms, now_ms):
     a current metaAndAssetCtxs reply, and gaps permanently reject that occurrence.
     """
     life.shape(window,'environment account symbol price_kind reference_at_ms at_ms history_complete high low price')
-    if (window['environment']!='testnet' or window['account']!=account or window['symbol']!=symbol
+    if (window['environment']!='mainnet' or window['account']!=account or window['symbol']!=symbol
             or window['price_kind']!='MARK' or window['reference_at_ms']!=reference_at_ms
             or window['history_complete'] is not True or type(window['at_ms']) is not int
             or not reference_at_ms<=window['at_ms']<=now_ms or now_ms-window['at_ms']>15000):

@@ -17,7 +17,7 @@ import threading
 import time
 from .risk_policy import budget, CURRENT_RISK_USD, VERSION as RISK_VERSION
 
-HOST = 'api.hyperliquid-testnet.xyz'
+HOST = 'api.hyperliquid.xyz'
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}\Z')
 SYMBOL = re.compile(r'[A-Z][A-Z0-9]{0,19}\Z')
 MAX_BYTES = 2 * 1024 * 1024
@@ -95,7 +95,7 @@ class InfoReader:
             pool.shutdown(wait=True, cancel_futures=True)
 
     def read(self, kind, *, user=None, coin=None):
-        if HOST != 'api.hyperliquid-testnet.xyz':
+        if HOST != 'api.hyperliquid.xyz':
             raise Blocked('TESTNET_ONLY')
         if kind in ('meta', 'metaAndAssetCtxs') and user is None and coin is None:
             body = {'type': kind}

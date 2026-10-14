@@ -23,7 +23,7 @@ INTERVAL=30
 
 def config(env):
     if (env.get('HL_TESTNET_CARD_SYNC')!=MODE or env.get('RENDER_SERVICE_ID')!=SERVICE
-            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_testnet_v1')
+            or env.get('HL_TESTNET_RUNTIME_MODE') not in ('read_only','cancel_monitor_mainnet_v1')
             or env.get('HL_TESTNET_JOURNAL_BACKEND')!='staging_postgres_v1'
             or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='approved_single_attempt_v1'):
         raise SyncError('READ_ONLY_SYNC_NOT_ENABLED')
@@ -56,7 +56,7 @@ def error_code(exc):
 
 def tick(store,routes,*,reader_factory=BudgetReader,clock=now_ms,stop_event=None,
          market_reader_factory=checks.InfoReader):
-    report=dict(status='WAITING_FOR_REGISTERED_EXECUTIONS',environment='testnet',
+    report=dict(status='WAITING_FOR_REGISTERED_EXECUTIONS',environment='mainnet',
         continuous_sync_enabled=True,dispatch_enabled=False,order_requests_sent=0,
         app_delivery_sent=False,public_reads=0,changed=False,card_states={},closure_verified_count=0)
     integrated=getattr(store,'safety_enabled',False)

@@ -206,7 +206,7 @@ class CapacityTests(unittest.TestCase):
         self.second = trade('b' * 64, stop=False)
         s = state(self.first, self.second)
         worker = object.__new__(runtime.IsolatedExecutionRuntime)
-        marks = {runtime._lane(ACCOUNT, 'HYPE'): dict(environment='testnet',
+        marks = {runtime._lane(ACCOUNT, 'HYPE'): dict(environment='mainnet',
             account=ACCOUNT, symbol='HYPE', at_ms=BASE, mark_price='93.544')}
         p = worker._maintain(s, dict(metadata=META, marks=marks), BASE)
         self.assertEqual(p['card_id'], self.second['cid'])

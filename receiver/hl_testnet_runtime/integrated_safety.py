@@ -14,7 +14,7 @@ from .postgres_journal import JournalError, validate_prepared, validate_action
 
 MODE = 'integrated_readonly_v1'
 SERVICE = 'srv-dakptbh594qs7395460g'
-VERSION = 'integrated-testnet-safety-review-v1'
+VERSION = 'integrated-mainnet-safety-review-v1'
 
 
 class SafetyError(JournalError, life.LifecycleError):
@@ -125,7 +125,7 @@ def assess(bindings, snapshot, sample, links, pending, *, revision, now_ms):
     if view['needs_review']: reasons.add('LIFECYCLE_REQUIRES_REVIEW')
     projection = display.project(bindings,snapshot,revision=revision,now_ms=now_ms)
     return dict(version=VERSION, status='REVIEW_REQUIRED' if reasons else 'CHECKED_NO_ACTION_NEEDED',
-        environment='testnet', assessed_cards=len(view['cards']), linked_cards=len(links),
+        environment='mainnet', assessed_cards=len(view['cards']), linked_cards=len(links),
         observed_at_ms=snapshot['at_ms'], assessed_at_ms=now_ms, checked_revision=revision,
         requires_review=bool(reasons), reasons=sorted(reasons), pending_phase=pending_phase,
         partial_policy='AWAITING_OWNERS_DECISION', partial_cards=len(partial),
@@ -148,8 +148,8 @@ def from_database(conn, bindings, snapshot, sample, *, revision, now_ms, journal
     bucket = store.bucket(account, symbol)
     store._lock(conn, bucket)
     rows = conn.execute('''SELECT p.account,p.plan_key,p.manifest,a.action
-        FROM hl_testnet_execution_v1.prepared p
-        JOIN hl_testnet_execution_v1.attempts a ON a.plan_key=p.plan_key AND a.account=p.account
+        FROM hl_mainnet_execution_v1.prepared p
+        JOIN hl_mainnet_execution_v1.attempts a ON a.plan_key=p.plan_key AND a.account=p.account
         WHERE p.account=%s AND p.manifest->'execution'->>'symbol'=%s LIMIT 129''', (account,symbol)).fetchall()
     if len(rows) > 128:
         raise SafetyError('OWNERSHIP_READ_BUDGET_REQUIRES_PAGINATION')

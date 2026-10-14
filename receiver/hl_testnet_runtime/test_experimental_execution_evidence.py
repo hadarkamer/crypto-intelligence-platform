@@ -40,7 +40,7 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(evidence.EvidenceError):evidence.mark_sample(raw,account=self.trade['account'],symbol=self.trade['symbol'],observed_at_ms=at-16000,now_ms=self.h.venue.t)
         with self.assertRaises((ValueError,KeyError)):evidence.require_mark_window(mark,account=self.trade['account'],symbol=self.trade['symbol'],reference_at_ms=at,now_ms=self.h.venue.t)
     def test_reference_mark_window_requires_independent_full_history_proof(self):
-        now=self.h.venue.t;window=dict(environment='testnet',account=self.trade['account'],symbol='XRP',price_kind='MARK',reference_at_ms=now-10000,at_ms=now,history_complete=False,low='2.29',high='2.31',price='2.3')
+        now=self.h.venue.t;window=dict(environment='mainnet',account=self.trade['account'],symbol='XRP',price_kind='MARK',reference_at_ms=now-10000,at_ms=now,history_complete=False,low='2.29',high='2.31',price='2.3')
         with self.assertRaisesRegex(evidence.EvidenceError,'CONTINUOUS_REFERENCE'):evidence.require_mark_window(window,account=self.trade['account'],symbol='XRP',reference_at_ms=now-10000,now_ms=now)
 
 if __name__=='__main__':unittest.main()

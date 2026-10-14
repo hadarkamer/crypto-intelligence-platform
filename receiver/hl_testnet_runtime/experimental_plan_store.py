@@ -13,7 +13,7 @@ import re
 
 from .postgres_journal import JournalError
 
-SCHEMA = 'hl_testnet_experimental_plans_v1'
+SCHEMA = 'hl_mainnet_experimental_plans_v1'
 VERSION = 'experimental-plan-store-v1'
 LOCK = 1729048291
 HEX = re.compile(r'[0-9a-f]{64}\Z')
@@ -119,7 +119,7 @@ def reduce_source(previous, message, *, now, not_before, domain):
     """Atomic input transition; retries do not reset clocks or resume a latch."""
     from approved_alert_contract import validate, plan_digest, is_approved
     message = validate(message)
-    if domain not in ('software', 'testnet'):
+    if domain not in ('software', 'mainnet'):
         raise PlanStoreError('EXPERIMENTAL_DOMAIN_INVALID')
     now, not_before = moment(now), moment(not_before)
     if not_before > now or moment(message['source_as_of']) > now:
@@ -212,7 +212,7 @@ def reduce_source(previous, message, *, now, not_before, domain):
 class PlanStore:
     def __init__(self, journal):
         self.journal = journal
-        self.domain = 'software' if journal._ci else 'testnet'
+        self.domain = 'software' if journal._ci else 'mainnet'
 
     def ready(self, conn):
         if conn.execute(f'SELECT version,domain FROM {SCHEMA}.metadata WHERE singleton').fetchone() != (VERSION, self.domain):

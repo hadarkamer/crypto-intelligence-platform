@@ -49,7 +49,7 @@ class ApprovedAlertContractTests(unittest.TestCase):
     def test_incompatible_policy_prices_identity_and_lease_are_rejected(self):
         bad_cases = [
             ('version', 'unknown'), ('kind', 'HEARTBEAT'),
-            ('source_state', 'PENDING'), ('execution_environment', 'mainnet'),
+            ('source_state', 'PENDING'), ('execution_environment', 'testnet'),
             ('symbol', 'ETH'), ('entry', '91'), ('entry', 93.544),
             ('take_profit', '90'), ('occurrence_id', 'b' * 64),
             ('valid_until', contract.iso_ms(BASE + 90_000)),

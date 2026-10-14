@@ -73,14 +73,14 @@ class RuntimeContract:
             self.memory=MemoryTransactions(LIVE_ROUTES,not_before)
             self.store.load=self.memory.load;self.store.mutate=self.memory.mutate
             self.store.commit_attempt=self.memory.commit_attempt
-        self.release=dict(domain='testnet',release_id='a'*64,dispatch_enabled=True,
+        self.release=dict(domain='mainnet',release_id='a'*64,dispatch_enabled=True,
             protection_enabled=True,entries_enabled=True,not_before_ms=not_before,
             entry_expires_at_ms=max(T,ARM)+86400000,
             routes={role:v['account'] for role,v in LIVE_ROUTES.items()})
         self.provider=object.__new__(self.Provider)
         self.provider.collect=lambda value,**kwargs:self.venue.collect(value);self.provider.now=self.venue.now
         self.port=object.__new__(self.Port)
-        self.port.now=self.venue.now;self.port.domain='testnet'
+        self.port.now=self.venue.now;self.port.domain='mainnet'
         def reserve(proposal):
             self.reservations.append(deepcopy(proposal))
             return wire.TransportAdmission(proposal,isolated._Permit(self.venue.now,self.venue.now()))
@@ -125,11 +125,11 @@ class RuntimeContract:
         for _ in range(3):self.cycle(False)
         self.restart();self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'],'CLOSED')
         value=self.store.load()
-        self.assertEqual({r['domain'] for r in value['requests'].values()},{'testnet'})
-        self.assertEqual({s['domain'] for s in value['sources'].values()},{'testnet'})
+        self.assertEqual({r['domain'] for r in value['requests'].values()},{'mainnet'})
+        self.assertEqual({s['domain'] for s in value['sources'].values()},{'mainnet'})
         self.assertNotIn('budget',value)
         self.assertEqual(len(self.reservations),len(self.venue.requests))
-        self.assertEqual(self.worker.report()['domain'],'testnet')
+        self.assertEqual(self.worker.report()['domain'],'mainnet')
 
     def test_release_expiry_and_entry_halt_keep_partial_fill_protection(self):
         self.venue.instant_fraction=Decimal('.5');msg,_=self.start()

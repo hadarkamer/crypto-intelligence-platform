@@ -38,7 +38,7 @@ class MarketContextTests(unittest.TestCase):
         return self.market.mark(**args)
 
     def test_mark_is_index_bound_and_not_oracle_or_mid(self):
-        self.assertEqual(self.mark(),dict(environment='testnet',account=A,symbol='XRP',
+        self.assertEqual(self.mark(),dict(environment='mainnet',account=A,symbol='XRP',
             mark_price='2.3',at_ms=T))
         self.assertEqual(self.mark(symbol='SOL')['mark_price'],'100')
 
@@ -133,8 +133,8 @@ class MarketContextTests(unittest.TestCase):
             result=checks.InfoReader(budget=budget,priority='protection').read('metaAndAssetCtxs')
         self.assertEqual(result,raw)
         budget.acquire.assert_called_once_with('/info',{'type':'metaAndAssetCtxs'},
-            priority='protection',host='api.hyperliquid-testnet.xyz')
-        ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+            priority='protection',host='api.hyperliquid.xyz')
+        ctor.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         self.assertEqual(json.loads(connection.request.call_args.args[2]),dict(type='metaAndAssetCtxs'))
         permit.check.assert_called_once();permit.finish.assert_called_once_with(raw)
 

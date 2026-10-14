@@ -583,7 +583,7 @@ def apply(state, observation):
             for f in value['accounts'][account].get('fills',[]):
                 if f['symbol']==symbol:
                     facts[f['fill_id']]={k:deepcopy(v) for k,v in f.items() if k!='origin'}
-            trade['manual_closure_snapshot']=dict(environment='testnet',account=account,symbol=symbol,
+            trade['manual_closure_snapshot']=dict(environment='mainnet',account=account,symbol=symbol,
                 at_ms=at,history_complete=True,orders_complete=True,position_quantity='0',
                 fills=sorted(facts.values(),key=lambda f:(f['at_ms'],f['fill_id'])),open_orders=[],
                 terminal_orders=deepcopy(prior_snapshot.get('terminal_orders',[])))

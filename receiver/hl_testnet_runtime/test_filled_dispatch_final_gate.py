@@ -47,7 +47,7 @@ class FinalBoundaryDatabaseTests(fixture.NoExternal):
     def test_each_cycle_reports_only_its_own_request_count(self):
         journal=PostgresJournal.for_ci(CI)
         with journal._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         journal.bootstrap();cards=CardStore(journal);cards.initialize()
         store=DispatchStore(journal);store.initialize();venue=fixture.Venue()

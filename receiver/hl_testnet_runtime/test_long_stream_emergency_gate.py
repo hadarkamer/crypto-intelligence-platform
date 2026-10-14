@@ -13,10 +13,10 @@ from .test_history_gap_recovery import final_state
 
 def candidate(side):
     binding,record=original(side=side,expiry_seconds=600)
-    return dict(bucket=life.digest(['testnet',binding['account'],binding['symbol']]),
+    return dict(bucket=life.digest(['mainnet',binding['account'],binding['symbol']]),
         account=binding['account'],symbol=binding['symbol'],revision=0,
         bindings=[],originals={binding['card_id']:record},pending=None,
-        evidence=dict(bindings=[],snapshot=dict(environment='testnet',
+        evidence=dict(bindings=[],snapshot=dict(environment='mainnet',
             account=binding['account'],symbol=binding['symbol'],at_ms=T,
             history_complete=True,orders_complete=True,position_quantity='0',
             fills=[],open_orders=[],terminal_orders=[])))

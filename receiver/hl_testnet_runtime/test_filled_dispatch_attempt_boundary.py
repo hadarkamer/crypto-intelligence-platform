@@ -24,7 +24,7 @@ def request():
     proposal=m.choose(state,fixtures.ROUTES2,fixtures.META,
         dict(mark_price='10',at_ms=T),now_ms=T)
     return dict(request_id='a'*64,bucket=state['bucket'],proposal=proposal,
-        domain='testnet',phase='OUTCOME_UNKNOWN',attempts=1,
+        domain='mainnet',phase='OUTCOME_UNKNOWN',attempts=1,
         prepared_at_ms=T+1,attempt_at_ms=T+2,nonce=T+2)
 
 
@@ -58,7 +58,7 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
         self.assertEqual(value,before);self.assertEqual(venue.sent,0)
 
     def test_false_domain_phase_or_boolean_attempt_count_rejected(self):
-        for field,value in (('domain','software'),('domain','mainnet'),
+        for field,value in (('domain','software'),('domain','testnet'),
                 ('phase','PREPARED'),('phase','OBSERVED'),('attempts',True),
                 ('attempts',0),('attempts',2)):
             candidate=request();candidate[field]=value
@@ -156,7 +156,7 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
              patch.dict(sys.modules,{'hyperliquid.utils.signing':fake}),\
              patch.object(m.http.client,'HTTPSConnection',return_value=Connection()) as http:
             result=venue.send(value)
-            http.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+            http.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         self.assertEqual(value,before);self.assertEqual(len(calls),1)
         self.assertEqual(calls[0][0:2],('POST','/exchange'))
         wire=m.canonical_wire_action(value['proposal']['action'])
@@ -165,7 +165,7 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
         self.assertEqual(list(fake.calls[0][1]),['type','orders','grouping'])
         self.assertEqual(list(fake.calls[0][1]['orders'][0]),['a','b','p','s','r','t','c'])
         self.assertEqual(calls[0][2]['expiresAfter'],value['nonce']+15000)
-        self.assertIs(fake.calls[0][-1],False)
+        self.assertIs(fake.calls[0][-1],True)
         self.assertEqual(m.normalized_reply(result,'order')['state'],'ACCEPTED_UNVERIFIED')
 
 

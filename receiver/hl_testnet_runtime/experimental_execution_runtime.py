@@ -117,7 +117,7 @@ def _working_entry_active(source, now):
 
 
 def _range(value, msg, now, *, account=None):
-    if (not isinstance(value, dict) or value.get('environment') != ('mainnet' if account is None else 'testnet')
+    if (not isinstance(value, dict) or value.get('environment') != ('mainnet' if account is None else 'mainnet')
             or value.get('symbol') != msg['symbol'] or value.get('history_complete') is not True
             or value.get('reference_at_ms') != contract.moment_ms(msg['source_at'])
             or not isinstance(value.get('at_ms'), int) or not 0 <= now-value['at_ms'] <= 15000
@@ -182,7 +182,7 @@ class IsolatedExecutionRuntime:
     def _snapshot(self, state, snapshot, now):
         required = {'environment','account','symbol','at_ms','history_complete','orders_complete',
                     'position_complete','position_quantity','orders'}
-        if (not isinstance(snapshot, dict) or set(snapshot) != required or snapshot['environment'] != 'testnet'
+        if (not isinstance(snapshot, dict) or set(snapshot) != required or snapshot['environment'] != 'mainnet'
                 or snapshot['account'] not in state['routes'].values()
                 or any(snapshot[k] is not True for k in ('history_complete','orders_complete','position_complete'))
                 or type(snapshot['at_ms']) is not int or not 0 <= now-snapshot['at_ms'] <= 15000
@@ -291,7 +291,7 @@ class IsolatedExecutionRuntime:
                 reduce_only=o['wire_order']['r'],side='BUY' if o['wire_order']['b'] else 'SELL'))
             fills += [{**f,'order_id':o['oid']} for f in o['fills']]
         role = next(r for r,a in state['routes'].items() if a == snapshot['account'])
-        assessment = experimental_allocations.assess(bindings, dict(environment='testnet',account=snapshot['account'],
+        assessment = experimental_allocations.assess(bindings, dict(environment='mainnet',account=snapshot['account'],
             account_role=role,symbol=snapshot['symbol'],at_ms=snapshot['at_ms'],history_complete=True,
             orders_complete=True,position_complete=True,position_quantity=snapshot['position_quantity'],orders=rows,fills=fills), now_ms=now)
         if assessment['status'] != 'RECONCILED':
@@ -325,7 +325,7 @@ class IsolatedExecutionRuntime:
     def _mark(self, trade, context, now, *, max_age=15000):
         value=context['marks'][_lane(trade['account'],trade['symbol'])]
         if (not isinstance(value,dict) or set(value)!={'environment','account','symbol','at_ms','mark_price'}
-                or value['environment']!='testnet' or value['account']!=trade['account'] or value['symbol']!=trade['symbol']
+                or value['environment']!='mainnet' or value['account']!=trade['account'] or value['symbol']!=trade['symbol']
                 or type(value['at_ms']) is not int or not 0<=now-value['at_ms']<=max_age):
             raise RuntimeError('EXACT_FRESH_TESTNET_MARK_SAMPLE_REQUIRED')
         _number(value['mark_price'])
@@ -482,7 +482,7 @@ class IsolatedExecutionRuntime:
             relevant={k:s for k,s in state['sources'].items() if s['source']['family']=='r2732'}
             rs['records']={k:dict(source_record=deepcopy(s),request=None) for k,s in relevant.items()}
             rs['latest_source_ms']=max(contract.moment_ms(s['source']['source_at']) for s in relevant.values())
-            owned=dict(environment='testnet',account=account,account_role=role,at_ms=now,complete=True,unresolved_request=False,
+            owned=dict(environment='mainnet',account=account,account_role=role,at_ms=now,complete=True,unresolved_request=False,
                 occurrences=[dict(occurrence_id=t['cid'],request_id=t['entry_request'],family=t['source']['family'],symbol=t['symbol'],phase=t['phase'],
                     remaining_quantity=life.text(_remaining(t)),working_orders=any(o['status']=='OPEN' for o in t['orders'].values())) for t in peers])
             rp=self._r2732_admission(rs,cid,metadata,paths['testnet'],paths['source'],owned,now_ms=now)

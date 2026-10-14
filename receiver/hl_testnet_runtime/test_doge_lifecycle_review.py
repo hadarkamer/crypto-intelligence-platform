@@ -187,7 +187,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_disabled_and_execution_modes_never_connect(self):
         self.assertEqual(m.run({},journal=object())['status'],'DISABLED')
-        for mode in ('single_testnet_attempt_v1','mainnet','cancel_rehearsal_testnet_v1'):
+        for mode in ('single_mainnet_attempt_v1','mainnet','cancel_rehearsal_mainnet_v1'):
             self.assertEqual(m.run({**env(),'HL_TESTNET_RUNTIME_MODE':mode},journal=object())['status'],'READ_ONLY_MODE_REQUIRED')
         self.assertEqual(m.run({**env(),'HL_TESTNET_TWO_ACCOUNT_EXECUTION':'approved_single_attempt_v1'})['status'],'READ_ONLY_MODE_REQUIRED')
 
@@ -196,7 +196,7 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(m.ReviewError):m.PublicReader().read(kind,A)
         r=m.PublicReader();r.calls=12
         with self.assertRaises(m.ReviewError):r.read('clearinghouseState',A)
-        with patch.object(m,'HOST','api.hyperliquid.xyz'):
+        with patch.object(m,'HOST','api.hyperliquid-testnet.xyz'):
             with self.assertRaises(m.ReviewError):m.PublicReader().read('clearinghouseState',A)
 
     def test_no_key_or_sender_or_app_in_adapter(self):
@@ -213,8 +213,8 @@ class PostgresAdapterTests(unittest.TestCase):
         import hyperliquid_testnet_executor as sender
         self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            conn.execute('DROP SCHEMA IF EXISTS hl_testnet_card_lifecycle_v1 CASCADE')
-            conn.execute('DROP SCHEMA IF EXISTS hl_testnet_execution_v1 CASCADE')
+            conn.execute('DROP SCHEMA IF EXISTS hl_mainnet_card_lifecycle_v1 CASCADE')
+            conn.execute('DROP SCHEMA IF EXISTS hl_mainnet_execution_v1 CASCADE')
         self.j.bootstrap()
         meta={'universe':[{'name':'DOGE','szDecimals':2}]}
         prepared=prepare_signal(record()['prepared']['source'],meta)
@@ -238,8 +238,8 @@ class PostgresAdapterTests(unittest.TestCase):
         self.assertEqual(out['shadow_revision'],1)
         self.assertEqual(m.load_original(self.j,A),self.original)
         with self.j._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],1)
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_card_lifecycle_v1.history').fetchone()[0],1)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],1)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_card_lifecycle_v1.history').fetchone()[0],1)
 
     def test_next_observation_preserves_card_and_history(self):
         first=self.run_review();second=self.run_review(T+100)
@@ -247,15 +247,15 @@ class PostgresAdapterTests(unittest.TestCase):
         self.assertEqual(first['card_id'],second['card_id']);self.assertEqual(second['shadow_revision'],2)
         self.assertTrue(second['previous_shadow_seen'])
         with self.j._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_card_lifecycle_v1.heads').fetchone()[0],1)
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_card_lifecycle_v1.history').fetchone()[0],2)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_card_lifecycle_v1.heads').fetchone()[0],1)
+            self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_card_lifecycle_v1.history').fetchone()[0],2)
 
     def test_incomplete_history_does_not_initialize_shadow(self):
         self.reader.fills.pop()
         out=m.run(env(),journal=self.j,reader=self.reader,clock=lambda:T)
         self.assertIn('TERMINAL_QUANTITIES',out['status'])
         with self.j._transaction() as conn:
-            self.assertIsNone(conn.execute("SELECT to_regnamespace('hl_testnet_card_lifecycle_v1')").fetchone()[0])
+            self.assertIsNone(conn.execute("SELECT to_regnamespace('hl_mainnet_card_lifecycle_v1')").fetchone()[0])
         self.assertEqual(m.load_original(self.j,A),self.original)
 
     def test_missing_saved_trade_does_not_read_exchange(self):

@@ -55,7 +55,7 @@ class ReportingTests(unittest.TestCase):
             report.project(state)
 
     def test_project_cannot_label_simulation_real(self):
-        state = self.store.load(); state['domain'] = 'testnet'
+        state = self.store.load(); state['domain'] = 'mainnet'
         with self.assertRaisesRegex(report.ReportError, 'ISOLATED_STATE'):
             report.project(state)
 

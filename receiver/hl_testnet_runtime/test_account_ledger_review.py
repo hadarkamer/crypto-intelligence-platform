@@ -70,14 +70,14 @@ class LedgerTests(unittest.TestCase):
     def test_non_read_type_cannot_reach_network(self):
         with self.assertRaises(checks.Blocked):mod.HistoryReader().read('order',A,END-1,END)
     def test_changed_host_refused(self):
-        with patch.object(mod,'HOST','api.hyperliquid.xyz'):
+        with patch.object(mod,'HOST','api.hyperliquid-testnet.xyz'):
             with self.assertRaises(checks.Blocked):mod.HistoryReader().read(mod.KINDS[0],A,END-1,END)
     def test_fixed_info_transport_no_secret_headers(self):
         response=Mock(status=200);response.read.return_value=b'[]'
         conn=Mock();conn.getresponse.return_value=response
         with patch.object(mod.http.client,'HTTPSConnection',return_value=conn) as ctor:
             mod.HistoryReader().read(mod.KINDS[0],A,END-1,END)
-        ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+        ctor.assert_called_once_with('api.hyperliquid.xyz',timeout=4)
         args=conn.request.call_args.args
         self.assertEqual(args[:2],('POST','/info'))
         self.assertEqual(json.loads(args[2]),dict(type=mod.KINDS[0],user=A,startTime=END-1,endTime=END))

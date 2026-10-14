@@ -16,7 +16,7 @@ def binding(n=1,side='LONG',account=None,qty='100'):
     return dict(card_id=f'{n:064x}',card_digest='f'*64,account=account,
         role='long_account' if side=='LONG' else 'short_account',symbol='DOGE',side=side,
         planned_quantity=qty,prices=dict(entry='100',stop='98' if side=='LONG' else '102',take_profit='104' if side=='LONG' else '96'),
-        orders={leg:[str(n*10+i)] for i,leg in enumerate(m.LEGS)},environment='testnet')
+        orders={leg:[str(n*10+i)] for i,leg in enumerate(m.LEGS)},environment='mainnet')
 
 
 def fill(b,leg='ENTRY',qty=None,px=None,fid=None,fee='0.1'):
@@ -41,7 +41,7 @@ def terminal(b,leg,qty=None):
 
 
 def snapshot(b,*,fills=None,opens=None,terms=None,position='0'):
-    return dict(environment='testnet',account=b['account'],symbol=b['symbol'],at_ms=T,
+    return dict(environment='mainnet',account=b['account'],symbol=b['symbol'],at_ms=T,
         history_complete=True,orders_complete=True,position_quantity=position,
         fills=fills or [],open_orders=opens or [],terminal_orders=terms or [])
 
@@ -307,7 +307,7 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(m.LifecycleError):run(b,s)
 
     def test_mainnet_rejected_before_processing(self):
-        b=binding();s=opened(b);s['environment']='mainnet'
+        b=binding();s=opened(b);s['environment']='testnet'
         with self.assertRaises(m.LifecycleError):run(b,s)
 
     def test_remaining_entry_cannot_overfill_plan(self):

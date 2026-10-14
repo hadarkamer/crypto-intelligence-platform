@@ -151,7 +151,7 @@ class ContinuousReleaseTests(NoExternal):
             yield conn
         conn=Mock()
         conn.execute.return_value.fetchone.side_effect=[
-            ('filled-dispatch-store-v1','testnet'),
+            ('filled-dispatch-store-v1','mainnet'),
             (venue.store.journal._parameters['dbname'],quota.VERSION,quota.HOST,
              quota.LIMIT,quota.BACKGROUND_LIMIT,quota.WINDOW_MS,quota.TICKETS)]
         status=dict(running=False,last_status=None,last_pass_at_ms=None)
@@ -1141,7 +1141,7 @@ class EmergencyPureTests(NoExternal):
                 proposal=dict(operation='ENTRY',card_id=cid,role='long_account',account=A,symbol='DOGE',
                     source_at=card['prepared']['execution']['at'],observed_at_ms=T,
                     source_expires_at=datetime.fromtimestamp(expires_source/1000,timezone.utc).isoformat())
-                store=Mock();store.domain='testnet';store.load.return_value=state
+                store=Mock();store.domain='mainnet';store.load.return_value=state
                 venue=dispatch.TestnetVenue(environment);venue.now=lambda:now['at']
                 venue.fill_wakeups=ReconciledFillFeed()
                 controller=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
@@ -1207,7 +1207,7 @@ class EmergencyDatabaseTests(NoExternal):
         super().setUp()
         self.j=fixtures.PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,'hl_mainnet_recovery_rehearsal_v1','hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.cards=fixtures.CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize();self.v=NormalVenue()
@@ -1250,7 +1250,7 @@ class EmergencyDatabaseTests(NoExternal):
         state=self.store.load(self.bucket)
         self.assertEqual(state['emergency']['phase'],'CLOSED_VERIFIED')
         self.v.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
-            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1',
             HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
             HL_TESTNET_LONG_STREAM='approved_alerts_v1',HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
             HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
@@ -1333,7 +1333,7 @@ class EmergencyDatabaseTests(NoExternal):
     def actual_emergency_authorization(self):
         self.v.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
             RENDER_SERVICE_ID=dispatch.roles.SERVICE,
-            HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            HL_TESTNET_RUNTIME_MODE='long_stream_mainnet_v1',
             HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
             HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
             HL_TESTNET_LONG_STREAM='approved_alerts_v1',
@@ -1868,7 +1868,7 @@ class SupervisorEmptyCandidateTests(NoExternal):
     def candidate(side='LONG', *, evidence=True):
         binding,record=original(side=side,expiry_seconds=60)
         venue=Venue()
-        return dict(bucket=life.digest(['testnet',binding['account'],binding['symbol']]),
+        return dict(bucket=life.digest(['mainnet',binding['account'],binding['symbol']]),
             account=binding['account'],symbol=binding['symbol'],revision=1,
             bindings=[],originals={binding['card_id']:record},pending=None,emergency=None,
             evidence=(dict(bindings=[],snapshot=venue.empty_snapshot(binding['account'],binding['symbol']))

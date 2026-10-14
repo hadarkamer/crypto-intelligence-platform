@@ -18,7 +18,7 @@ import time
 POLICY = 'favorable-half-formula-threshold-v1'
 SERVICE = 'srv-dakptbh594qs7395460g'
 REVIEW_ENV = 'HL_TESTNET_CANCELLATION_RULE_REVIEW'
-TABLE = 'hl_testnet_execution_v1.limit_cancel_rules'
+TABLE = 'hl_mainnet_execution_v1.limit_cancel_rules'
 
 
 class RuleError(ValueError):
@@ -182,7 +182,7 @@ def register_rule(journal, key, rule):
         journal._ready(conn)
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
         conn.execute(f'''CREATE TABLE IF NOT EXISTS {TABLE} (
-            plan_key text PRIMARY KEY REFERENCES hl_testnet_execution_v1.prepared(plan_key),
+            plan_key text PRIMARY KEY REFERENCES hl_mainnet_execution_v1.prepared(plan_key),
             policy jsonb NOT NULL, threshold_seen boolean NOT NULL DEFAULT false,
             created_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
         conn.execute(f'REVOKE ALL ON {TABLE} FROM PUBLIC')
@@ -225,7 +225,7 @@ def review_configured(env):
         spec = checks.decode(raw)
         account = pg.account_address(env.get('HL_TESTNET_ACCOUNT_ADDRESS'))
         journal = pg.PostgresJournal.from_env(env)
-        key = pg.digest(['testnet', account, spec['event_id']])
+        key = pg.digest(['mainnet', account, spec['event_id']])
         record = journal.load(key)
         if record['account'] != account:
             raise RuleError('CANCEL_RULE_SOURCE_MISMATCH')

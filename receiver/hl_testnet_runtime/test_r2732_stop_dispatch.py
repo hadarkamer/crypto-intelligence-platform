@@ -26,7 +26,7 @@ def binding(contract):
     return dict(card_id=CID, card_digest=life.digest(contract), account=ACCOUNT,
         role='short_account', symbol='XRP', side='SHORT', planned_quantity='100',
         prices={k: execution[k] for k in ('entry', 'stop', 'take_profit')},
-        orders=dict(ENTRY=['10'], STOP=['11'], TAKE_PROFIT=['12']), environment='testnet')
+        orders=dict(ENTRY=['10'], STOP=['11'], TAKE_PROFIT=['12']), environment='mainnet')
 
 
 def order(binding, leg, quantity):
@@ -60,7 +60,7 @@ def initial(quantity='40', entry='2'):
         opens.append(order(owner, 'ENTRY', life.text(100-life.number(quantity))))
     else:
         endings.append({**terminal('10', '100', at=T+1000), 'state': 'FILLED'})
-    snapshot = dict(environment='testnet', account=ACCOUNT, symbol='XRP', at_ms=NOW,
+    snapshot = dict(environment='mainnet', account=ACCOUNT, symbol='XRP', at_ms=NOW,
         history_complete=True, orders_complete=True, position_quantity='-'+quantity,
         fills=[fill(owner, quantity)], open_orders=opens, terminal_orders=endings)
     return stop.initialize(contract, owner, snapshot, metadata=META, now_ms=NOW)

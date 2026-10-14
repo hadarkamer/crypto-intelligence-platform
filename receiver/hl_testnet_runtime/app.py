@@ -52,7 +52,7 @@ def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', '')
     path = environ.get('PATH_INFO', '')
     if path == '/internal/testnet-experimental-plans/v1':
-        if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_testnet_v1':
+        if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_mainnet_v1':
             from .experimental_live_startup import application as connected_intake
             return connected_intake(environ, start_response)
         from .experimental_plan_intake import application as prospective_intake
@@ -96,9 +96,9 @@ def application(environ, start_response):
         mode = os.environ.get('HL_TESTNET_RUNTIME_MODE')
         controlled = False
         filled = mode == 'filled_card_controlled_v1'
-        long_stream = mode == 'long_stream_testnet_v1'
-        experimental = mode == 'experimental_testnet_v1'
-        monitoring = mode == 'cancel_monitor_testnet_v1'
+        long_stream = mode == 'long_stream_mainnet_v1'
+        experimental = mode == 'experimental_mainnet_v1'
+        monitoring = mode == 'cancel_monitor_mainnet_v1'
         rehearsal = False
         report = {'service':'hyperliquid-testnet-preflight','running':True,
             'read_only':not (controlled or filled or long_stream or experimental or monitoring or rehearsal),'single_attempt_configured':controlled,

@@ -42,7 +42,7 @@ def original(side='LONG',source=None,metadata=META):
         at=datetime.fromtimestamp((T-20000)/1000,timezone.utc).isoformat())
     prepared=price_precision.prepare_signal(source,metadata)
     action=sender.build_action(prepared['execution'],metadata,account,exit_type='tp_limit_sl_market')
-    key=digest(['testnet',account,source['event_id']])
+    key=digest(['mainnet',account,source['event_id']])
     b=binding(side=side,account=account,qty=action['orders'][0]['s'])
     b.update(symbol=source['symbol'],card_id=life.digest(['legacy_executed_testnet',account,key]),
         card_digest=life.digest(dict(plan_key=key,prepared=prepared,action=action)),
@@ -130,7 +130,7 @@ class IntegratedSafetyTests(NoVenue):
 
     def test_configuration_blocks_all_executing_modes(self):
         self.assertTrue(s.config(env()))
-        for mode in ('single_testnet_attempt_v1','cancel_monitor_testnet_v1','cancel_rehearsal_testnet_v1'):
+        for mode in ('single_mainnet_attempt_v1','cancel_monitor_mainnet_v1','cancel_rehearsal_mainnet_v1'):
             with self.assertRaises(s.SafetyError):s.config({**env(),'HL_TESTNET_RUNTIME_MODE':mode})
 
     def test_unknown_option_cannot_turn_review_into_execution(self):
@@ -139,7 +139,7 @@ class IntegratedSafetyTests(NoVenue):
             with self.assertRaises(s.SafetyError):s.config({**env(),k:v})
 
     def test_startup_guard_runs_before_any_thread(self):
-        with patch.dict(os.environ,{**env(),'HL_TESTNET_RUNTIME_MODE':'single_testnet_attempt_v1'},clear=True),\
+        with patch.dict(os.environ,{**env(),'HL_TESTNET_RUNTIME_MODE':'single_mainnet_attempt_v1'},clear=True),\
              patch('threading.Thread.start',side_effect=AssertionError('MUST_NOT_START')):
             with self.assertRaises(s.SafetyError):gunicorn_conf.post_worker_init(None)
 
@@ -167,7 +167,7 @@ class IntegratedDatabaseTests(NoVenue):
         super().setUp()
         self.j=PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for name in (SCHEMA,RS,'hl_testnet_cards_v1','hl_testnet_execution_v1'):
+            for name in (SCHEMA,RS,'hl_mainnet_cards_v1','hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
         self.j.bootstrap();self.store=SyncStore(self.j,safety_enabled=True);self.store.initialize()
         self.ls=LifecycleStore(self.j)
@@ -239,7 +239,7 @@ class IntegratedDatabaseTests(NoVenue):
             self.assertEqual(card['risk']['planned_usd'],'2')
             self.assertIsNone(card['actual_execution'])
             with self.j._transaction() as conn:
-                self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+                self.assertEqual(conn.execute('SELECT count(*) FROM hl_mainnet_execution_v1.attempts').fetchone()[0],0)
         out=worker.tick(self.store,{},reader_factory=lambda:(_ for _ in ()).throw(AssertionError('NO_REGISTERED_EXECUTIONS')))
         self.assertEqual(out['status'],'WAITING_FOR_REGISTERED_EXECUTIONS')
         self.assertEqual(out['public_reads'],0)

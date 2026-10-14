@@ -19,11 +19,11 @@ class LiveDispatchTests(unittest.TestCase):
             guard = patch(target, side_effect=AssertionError('NETWORK_FORBIDDEN'))
             guard.start(); self.addCleanup(guard.stop)
         self.request, self.context, self.t = fixture()
-        self.request['domain'] = 'testnet'
+        self.request['domain'] = 'mainnet'
         self.persisted = deepcopy(self.request)
         self.env = deepcopy(self.context['env'])
         self.env['HL_TESTNET_EXPERIMENTAL_DISPATCH'] = live.APPROVAL
-        self.release = dict(domain='testnet', release_id='d'*64, dispatch_enabled=True,
+        self.release = dict(domain='mainnet', release_id='d'*64, dispatch_enabled=True,
             protection_enabled=True, entries_enabled=True,
             not_before_ms=self.context['safety']['not_before_ms'],
             entry_expires_at_ms=self.t+60000,
@@ -90,9 +90,9 @@ class LiveDispatchTests(unittest.TestCase):
         owner = dict(card_id=p['card_id'], card_digest=life.digest(source), account=p['account'],
             role=p['role'], symbol=p['symbol'], side='SHORT', planned_quantity='1000',
             prices=dict(entry='2', stop='2.01', take_profit='1.84'),
-            orders=dict(ENTRY=['1'], STOP=[], TAKE_PROFIT=[]), environment='testnet')
+            orders=dict(ENTRY=['1'], STOP=[], TAKE_PROFIT=[]), environment='mainnet')
         common = dict(account=p['account'], symbol=p['symbol'], oid='1')
-        self.context.update(owner=owner, owner_snapshot=dict(environment='testnet',
+        self.context.update(owner=owner, owner_snapshot=dict(environment='mainnet',
             account=p['account'], symbol=p['symbol'], at_ms=self.t, history_complete=True,
             orders_complete=True, position_quantity='-1000', open_orders=[],
             terminal_orders=[dict(**common, state='FILLED', filled_quantity='1000', at_ms=self.t)],
@@ -134,7 +134,7 @@ class LiveDispatchTests(unittest.TestCase):
         self.assertEqual((host, timeout, method, path), (live.HOST, 4, 'POST', '/exchange'))
         self.assertEqual(body['action'], self.request['proposal']['action'])
         self.assertEqual(set(body), {'action', 'nonce', 'signature', 'expiresAfter'})
-        self.assertFalse(self.signed[0][-1]); self.assertIsNone(self.signed[0][2])
+        self.assertTrue(self.signed[0][-1]); self.assertIsNone(self.signed[0][2])
         self.assertEqual(self.port.sent, 1); self.assertEqual(len(self.closed), 1)
         self.assertEqual(self.acquisitions[0][2], dict(host=live.HOST, priority='background'))
 
@@ -241,7 +241,7 @@ class LiveDispatchTests(unittest.TestCase):
 
     def test_continuous_sender_submits_approved_exact_quote_with_current_mark_at_entry(self):
         self.request,self.context,self.t=approved_fixture(side='SHORT')
-        self.request['domain']='testnet';self.persisted=deepcopy(self.request)
+        self.request['domain']='mainnet';self.persisted=deepcopy(self.request)
         self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None,
             not_before_ms=self.context['safety']['not_before_ms'])
         self.send()
@@ -440,13 +440,13 @@ class ActualSDKSigningTests(unittest.TestCase):
         # Public synthetic fixture key 1, never a user or exchange credential.
         fixture_key = '0x'+'0'*63+'1'
         agent = Account.from_key(fixture_key).address.lower()
-        request, context, now = fixture(); request['domain'] = 'testnet'
+        request, context, now = fixture(); request['domain'] = 'mainnet'
         env = {**context['env'], 'HL_TESTNET_EXPERIMENTAL_DISPATCH': live.APPROVAL,
             'HL_TESTNET_SHORT_AGENT_ADDRESS': agent, 'HL_TESTNET_SHORT_AGENT_KEY': fixture_key}
         context['env'] = {k:v for k,v in env.items() if not k.endswith('_KEY')}
         context['agent'] = agent
         context['entry_account']['agent'] = agent
-        release = dict(domain='testnet', release_id='d'*64, dispatch_enabled=True,
+        release = dict(domain='mainnet', release_id='d'*64, dispatch_enabled=True,
             protection_enabled=True, entries_enabled=True,
             not_before_ms=context['safety']['not_before_ms'], entry_expires_at_ms=now+60000,
             routes={role: live.roles.route_for(env, role)['account'] for role in live.roles.ROLES})
@@ -479,11 +479,11 @@ class ActualSDKSigningTests(unittest.TestCase):
         def recovered(action, nonce, mainnet):
             return recover_agent_or_user_from_l1_action(action, body['signature'], None,
                 nonce, body['expiresAfter'], mainnet).lower()
-        self.assertEqual(recovered(body['action'], body['nonce'], False), agent)
-        self.assertNotEqual(recovered(body['action'], body['nonce'], True), agent)
-        self.assertNotEqual(recovered(body['action'], body['nonce']+1, False), agent)
+        self.assertEqual(recovered(body['action'], body['nonce'], True), agent)
+        self.assertNotEqual(recovered(body['action'], body['nonce'], False), agent)
+        self.assertNotEqual(recovered(body['action'], body['nonce']+1, True), agent)
         changed = deepcopy(body['action']); changed['orders'][0]['s'] = '999'
-        self.assertNotEqual(recovered(changed, body['nonce'], False), agent)
+        self.assertNotEqual(recovered(changed, body['nonce'], True), agent)
 
 
 if __name__ == '__main__': unittest.main()

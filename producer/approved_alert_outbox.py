@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import approved_alert_contract as contract
 from approved_alert_producer import isolated_records, source_positions, source_open, source_end_ms
 
-TABLE = 'approved_alert_execution_outbox'
+TABLE = 'approved_alert_execution_outbox_mainnet'
 MAX_PENDING = 8192
 
 
@@ -19,7 +19,7 @@ def synchronize(conn, source_key, state, now_ms):
     """Called inside the existing source transaction; no DDL/commit/network."""
     rows = conn.execute(
         'SELECT occurrence_id,source_position_id,payload_json,source_sequence,canceled '
-        'FROM approved_alert_execution_outbox WHERE source_key=%s AND NOT canceled',
+        'FROM approved_alert_execution_outbox_mainnet WHERE source_key=%s AND NOT canceled',
         (source_key,)).fetchall()
     positions = {p['position_id']: p for p in source_positions(state)}
     records, ids, errors = isolated_records(state, now_ms=now_ms, fence_ms=1)
@@ -67,10 +67,10 @@ def synchronize(conn, source_key, state, now_ms):
     # taken first and every transaction owns just one source scope, so this
     # global capacity lock cannot introduce an inverse lock acquisition.
     conn.execute("SELECT pg_advisory_xact_lock(hashtext('approved-alert-outbox-capacity-v2'))")
-    count = conn.execute('SELECT count(*) AS count FROM approved_alert_execution_outbox '
+    count = conn.execute('SELECT count(*) AS count FROM approved_alert_execution_outbox_mainnet '
                          'WHERE payload_json IS NOT NULL').fetchone()['count']
     existing = {row['occurrence_id'] for row in conn.execute(
-        'SELECT occurrence_id FROM approved_alert_execution_outbox '
+        'SELECT occurrence_id FROM approved_alert_execution_outbox_mainnet '
         'WHERE source_key=%s AND occurrence_id=ANY(%s)', (source_key, list(records))).fetchall()}
     changed = False
     for identity, value in records.items():
@@ -82,14 +82,14 @@ def synchronize(conn, source_key, state, now_ms):
             continue
         raw = json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
         row = conn.execute(
-            'INSERT INTO approved_alert_execution_outbox '
+            'INSERT INTO approved_alert_execution_outbox_mainnet '
             '(source_key,occurrence_id,source_position_id,payload_json,source_sequence,canceled) '
             'VALUES(%s,%s,%s,%s,%s,%s) '
             'ON CONFLICT(source_key,occurrence_id) DO UPDATE SET '
             'payload_json=EXCLUDED.payload_json,source_sequence=EXCLUDED.source_sequence,'
             'canceled=EXCLUDED.canceled '
-            'WHERE NOT approved_alert_execution_outbox.canceled '
-            'AND EXCLUDED.source_sequence>approved_alert_execution_outbox.source_sequence '
+            'WHERE NOT approved_alert_execution_outbox_mainnet.canceled '
+            'AND EXCLUDED.source_sequence>approved_alert_execution_outbox_mainnet.source_sequence '
             'RETURNING occurrence_id',
             (source_key, identity, ids[identity], raw, value['source_sequence'], value['kind'] == 'CANCEL')).fetchone()
         changed = changed or row is not None
@@ -112,7 +112,7 @@ def read(conn, source_keys, *, isolate=False):
     result = ReadBatch()
     for key in source_keys:
         rows = conn.execute(
-            'SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox '
+            'SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox_mainnet '
             'WHERE source_key=%s AND acknowledged_sequence<source_sequence '
             'ORDER BY canceled DESC,source_sequence LIMIT %s', (key, MAX_PENDING)).fetchall()
         for row in rows:
@@ -140,7 +140,7 @@ def read(conn, source_keys, *, isolate=False):
 def acknowledge(conn, source_keys, value):
     """Exact revision acknowledgement cannot erase a newer cancellation."""
     conn.execute(
-        'UPDATE approved_alert_execution_outbox SET acknowledged_sequence=%s,'
+        'UPDATE approved_alert_execution_outbox_mainnet SET acknowledged_sequence=%s,'
         'payload_json=CASE WHEN canceled THEN NULL ELSE payload_json END '
         'WHERE source_key=ANY(%s) AND occurrence_id=%s AND source_sequence=%s '
         'AND acknowledged_sequence<source_sequence',

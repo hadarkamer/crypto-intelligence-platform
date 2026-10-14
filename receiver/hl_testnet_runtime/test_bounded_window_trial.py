@@ -77,8 +77,8 @@ class WindowPostgresTests(NoExternal):
         super().setUp()
         self.j = PostgresJournal.for_ci(CI)
         with self.j._transaction() as conn:
-            for schema in (SCHEMA, 'hl_testnet_recovery_rehearsal_v1',
-                           'hl_testnet_cards_v1', 'hl_testnet_execution_v1'):
+            for schema in (SCHEMA, 'hl_mainnet_recovery_rehearsal_v1',
+                           'hl_mainnet_cards_v1', 'hl_mainnet_execution_v1'):
                 conn.execute(f'DROP SCHEMA IF EXISTS {schema} CASCADE')
         self.j.bootstrap()
         self.cards = CardStore(self.j)

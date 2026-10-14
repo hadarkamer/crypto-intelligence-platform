@@ -70,7 +70,7 @@ class PriorityTests(NoExternal):
                     for key in ('fills','open_orders','terminal_orders'):
                         history[key]+=current[key]
                     history['position_quantity']=current['position_quantity']
-                    state=dict(bucket=life.digest(['testnet',old['account'],'DOGE']),
+                    state=dict(bucket=life.digest(['mainnet',old['account'],'DOGE']),
                         account=old['account'],symbol='DOGE',revision=1,
                         bindings=[old,live],originals={},pending=None,
                         evidence=dict(bindings=[old,live],snapshot=history))

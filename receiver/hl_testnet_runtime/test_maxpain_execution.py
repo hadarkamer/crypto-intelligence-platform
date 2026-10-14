@@ -39,7 +39,7 @@ def plan(*, timeframe='3d', target=101., source=100., kind='PLAN', at=CREATED,
     signed = target-source
     value = dict(version=contract.VERSION, kind=kind, family='maxpain', occurrence_id='',
         rule_id='HYPE_MAXPAIN_DIST05_15_LONG_TF', symbol='HYPE', side=direction,
-        source_environment='mainnet', execution_environment='testnet', source_price_kind='TRADE_1M',
+        source_environment='mainnet', execution_environment='mainnet', source_price_kind='TRADE_1M',
         source_at=contract.iso_ms(CREATED-10000), created_at=contract.iso_ms(CREATED),
         arm_at=contract.iso_ms(ARM), expires_at=contract.iso_ms(ARM+86400000),
         entry=contract.price(source-2*signed), stop=contract.price(source-5*signed),
@@ -95,7 +95,7 @@ def report_plan(spec, distance, side='LONG', timeframe=None):
     return value
 
 
-def market(now=ARM, price='100', environment='testnet'):
+def market(now=ARM, price='100', environment='mainnet'):
     return dict(environment=environment, symbol='HYPE', at_ms=now, mark_price=price)
 
 
@@ -124,7 +124,7 @@ def attempted():
 
 
 def evidence(state, cid, *, at=ARM+1000, status='OPEN', fills=None):
-    return dict(environment='testnet', symbol='HYPE', side='LONG',
+    return dict(environment='mainnet', symbol='HYPE', side='LONG',
         request_id=state['records'][cid]['request']['request_id'], order_id='41',
         at_ms=at, status=status, history_complete=True, fills=fills or [])
 
@@ -252,7 +252,7 @@ class MaxPainExecutionTests(unittest.TestCase):
 
     def test_source_market_and_stale_evidence_cannot_authorize_demo_entry(self):
         state, cid = ready()
-        for sample in (market(environment='mainnet'), market(now=ARM-15001), market(now=ARM+1)):
+        for sample in (market(environment='testnet'), market(now=ARM-15001), market(now=ARM+1)):
             with self.assertRaisesRegex(execution.PlanError, 'FRESH_EXACT_TESTNET'):
                 admission(state, cid, market=sample)
 
@@ -449,7 +449,7 @@ class MaxPainExecutionTests(unittest.TestCase):
         state,cid=attempted()
         state=execution.observe_entry(state,cid,evidence(state,cid,fills=[fill()]),now_ms=ARM+1000)
         for change in ({'fills':[]},{'fills':[fill('99')]},{'order_id':'42'},
-                       {'environment':'mainnet'},{'history_complete':False},{'request_id':'x'*64}):
+                       {'environment':'testnet'},{'history_complete':False},{'request_id':'x'*64}):
             row=evidence(state,cid,at=ARM+2000,fills=[fill()]);row.update(change)
             with self.assertRaises(execution.PlanError):
                 execution.observe_entry(state,cid,row,now_ms=ARM+2000)
@@ -517,7 +517,7 @@ class MaxPainExecutionTests(unittest.TestCase):
                 self.assertEqual(Decimal(value['take_profit']),source+Decimal(str(spec[5]))*(target-source))
                 state=execution.receive(execution.initial(),value,now_ms=CREATED)
                 cid=value['occurrence_id']
-                sample=dict(environment='testnet',symbol=spec[1],at_ms=ARM,mark_price=value['take_profit'])
+                sample=dict(environment='mainnet',symbol=spec[1],at_ms=ARM,mark_price=value['take_profit'])
                 state=execution.observe_market(state,cid,sample,now_ms=ARM)
                 if spec[5]==.5:
                     self.assertIsNone(state['records'][cid]['cancel_reason'])
@@ -552,7 +552,7 @@ class MaxPainExecutionTests(unittest.TestCase):
             self.assertIsNone(state['records'][value['occurrence_id']]['plan']['proof']['liquidation_amount'])
             result=execution.entry_admission(state,value['occurrence_id'],
                 {'universe':[{'name':spec[1],'szDecimals':2}]},
-                dict(environment='testnet',symbol=spec[1],at_ms=ARM,mark_price='100'),
+                dict(environment='mainnet',symbol=spec[1],at_ms=ARM,mark_price='100'),
                 dict(account_role='long_account',symbol=spec[1],all_prior_cards_final=True,unresolved_request=False),
                 now_ms=ARM)
             self.assertEqual(result['status'],'PROPOSED_SOFTWARE_ONLY')
@@ -594,7 +594,7 @@ class MaxPainExitLifecycleTests(unittest.TestCase):
         return state, next(reversed(state['records'][cid]['exits']))
 
     def observation(self, rid, oid='42', status='OPEN', fills=None, at=ARM+1200):
-        return dict(environment='testnet', account_role='long_account', symbol='HYPE', side='SELL',
+        return dict(environment='mainnet', account_role='long_account', symbol='HYPE', side='SELL',
             request_id=rid, order_id=oid, at_ms=at, status=status, history_complete=True,
             reduce_only=True, fills=fills or [])
 
@@ -602,7 +602,7 @@ class MaxPainExitLifecycleTests(unittest.TestCase):
         return dict(fill_id=identity, quantity=quantity, price='95', at_ms=at)
 
     def final(self, at=ARM+2000, orders=None):
-        return dict(environment='testnet', account_role='long_account', symbol='HYPE', at_ms=at,
+        return dict(environment='mainnet', account_role='long_account', symbol='HYPE', at_ms=at,
             history_complete=True, orders_complete=True, position_complete=True,
             position_quantity='0', open_order_ids=[], terminal_order_ids=orders or ['41','42'])
 
@@ -675,7 +675,7 @@ class MaxPainExitLifecycleTests(unittest.TestCase):
     def test_no_exit_before_attempt_or_unknown_account_or_incomplete_evidence(self):
         state,cid=self.entered();state,rid=self.reserve(state,cid)
         changes=({'account_role':'short_account'},{'side':'BUY'},{'history_complete':False},
-                 {'environment':'mainnet'},{'reduce_only':False},
+                 {'environment':'testnet'},{'reduce_only':False},
                  {'fills':[self.exit_fill(at=ARM+1000)]})
         for change in changes:
             row=self.observation(rid);row.update(change)

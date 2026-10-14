@@ -278,7 +278,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertFalse(startup.start({}))
 
     def test_gunicorn_selects_only_experimental_coordinator(self):
-        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_testnet_v1'}, clear=True), \
+        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_mainnet_v1'}, clear=True), \
              patch.object(startup, 'start') as selected, \
              patch.object(legacy, 'start', side_effect=AssertionError('DUPLICATE')), \
              patch.object(app, 'start_read_only_check', side_effect=AssertionError('WRONG_MODE')):
@@ -286,7 +286,7 @@ class EntrypointTests(unittest.TestCase):
             selected.assert_called_once_with()
 
     def test_startup_pending_returns_503_without_falling_through_to_old_inbox(self):
-        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_testnet_v1'}, clear=True), \
+        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_mainnet_v1'}, clear=True), \
              patch.object(startup, '_coordinator', None), \
              patch('hl_testnet_runtime.experimental_plan_intake.application', side_effect=AssertionError('WRONG_INBOX')):
             statuses=[]
@@ -308,7 +308,7 @@ class EntrypointTests(unittest.TestCase):
         env=dict(PATH_INFO=intake.PATH,REQUEST_METHOD='POST',CONTENT_TYPE='application/json',
             CONTENT_LENGTH=str(len(raw)),HTTP_X_PLAN_TIMESTAMP=stamp,
             HTTP_X_PLAN_SIGNATURE=intake.signature(harness.key,stamp,raw))
-        with patch.dict(os.environ,{'HL_TESTNET_RUNTIME_MODE':'experimental_testnet_v1'},clear=True), \
+        with patch.dict(os.environ,{'HL_TESTNET_RUNTIME_MODE':'experimental_mainnet_v1'},clear=True), \
              patch.object(startup,'_coordinator',SimpleNamespace(service=harness.service)), \
              patch.object(harness.service,'tick',side_effect=AssertionError('HTTP_EXECUTION')):
             for expected in ('RECORDED','DUPLICATE'):
@@ -324,7 +324,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn(msg['occurrence_id'],harness.store.load()['sources'])
 
     def test_health_is_private_value_free_and_reports_attestation_separately(self):
-        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_testnet_v1'}, clear=True), \
+        with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':'experimental_mainnet_v1'}, clear=True), \
              patch.object(startup, '_coordinator', None):
             body=b''.join(app.application(dict(PATH_INFO='/healthz',REQUEST_METHOD='GET'),lambda *args:None))
             value=json.loads(body)
