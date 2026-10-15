@@ -123,11 +123,16 @@ def load_by_event_ids(conn, event_ids: Iterable[int], window_minutes: int) -> di
         raise ValueError("invalid or unbounded metric lookup")
     if not ids:
         return {}
+    # Bind the normalized integers as PostgreSQL array text. psycopg 3.2.3's
+    # recursive list adapter can retain the result through a Transformer cycle
+    # until cyclic GC, even after the cursor and connection have gone away.
+    # This remains a parameter: no ID is interpolated into the SQL statement.
+    ids_parameter = "{" + ",".join(str(value) for value in ids) + "}"
     rows = conn.execute("""
         SELECT event_id,window_minutes,method_version,status,measurement_start_utc,
             window_end_utc,result FROM research_common_window_metrics
         WHERE event_id=ANY(%s::bigint[]) AND window_minutes=%s AND method_version=%s
-    """, (ids, window_minutes, METHOD_VERSION)).fetchall()
+    """, (ids_parameter, window_minutes, METHOD_VERSION)).fetchall()
     return {int(row["event_id"]): {**dict(row.get("result") or {}),
         **{key: row[key] for key in ("event_id", "window_minutes", "method_version", "status", "measurement_start_utc", "window_end_utc")}}
         for row in rows}
