@@ -44,6 +44,10 @@ def tail_window(latest, cutoff):
     # recovered by the durable history cursor while current tails remain first.
     start = (latest if latest else cutoff.replace(second=0, microsecond=0)-9*archive.MINUTE)
     start = max(start, cutoff.replace(second=0, microsecond=0)-999*archive.MINUTE)
+    # Other archive writers can advance latest beyond this pass's fixed cutoff.
+    # Keep the overlap within the final closed candle admitted by archive.bounds.
+    last = (cutoff+archive.MILLISECOND).replace(second=0, microsecond=0)-archive.MINUTE
+    start = min(start, last)
     return start, cutoff
 
 

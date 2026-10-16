@@ -1,5 +1,6 @@
 """Focused source, exact-gap and durable-worker scheduling contracts."""
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 import os
 import unittest
 from unittest.mock import patch
@@ -137,6 +138,76 @@ class PriceArchiveTests(unittest.TestCase):
         state['history_cursor_utc']=first[1]+a.MILLISECOND
         # The next process consumes the committed cursor, not process memory.
         self.assertEqual(w.history_window(dict(state),cutoff,NOW)[0],START+1000*a.MINUTE)
+
+    def test_tail_latest_after_fixed_cutoff_keeps_only_final_closed_minute(self):
+        cutoff=START+a.MINUTE-a.MILLISECOND
+        for latest in (START+a.MINUTE,START+2*a.MINUTE,NOW):
+            with self.subTest(latest=latest):
+                start,end=w.tail_window(latest,cutoff)
+                self.assertEqual((start,end),(START,cutoff))
+                self.assertEqual(a.bounds(start,end),(START,START,1))
+                self.assertLessEqual(start+a.MINUTE-a.MILLISECOND,cutoff)
+
+    def test_tail_cutoff_alignment_uses_inclusive_closed_candle_contract(self):
+        for cutoff,eligible in (
+            (START+a.MINUTE-a.MILLISECOND,START),
+            (START+a.MINUTE,START),
+            (START+a.MINUTE-a.MILLISECOND-timedelta(microseconds=1),START-a.MINUTE),
+            (START+a.MINUTE+timedelta(seconds=30),START),
+        ):
+            with self.subTest(cutoff=cutoff):
+                # A direct min(latest, cutoff) would leave start == end.
+                start,end=w.tail_window(cutoff,cutoff)
+                self.assertEqual((start,end),(eligible,cutoff))
+                self.assertEqual(a.bounds(start,end),(eligible,eligible,1))
+                self.assertLessEqual(eligible+a.MINUTE-a.MILLISECOND,cutoff)
+
+    def test_tail_normal_overlap_empty_cache_and_page_budget_are_preserved(self):
+        cutoff=START+10*a.MINUTE-a.MILLISECOND
+        for latest,expected_start,count in (
+            (START+4*a.MINUTE,START+4*a.MINUTE,6),
+            (START+9*a.MINUTE,START+9*a.MINUTE,1),
+            (None,START,10),
+            (START-timedelta(days=5),START-990*a.MINUTE,1000),
+        ):
+            with self.subTest(latest=latest):
+                start,end=w.tail_window(latest,cutoff)
+                self.assertEqual((start,end),(expected_start,cutoff))
+                self.assertEqual(a.bounds(start,end)[2],count)
+
+    def test_tail_page_with_newer_cached_bar_does_not_fetch_or_admit_it(self):
+        cutoff=START+a.MINUTE-a.MILLISECOND
+        stored=[bar(0),bar(1)]
+        queries=[]
+        class Reply:
+            def __init__(self,rows): self.rows=rows
+            def fetchall(self): return self.rows
+            def fetchone(self): return self.rows[0]
+        class Connection:
+            def transaction(self): return nullcontext()
+            def execute(self,sql,params):
+                sql=' '.join(sql.split())
+                queries.append((sql,params))
+                if sql.startswith('SELECT open_time_utc,close_time_utc'):
+                    first,last=params[2:]
+                    return Reply([row for row in stored if first<=row['open_time_utc']<=last])
+                if sql.startswith('SELECT COALESCE(max(attempts),0)'):
+                    return Reply([{'attempts':0}])
+                if sql.startswith(('DELETE FROM research_price_archive_gaps',
+                                   'UPDATE research_price_archive_cursors SET')):
+                    return Reply([])
+                raise AssertionError('Unexpected archive SQL')
+        def forbidden_fetch(*args):
+            raise AssertionError('An already cached closed candle must not be refetched')
+        start,end=w.tail_window(stored[-1]['open_time_utc'],cutoff)
+        result=w._collect_page(Connection(),{'route':a.BINANCE_SPOT,'symbol':'BTC'},
+            start,end,{a.BINANCE_SPOT:forbidden_fetch},cutoff,lane='tail')
+        self.assertEqual(result,dict(route=a.BINANCE_SPOT,symbol='BTC',lane='tail',
+                                    complete=True,candles=1,cached=1))
+        reads=[params for sql,params in queries if sql.startswith('SELECT open_time_utc,close_time_utc')]
+        self.assertEqual(reads,[(a.BINANCE_SPOT,'BTC',START,START)]*2)
+        with self.assertRaisesRegex(ValueError,'outside'):
+            a.validate_path(a.BINANCE_SPOT,'BTC',path(indices=(0,1)),start,end,now=NOW)
 
     def test_hype_retention_floor_is_explicit_not_infinite_retry(self):
         floor=w.retention_floor(a.HYPERLIQUID_PERP,NOW)
