@@ -2,6 +2,9 @@
 
 The research mathematics remains research_btc_wave_endpoint_report's contract.
 Only storage/provenance changes: exact rows and IDs live in generation parts.
+Part payloads use PostgreSQL JSON, preserving the original numeric literals.
+JSONB would turn 1e+16 into an integer-looking token and erase signed zero,
+breaking both canonical evidence digests and native floating summation types.
 Call aggregate_generation inside the caller's repeatable-read transaction after
 source verification. This module neither commits nor writes database rows.
 """
@@ -166,7 +169,7 @@ def _stream(conn, sql, params, *, batch_rows=CURSOR_ROWS):
 
 
 _RECORDS_FROM = """FROM research_btc_wave_report_parts p
-    CROSS JOIN LATERAL jsonb_array_elements(p.report->'records') AS r(record)
+    CROSS JOIN LATERAL json_array_elements(p.report->'records') AS r(record)
     WHERE p.generation_id=%s AND r.record->>'source_scope'=%s
       AND r.record->>'coin_scope'=%s AND r.record->>'direction'=%s"""
 _RECORD_ORDER = " ORDER BY (r.record->>'btc_parent_movement_id') COLLATE \"C\", (r.record->>'source_event_id')::bigint"
@@ -216,7 +219,7 @@ def aggregate_generation(conn, generation_id, observed_at, manifest):
     groups = conn.execute("""SELECT DISTINCT r.record->>'source_scope' AS source_scope,
         r.record->>'coin_scope' AS coin_scope,r.record->>'direction' AS direction
         FROM research_btc_wave_report_parts p
-        CROSS JOIN LATERAL jsonb_array_elements(p.report->'records') AS r(record)
+        CROSS JOIN LATERAL json_array_elements(p.report->'records') AS r(record)
         WHERE p.generation_id=%s LIMIT %s""", (generation_id, MAX_GROUPS + 1)).fetchall()
     groups = [tuple(row[key] for key in ("source_scope", "coin_scope", "direction")) for row in groups]
     def records(group):

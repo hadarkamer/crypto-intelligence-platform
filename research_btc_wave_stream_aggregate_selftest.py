@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import timedelta
 import json
+import math
 import os
 import unittest
 import weakref
@@ -181,7 +182,7 @@ class StreamingAggregatePostgresTests(unittest.TestCase):
         self.conn.execute('''CREATE TABLE research_btc_wave_report_generations(
             generation_id uuid PRIMARY KEY,observed_at_utc timestamptz,parent_count integer,status text)''')
         self.conn.execute('''CREATE TABLE research_btc_wave_report_parts(
-            generation_id uuid,ordinal integer,parent_id text,report jsonb,report_digest text,
+            generation_id uuid,ordinal integer,parent_id text,report json,report_digest text,
             PRIMARY KEY(generation_id,ordinal),UNIQUE(generation_id,parent_id))''')
 
     def tearDown(self):
@@ -201,7 +202,7 @@ class StreamingAggregatePostgresTests(unittest.TestCase):
                 parent['end_time_utc'] = None
             completed = {'method_version': native.METHOD_VERSION, 'observed_at_utc': NOW,
                          'waves': [parent], 'records': selected, 'summary_rows': native.aggregate_records(selected)}
-            self.conn.execute('INSERT INTO research_btc_wave_report_parts VALUES(%s,%s,%s,%s::jsonb,%s)',
+            self.conn.execute('INSERT INTO research_btc_wave_report_parts VALUES(%s,%s,%s,%s::json,%s)',
                 (generation_id, ordinal, parent_id, stream._canonical(completed), stream._digest(completed)))
         manifest = {'storage_version': stream.STORAGE_VERSION, 'generation_id': generation_id,
                     'parent_count': count, 'source_manifest_digest': 'a'*64}
@@ -245,7 +246,7 @@ class StreamingAggregatePostgresTests(unittest.TestCase):
                 elif failure == 'missing_report':
                     self.conn.execute('UPDATE research_btc_wave_report_parts SET report=NULL WHERE generation_id=%s AND ordinal=0', (generation_id,))
                 else:
-                    self.conn.execute("UPDATE research_btc_wave_report_parts SET report=jsonb_set(report,'{changed}','true') WHERE generation_id=%s AND ordinal=0", (generation_id,))
+                    self.conn.execute("UPDATE research_btc_wave_report_parts SET report=jsonb_set(report::jsonb,'{changed}','true')::json WHERE generation_id=%s AND ordinal=0", (generation_id,))
                 with self.assertRaises(ValueError):
                     self.aggregate(generation_id, manifest)
 
@@ -258,7 +259,7 @@ class StreamingAggregatePostgresTests(unittest.TestCase):
                     selected['records'].append(dict(selected['records'][0]))
                 else:
                     selected['records'][0]['btc_parent_movement_id'] = 'wrong'
-                self.conn.execute('UPDATE research_btc_wave_report_parts SET report=%s::jsonb,report_digest=%s WHERE generation_id=%s AND ordinal=0',
+                self.conn.execute('UPDATE research_btc_wave_report_parts SET report=%s::json,report_digest=%s WHERE generation_id=%s AND ordinal=0',
                     (stream._canonical(selected), stream._digest(selected), generation_id))
                 with self.assertRaises(ValueError):
                     self.aggregate(generation_id, manifest)
@@ -274,10 +275,42 @@ class StreamingAggregatePostgresTests(unittest.TestCase):
             for row in rows:
                 if row['btc_parent_movement_id'] == parent:
                     row.update(mfe_pct=value, provisional_observed_mfe_pct=value)
-            self.conn.execute('UPDATE research_btc_wave_report_parts SET report=%s::jsonb,report_digest=%s WHERE generation_id=%s AND ordinal=%s',
+            self.conn.execute('UPDATE research_btc_wave_report_parts SET report=%s::json,report_digest=%s WHERE generation_id=%s AND ordinal=%s',
                 (stream._canonical(stored['report']), stream._digest(stored['report']), generation_id, stored['ordinal']))
         actual = self.aggregate(generation_id, manifest)
         assert_native_parity(self, actual, rows, generation_id)
+
+    def test_json_preserves_numeric_evidence_and_scalar_types_jsonb_cannot(self):
+        generation_id, manifest, rows = self.seed(1, variations=False)
+        stored = self.conn.execute('SELECT report FROM research_btc_wave_report_parts WHERE generation_id=%s',
+                                   (generation_id,)).fetchone()['report']
+        stored['numeric_evidence'] = [1e16, 1e-16, -0.0, 1.0, 1]
+        # Values belong to separate exact native fields, so both their literal
+        # types and signed zero must survive storage and scalar cursor reads.
+        for row in stored['records']:
+            row.update(mfe_pct=1e16, mae_pct=1e-16,
+                       provisional_observed_mfe_pct=-0.0, provisional_observed_mae_pct=1.0)
+        encoded, expected_digest = stream._canonical(stored), stream._digest(stored)
+        self.conn.execute('UPDATE research_btc_wave_report_parts SET report=%s::json,report_digest=%s WHERE generation_id=%s',
+                          (encoded, expected_digest, generation_id))
+        decoded = self.conn.execute('SELECT report,report::text AS original_text,report::jsonb AS lossy_projection FROM research_btc_wave_report_parts WHERE generation_id=%s',
+                                    (generation_id,)).fetchone()
+        self.assertEqual(decoded['original_text'], encoded)
+        self.assertEqual(stream._digest(decoded['report']), expected_digest)
+        self.assertNotEqual(stream._digest(decoded['lossy_projection']), expected_digest)
+        values = decoded['report']['numeric_evidence']
+        self.assertEqual([type(v) for v in values], [float, float, float, float, int])
+        self.assertEqual(math.copysign(1., values[2]), -1.)
+        with self.conn.transaction():
+            cursor_rows = list(stream._stream(self.conn, '''SELECT r.record->'mfe_pct' AS large,
+                r.record->'mae_pct' AS tiny,r.record->'provisional_observed_mfe_pct' AS signed_zero
+                FROM research_btc_wave_report_parts p
+                CROSS JOIN LATERAL json_array_elements(p.report->'records') r(record)
+                WHERE generation_id=%s''', (generation_id,)))
+        self.assertTrue(all(type(row['large']) is float and type(row['tiny']) is float for row in cursor_rows))
+        self.assertTrue(all(math.copysign(1., row['signed_zero']) == -1. for row in cursor_rows))
+        actual = self.aggregate(generation_id, manifest)
+        assert_native_parity(self, actual, stored['records'], generation_id)
 
 
 if __name__ == '__main__':

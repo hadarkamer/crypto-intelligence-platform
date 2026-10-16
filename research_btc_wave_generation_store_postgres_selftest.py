@@ -1,6 +1,7 @@
 """Real PostgreSQL source parts, snapshot validation and bounded legacy reuse."""
 from datetime import timedelta
 import json
+import math
 import os
 from pathlib import Path
 import unittest
@@ -184,10 +185,10 @@ class GenerationStorePostgresTests(unittest.TestCase):
         self.complete_parts(generation)
         for field in ('source','report'):
             with self.subTest(field=field):
-                self.conn.execute(f"UPDATE research_btc_wave_report_parts SET {field}={field}||'{{\"tampered\":true}}'::jsonb")
+                self.conn.execute(f"UPDATE research_btc_wave_report_parts SET {field}=({field}::jsonb||'{{\"tampered\":true}}'::jsonb)::json")
                 self.assertEqual(self.validate(generation)['reason'],'STORED_PART_INTEGRITY_FAILED')
                 # Restore the exact persisted part for the next independent check.
-                self.conn.execute(f"UPDATE research_btc_wave_report_parts SET {field}={field}-'tampered'")
+                self.conn.execute(f"UPDATE research_btc_wave_report_parts SET {field}=({field}::jsonb-'tampered')::json")
         import psycopg
         with self.assertRaises(psycopg.errors.CheckViolation):
             self.conn.execute('UPDATE research_btc_wave_report_parts SET source_digest=NULL')
@@ -213,6 +214,39 @@ class GenerationStorePostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'REPORT_PART_EXCEEDS'):
             store.save_checkpoint(self.conn,generation,0,source=source,job=None,completed_report=report_large)
         self.assertEqual(store.get_part(self.conn,generation,0)['job'],stored['job'])
+
+    def test_source_checkpoint_and_report_preserve_original_numeric_literals_and_hashes(self):
+        observed=populate_source(self.conn,1)
+        self.conn.execute('UPDATE research_events SET current_price=%s',(1e16,))
+        generation=self.freeze(observed)
+        source=store.load_part_source(self.conn,'wave-0000',observed)
+        self.assertIs(type(source['events'][0]['current_price']),float)
+        numbers={'large':1e16,'negative_zero':-0.0,'small':1e-16,'integer':10**16}
+        source['numeric_roundtrip_probe']=numbers
+        job=worker.prepare_job(source,observed)
+        job['numeric_roundtrip_probe']=numbers
+        original_job=store.canonical(job)
+        source_hash=store.digest(source)
+        store.save_checkpoint(self.conn,generation,0,source=source,job=job)
+        persisted=store.get_part(self.conn,generation,0)
+        self.assertEqual(store.canonical(persisted['source']),store.canonical(source))
+        self.assertEqual(persisted['source_digest'],source_hash)
+        self.assertEqual(store.digest(persisted['source']),source_hash)
+        self.assertEqual(store.canonical({**persisted['job'],'source':persisted['source']}),original_job)
+        completed={'source_digest':source_hash,'method_version':worker.report.METHOD_VERSION,
+                   'observed_at_utc':observed,'numeric_roundtrip_probe':numbers,'records':[]}
+        store.save_checkpoint(self.conn,generation,0,source=source,job=None,completed_report=completed)
+        final=store.get_part(self.conn,generation,0)
+        self.assertEqual(store.canonical(final['report']),store.canonical(completed))
+        self.assertEqual(final['report_digest'],store.digest(completed))
+        for payload in (persisted['source'],persisted['job'],final['report']):
+            probe=payload['numeric_roundtrip_probe']
+            self.assertIs(type(probe['large']),float)
+            self.assertIs(type(probe['small']),float)
+            self.assertIs(type(probe['integer']),int)
+            self.assertEqual(math.copysign(1.,probe['negative_zero']),-1.)
+        self.assertEqual(final['source_bytes'],len(store.canonical(source).encode()))
+        self.assertEqual(final['report_bytes'],len(store.canonical(completed).encode()))
 
     def test_legacy_and_published_part_cache_are_filtered_to_one_parent_with_successor(self):
         observed=populate_source(self.conn,3)

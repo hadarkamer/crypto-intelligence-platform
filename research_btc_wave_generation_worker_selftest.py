@@ -234,7 +234,7 @@ class ControllerPostgresChecks(unittest.TestCase):
         for _ in range(4):
             self.assertFalse(self.run_worker()["published"])
         pointer = self.state()["pending_job"]
-        self.conn.execute("UPDATE research_btc_wave_report_parts SET report=jsonb_set(report,'{candidate}','\"tampered\"'::jsonb) WHERE generation_id=%s::uuid AND ordinal=0", (pointer["generation_id"],))
+        self.conn.execute("UPDATE research_btc_wave_report_parts SET report=jsonb_set(report::jsonb,'{candidate}','\"tampered\"'::jsonb)::json WHERE generation_id=%s::uuid AND ordinal=0", (pointer["generation_id"],))
         result = self.run_worker()
         self.assertTrue(result["source_changed"])
         self.assertEqual(result["validation_reason"], "STORED_PART_INTEGRITY_FAILED")
@@ -257,6 +257,39 @@ class ControllerPostgresChecks(unittest.TestCase):
         self.assertTrue(published["published"])
         self.assertEqual(self.state()["report_observed_at_utc"], later)
         self.assertEqual(self.state()["report"]["parent_count"], 1)
+
+    def test_numeric_root_roundtrip_binds_exact_sheet_ack(self):
+        original_aggregate = controller.aggregate.aggregate_generation
+        before_storage = {}
+        def aggregate_with_numeric_probe(*args, **kwargs):
+            completed = original_aggregate(*args, **kwargs)
+            completed["numeric_storage_probe"] = {"large_float": 1e16, "negative_zero": -0.0}
+            # The serializer hash must be taken only after the JSONB roundtrip.
+            # These scalars deliberately reproduce the PostgreSQL type/spelling
+            # change without substituting any calculated research outcome.
+            before_storage["probe"] = completed["numeric_storage_probe"]
+            return completed
+        with patch.object(controller.aggregate, "aggregate_generation", aggregate_with_numeric_probe):
+            published = self.complete()
+        state = self.state()
+        root_hash = worker.digest(state["report"])
+        self.assertEqual(published["report_digest"], root_hash)
+        self.assertEqual(state["report"]["numeric_storage_probe"]["large_float"], 10**16)
+        self.assertIsInstance(state["report"]["numeric_storage_probe"]["large_float"], int)
+        self.assertNotEqual(worker.canonical(state["report"]["numeric_storage_probe"]),
+                            worker.canonical(before_storage["probe"]))
+        rows = self.conn.execute("SELECT payload->'row'->>'report_digest' AS digest FROM research_sheet_upsert_outbox").fetchall()
+        self.assertTrue(rows)
+        self.assertTrue(all(row["digest"] == root_hash for row in rows))
+        with patch.object(store, "freeze", side_effect=AssertionError("UnACKed root advanced")):
+            waiting = self.run_worker(now=self.now+timedelta(minutes=16))
+        self.assertTrue(waiting["waiting_for_sheet_delivery"])
+        self.assertEqual(waiting["delivery"]["report_digest"], root_hash)
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        delivery = worker.sheet_delivery_status(self.conn, self.state()["report"])
+        self.assertTrue(delivery["complete"])
+        self.assertEqual(delivery["missing_or_other_generation_rows"], 0)
+        self.assertTrue(self.run_worker(now=self.now+timedelta(minutes=16))["published"])
 
 
 if __name__ == "__main__":

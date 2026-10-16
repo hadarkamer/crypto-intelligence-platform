@@ -49,7 +49,11 @@ def _metadata(row):
 def schema_ready(conn):
     return bool(conn.execute("""SELECT
         to_regclass('research_btc_wave_report_generations') IS NOT NULL
-        AND to_regclass('research_btc_wave_report_parts') IS NOT NULL AS ready""").fetchone()["ready"])
+        AND to_regclass('research_btc_wave_report_parts') IS NOT NULL
+        AND (SELECT count(*) FROM pg_attribute
+             WHERE attrelid=to_regclass('research_btc_wave_report_parts')
+               AND attname IN ('source','job','report') AND atttypid='json'::regtype
+               AND NOT attisdropped)=3 AS ready""").fetchone()["ready"])
 
 
 def _require_snapshot(conn):
@@ -203,8 +207,8 @@ def save_checkpoint(conn, generation, ordinal, *, source, job, completed_report=
             raise ValueError("Completed report source digest differs from its frozen parent source")
         report_json, report_hash, report_bytes = _payload(completed_report, "REPORT")
     parent = source["waves"][0]
-    updated = conn.execute("""UPDATE research_btc_wave_report_parts part SET source=%s::jsonb,
-        source_digest=%s,source_bytes=%s,job=%s::jsonb,report=%s::jsonb,
+    updated = conn.execute("""UPDATE research_btc_wave_report_parts part SET source=%s::json,
+        source_digest=%s,source_bytes=%s,job=%s::json,report=%s::json,
         report_digest=%s,report_bytes=%s,updated_at_utc=NOW()
         FROM research_btc_wave_report_generations generation
         WHERE part.generation_id=generation.generation_id AND generation.status='CAPTURED'

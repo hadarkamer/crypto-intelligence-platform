@@ -10,6 +10,9 @@ headline. Raising the limit would move the same memory and payload boundary.
 Each generation freezes its observation cutoff and complete ordered parent
 population. Parent source, progress, and completed records are persisted in
 separate parts. Empty and ineligible parents remain in the source manifest.
+Part payloads use PostgreSQL `json` to preserve the original canonical numeric
+literals, including scientific notation and signed zero. Hashes and byte counts
+are checked against that lossless representation after reads and restarts.
 
 The native representative selector and single-parent calculation remain in use.
 Selected HYPE events retain their complete original engine snapshot. Other source
@@ -50,6 +53,12 @@ Root report, source manifest, generation status, and Sheet outbox rows commit
 together. The next generation waits for exact acknowledgments of the preceding
 report digest. A successful deployment or queued rows alone are not delivery
 evidence.
+
+The existing root-state column remains `jsonb`. After all calculations, the new
+publisher obtains that column's decoded representation before hashing or staging
+Sheet rows. Both delivery and later acknowledgments therefore bind the actual
+persisted root. This root representation step never changes the lossless source
+parts or the scalar inputs to aggregation.
 
 Final verification has bounded Python source memory, but its total work grows
 with retained history. This change does not claim constant verification time,

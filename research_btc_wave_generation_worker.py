@@ -166,6 +166,14 @@ def run_generation(conn, *, state, pending, now, monotonic=time.monotonic):
         report_json, source_json = native.canonical(completed), native.canonical(manifest)
         if max(len(report_json), len(source_json)) > native._MAX_SOURCE_JSON_BYTES:
             raise ValueError("FULL_WAVE_ROOT_TOO_LARGE_FOR_DATABASE_PUBLICATION")
+        # Parts retain lossless JSON numbers for native aggregation. The old
+        # root column remains JSONB, whose number spelling may change (1e16,
+        # negative zero). Bind Sheet payloads and ACK hashes to the actual
+        # persisted root representation, after all mathematics is complete.
+        completed = conn.execute("SELECT %s::jsonb AS report", (report_json,)).fetchone()["report"]
+        report_json = native.canonical(completed)
+        if len(report_json) > native._MAX_SOURCE_JSON_BYTES:
+            raise ValueError("FULL_WAVE_ROOT_TOO_LARGE_FOR_DATABASE_PUBLICATION")
         staged = native.research_sheet_outbox.stage_upserts(conn,
             native.sheet_upserts(completed, evaluated_at=now, previous_report=state["report"]))
         conn.execute("""UPDATE research_btc_wave_report_state SET pending_job=NULL,
