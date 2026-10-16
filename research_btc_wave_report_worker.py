@@ -239,9 +239,14 @@ def finish_job(job):
 def sheet_upserts(completed, *, evaluated_at, previous_report=None):
     rows = []
     report_hash = digest(completed)
-    active_cutoffs = [wave["observed_through_utc"] for wave in completed["waves"]
-                      if not wave.get("end_time_utc") and wave.get("observed_through_utc")]
-    btc_cutoff = max((report.utc(value) for value in active_cutoffs), default=None)
+    partitioned = completed.get("storage_version") == "btc-wave-parts-v1"
+    if partitioned:
+        value = completed.get("btc_observed_through_utc")
+        btc_cutoff = report.utc(value) if value else None
+    else:
+        active_cutoffs = [wave["observed_through_utc"] for wave in completed["waves"]
+                          if not wave.get("end_time_utc") and wave.get("observed_through_utc")]
+        btc_cutoff = max((report.utc(value) for value in active_cutoffs), default=None)
     for summary in completed["summary_rows"]:
         if summary["source_scope"] != report.PERP_MIXED_SCOPE:
             continue
@@ -262,13 +267,16 @@ def sheet_upserts(completed, *, evaluated_at, previous_report=None):
             "coverage_status": "COMPLETE_OBSERVED_PREFIX" if summary["observed_cohort_coverage_complete"] else "DATA_MISSING",
             "source_event_ids": canonical(summary["source_event_ids"]),
             "btc_parent_movement_ids": canonical(summary["btc_parent_movement_ids"]),
-            "method_version": report.METHOD_VERSION, "source_contract": VERSION,
+            "method_version": report.METHOD_VERSION,
+            "source_contract": VERSION + ";btc-wave-parts-v1" if partitioned else VERSION,
             "observation_as_of_utc": report.utc(completed["observed_at_utc"]).isoformat(),
             "btc_observed_through_utc": btc_cutoff.isoformat() if btc_cutoff else "",
             "last_evaluated_at": report.utc(evaluated_at).isoformat(),
             "source_digest": completed["source_digest"], "report_digest": report_hash,
             "notes": "גלים סגורים: תוצאות סופיות לחלון שנבדק; גל פעיל: תוצאות זמניות. כל גל נספר פעם אחת בכל השוואה; אין לחבר את ALL עם המטבעות או את LONG עם SHORT. מחיר HYPE נמדד בחוזים של Hyperliquid, מפתיחת הדקה המלאה הבאה. אסימטריה: סכום התנועה המרבית לטובת הכיוון חלקי סכום התנועה המרבית נגדו, לאורך הגל כולו; לכן זהה בשמונת הספים. דוח תיאורי נפרד מחישובי חלונות הזמן ומהסמכת נוסחאות."}
         rows.append({"sheet": SHEET_NAME, "key": "source_scope,coin_scope,direction,threshold_pct", "row": row})
+        if partitioned:
+            row["notes"] += " מזהי המקור המלאים שמורים בחלקי דוח בלתי משתנים; שדות המזהים מפנים לדור ולשכבה המדויקים."
     # A source correction can remove a formerly present stratum. Explicitly
     # withdraw its previous row rather than leaving an old positive headline.
     current_keys = {(x["row"]["source_scope"], x["row"]["coin_scope"], x["row"]["direction"], x["row"]["threshold_pct"]) for x in rows}
@@ -316,6 +324,7 @@ class ResearchBTCWaveReportWorker:
     def __init__(self):
         self._task = None
         self._ready = False
+        self._parts_ready = False
         self.metrics = {"runs": 0, "last_result": None, "last_error": None}
 
     def status(self):
@@ -325,6 +334,8 @@ class ResearchBTCWaveReportWorker:
             "refresh_minutes": _REFRESH_MINUTES, "poll_seconds": _POLL_SECONDS,
             "refresh_policy": "AT_LEAST_15_MINUTES_AFTER_COMPLETION_AND_PREVIOUS_SHEET_GENERATION_FULLY_ACKED",
             "path_limit_per_pass": _PATHS_PER_PASS, "sheet": SHEET_NAME,
+            "history_storage_version": "btc-wave-parts-v1" if self._parts_ready else "legacy-bounded",
+            "history_migration_required": not self._parts_ready,
             "canonical_fixed_horizon_modified": False, **self.metrics}
 
     def run_once(self, *, now=None):
@@ -340,12 +351,15 @@ class ResearchBTCWaveReportWorker:
                 # Match Python JSON truthiness, including legacy empty values.
                 state = conn.execute("""SELECT report,report_observed_at_utc,next_report_at_utc,
                     xmin::text AS state_xmin,
+                    to_regclass('research_btc_wave_report_generations') IS NOT NULL
+                        AND to_regclass('research_btc_wave_report_parts') IS NOT NULL AS parts_schema_ready,
                     COALESCE(pending_job NOT IN ('null'::jsonb,'false'::jsonb,'0'::jsonb,
                         '\"\"'::jsonb,'[]'::jsonb,'{}'::jsonb),FALSE) AS has_pending_job
                     FROM research_btc_wave_report_state WHERE worker_key=%s""", (VERSION,)).fetchone()
                 conn.commit()
                 if state is None:
                     raise RuntimeError("Full-wave report migration045 required")
+                self._parts_ready = bool(state.get("parts_schema_ready"))
                 # A previous deployment may already have checkpointed a newer
                 # job while the old report is still being delivered. Preserve
                 # that checkpoint, but never advance it past unACKed evidence.
@@ -374,7 +388,7 @@ class ResearchBTCWaveReportWorker:
                     CASE WHEN %s THEN NULL::jsonb ELSE source END AS source
                     FROM research_btc_wave_report_state
                     WHERE worker_key=%s AND xmin::text=%s""",
-                    (state["has_pending_job"], VERSION, state["state_xmin"])).fetchone()
+                    (state["has_pending_job"] or self._parts_ready, VERSION, state["state_xmin"])).fetchone()
                 conn.commit()
                 if deferred is None:
                     raise RuntimeError("Full-wave report state changed during deferred read; retry next poll")
@@ -384,6 +398,16 @@ class ResearchBTCWaveReportWorker:
                 # the other owners of the old checkpoint before replacement so
                 # discarded HYPE bodies cannot survive into recheck/publication.
                 job = state.pop("pending_job")
+                # Legacy checkpoints finish using their exact original source.
+                # Only new generations opt into the separately migrated store.
+                partitioned = isinstance(job, dict) and job.get("storage_version") == "btc-wave-parts-v1"
+                if partitioned or (not job and self._parts_ready):
+                    if not self._parts_ready:
+                        raise RuntimeError("Full-wave partition migration057 required to resume generation")
+                    from research_btc_wave_generation_worker import run_generation
+                    progress = run_generation(conn, state=state, pending=job, now=now)
+                    self.metrics.update(runs=self.metrics["runs"]+1, last_result=progress, last_error=None)
+                    return progress
                 if not job:
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -440,6 +464,7 @@ class ResearchBTCWaveReportWorker:
                         last_error=NULL,updated_at_utc=NOW() WHERE worker_key=%s""", (canonical(job), VERSION))
                     progress.update(published=False, target_observed_at_utc=str(job["observed_at"]))
                 conn.commit()
+                progress["history_storage"] = "legacy-bounded; migration057 required for full history"
                 self.metrics.update(runs=self.metrics["runs"]+1, last_result=progress, last_error=None)
                 return progress
             finally:
