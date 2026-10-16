@@ -70,6 +70,8 @@ is not silently pruned by this change.
 4. Keep the separate Hyperliquid service, formulas, experimental registrations,
    and trading configuration unchanged.
 
-Do not roll back to a worker that cannot understand an active parts pointer.
-Prepare a compatible rollback or finish the current generation first; never
-delete a checkpoint to make an older binary start.
+Any rollback worker must understand both active parts pointers and published
+source/report part references. Finishing a generation removes the active
+checkpoint hazard but does not restore compatibility with an older binary.
+Prepare a compatible rollback; never delete checkpoints or published evidence
+to make an older binary start.
