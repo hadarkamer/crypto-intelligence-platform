@@ -56,16 +56,23 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def _compact_source_event(event):
+def _compact_source_event(event, *, retain_hype_snapshot=True):
     from research_outcome_worker import _snapshot_price_provenance
     row = dict(event)
+    is_hype = str(row.get("symbol") or "").strip().upper() == "HYPE"
     if row.get("engine_snapshot_compacted"):
+        frozen = row.get("engine_snapshot_digest")
+        if (not isinstance(frozen, str) or len(frozen) != 64
+                or any(char not in "0123456789abcdef" for char in frozen)):
+            raise ValueError("Invalid frozen engine snapshot digest")
+        if is_hype and retain_hype_snapshot:
+            raise ValueError("Selected HYPE event requires its full frozen engine snapshot")
         return row
     frozen = report.snapshot_digest(event.get("engine_snapshot"))
     if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
         raise ValueError("Frozen engine snapshot changed")
     row["engine_snapshot_digest"] = frozen
-    if row.get("symbol") != "HYPE":
+    if not is_hype or not retain_hype_snapshot:
         provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
         row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
         row["engine_snapshot_compacted"] = True
@@ -73,19 +80,29 @@ def _compact_source_event(event):
 
 
 def compact_source(source):
-    """Keep exact Spot provenance and a digest of each full archived snapshot.
+    """Keep every source row, provenance and each full archived snapshot digest.
 
-    HYPE retains its full snapshot because the native derived price contract
-    binds the exact original event, including that snapshot.
+    Only selected HYPE events need their full bodies for the native derived
+    price contract. The original selector uses source fields, never outcomes;
+    selection for ALL or any coin scope therefore remains exactly unchanged.
     """
-    return {"waves": source["waves"], "events": [_compact_source_event(event) for event in source["events"]]}
+    selected_hype = {int(event["event_id"]) for event in report.select_representatives(source["events"])
+                     if event["symbol"] == "HYPE"}
+    return {"waves": source["waves"], "events": [_compact_source_event(event,
+        retain_hype_snapshot=int(event["event_id"]) in selected_hype) for event in source["events"]]}
 
 
 def compact_job(job):
-    if job and any("engine_snapshot_digest" not in event for event in job["source"]["events"]):
-        job["source"] = compact_source(job["source"])
-        job["source_digest"] = digest(job["source"])
-    return job
+    if not job:
+        return job
+    # Existing blocked checkpoints already have digests on every event. Migrate
+    # their redundant HYPE bodies too, using their own frozen source/cutoff.
+    source = compact_source(job["source"])
+    if source == job["source"]:
+        return job
+    if job.get("source_digest") != digest(job["source"]):
+        raise ValueError("Frozen job source changed before compaction")
+    return {**job, "source": source, "source_digest": digest(source)}
 
 
 def _iso_or_none(value):
@@ -114,14 +131,27 @@ def load_job_source(conn, observed_at):
         raise ValueError("FULL_WAVE_POPULATION_EXCEEDS_32_PARENTS; no truncated headline published")
     if not parents:
         return {"waves": [], "events": []}
+    hype_wave, hype_representatives = None, {}
     def project_event(event, wave):
+        nonlocal hype_wave, hype_representatives
         if not SOURCE_START <= report.utc(event["alert_time_utc"]) <= observed_at:
             return None
         # The versioned initial warmup parent stays outside the population;
         # source or price availability never selects the eligible universe.
         if wave["evidence_eligible"] is not True:
             return None
-        return _compact_source_event(event)
+        retain_hype = False
+        if str(event.get("symbol") or "").strip().upper() == "HYPE":
+            if hype_wave != wave["btc_parent_movement_id"]:
+                hype_wave, hype_representatives = wave["btc_parent_movement_id"], {}
+            # load_source's SQL orders each wave by alert time then event ID.
+            # Later rows cannot displace a representative. HYPE's own coin
+            # stratum includes every HYPE winner of ALL, so at most two full
+            # candidates suffice to apply the original selector incrementally.
+            selected = report.select_representatives([*hype_representatives.values(), event])
+            hype_representatives = {int(row["event_id"]): row for row in selected}
+            retain_hype = int(event["event_id"]) in hype_representatives
+        return _compact_source_event(event, retain_hype_snapshot=retain_hype)
     waves, events = report.load_source(conn, [p["btc_parent_movement_id"] for p in parents],
                                       event_projector=project_event)
     for wave in waves:
@@ -349,7 +379,11 @@ class ResearchBTCWaveReportWorker:
                 if deferred is None:
                     raise RuntimeError("Full-wave report state changed during deferred read; retry next poll")
                 state.update(deferred)
-                job = state["pending_job"]
+                del deferred
+                # Migration returns a new job without mutating its input. Drop
+                # the other owners of the old checkpoint before replacement so
+                # discarded HYPE bodies cannot survive into recheck/publication.
+                job = state.pop("pending_job")
                 if not job:
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
