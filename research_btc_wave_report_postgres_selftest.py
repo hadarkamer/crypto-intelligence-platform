@@ -305,6 +305,75 @@ class WaveReportPostgresTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) AS n FROM research_sheet_upsert_outbox").fetchone()["n"], 0)
         self.assertTrue(self.run_worker()["published"])
 
+    def test_digest_present_oversized_hype_checkpoint_migrates_resumes_and_publishes_atomically(self):
+        from research_btc_source_compaction_selftest import duplicate_hype_source, selection_identity
+        self.source = duplicate_hype_source(body_bytes=3_000_000)
+        for route, symbol in ((archive.BINANCE_SPOT, 'ETH'), (archive.HYPERLIQUID_PERP, 'HYPE')):
+            archive.write_bars(self.conn, route, symbol,
+                [{**candle(i, high=101., low=99.5), 'volume': None} for i in range(120)])
+        legacy_source = {'waves': self.source['waves'],
+            'events': [worker._compact_source_event(row) for row in self.source['events']]}
+        compact_source = worker.compact_source(legacy_source)
+        # Exercise the real 16 MiB limit, without raising or patching its cap.
+        self.assertGreater(len(worker.canonical(legacy_source).encode()), worker._MAX_SOURCE_JSON_BYTES)
+        self.assertLess(len(worker.canonical(compact_source).encode()), worker._MAX_SOURCE_JSON_BYTES)
+        observed = START+timedelta(minutes=120)
+        pending = worker.prepare_job(legacy_source, observed)
+        def fetch(symbol, start, end):
+            route = archive.HYPERLIQUID_PERP if symbol == 'HYPE' else archive.BINANCE_SPOT
+            return archive.read_path(route, symbol, start, end, connection=self.conn)
+        self.assertFalse(worker.advance_job(pending, fetcher=fetch, path_limit=2)['completed'])
+        self.conn.execute('''UPDATE research_btc_wave_report_state SET pending_job=%s::jsonb''',
+                          (worker.canonical(pending),))
+        original = self.state()
+        expected = json.loads(worker.canonical(pending))
+        while not worker.advance_job(expected, fetcher=fetch)['completed']:
+            pass
+        expected_report = worker.finish_job(expected)
+        # Migration, native result completion and outbox staging must roll back
+        # together if publication fails. The legacy checkpoint remains usable.
+        with self.assertRaisesRegex(RuntimeError, 'simulated failure'):
+            self.run_worker(now=observed+timedelta(hours=1), fail_staging=True)
+        self.assertEqual(self.state(), original)
+        self.assertEqual(self.conn.execute('SELECT count(*) AS n FROM research_sheet_upsert_outbox').fetchone()['n'], 0)
+        # Persist only the migration, then resume in another worker invocation.
+        with patch.object(worker, 'advance_job', return_value={'processed_paths': 0,
+                'remaining_paths': len(pending['pending_event_ids'])-pending['next_index'], 'completed': False}):
+            self.assertFalse(self.run_worker(now=observed+timedelta(hours=1))['published'])
+        migrated = self.state()['pending_job']
+        for key in pending.keys()-{'source', 'source_digest'}:
+            self.assertEqual(migrated[key], original['pending_job'][key], key)
+        self.assertEqual(migrated['source'], json.loads(worker.canonical(compact_source)))
+        self.assertEqual(migrated['source_digest'], worker.digest(migrated['source']))
+        self.assertIs(worker.compact_job(migrated), migrated)
+        self.assertEqual(selection_identity(migrated['source']), selection_identity(legacy_source))
+        resumed = self.run_worker(now=observed+timedelta(hours=1, minutes=1))
+        self.assertTrue(resumed['published'])
+        self.assertNotIn('source_changed', resumed)
+        state = self.state()
+        self.assertIsNone(state['pending_job'])
+        self.assertEqual(state['report_observed_at_utc'], observed)
+        self.assertEqual(state['source'], migrated['source'])
+        published = dict(state['report'])
+        self.assertEqual(published.pop('source_digest'), migrated['source_digest'])
+        expected_report.pop('source_digest')
+        self.assertEqual(worker.canonical(published), worker.canonical(expected_report))
+        self.assertEqual([row['event_id'] for row in state['source']['events']],
+                         [row['event_id'] for row in legacy_source['events']])
+        outbox = self.conn.execute('SELECT payload FROM research_sheet_upsert_outbox').fetchall()
+        self.assertEqual(len(outbox), resumed['staged_rows'])
+        self.assertTrue(all(row['payload']['row']['report_digest'] == worker.digest(state['report']) for row in outbox))
+
+    def test_selected_hype_full_bodies_still_block_publication_over_sixteen_mib(self):
+        from research_btc_source_compaction_selftest import duplicate_hype_source
+        self.source = duplicate_hype_source(body_bytes=4_200_000)
+        self.assertGreater(len(worker.canonical(worker.compact_source(self.source)).encode()),
+                           worker._MAX_SOURCE_JSON_BYTES)
+        with self.assertRaisesRegex(ValueError, 'FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION'):
+            self.run_worker()
+        self.assertIsNone(self.state()['report'])
+        self.assertEqual(self.conn.execute('SELECT count(*) AS n FROM research_sheet_upsert_outbox').fetchone()['n'], 0)
+
     def test_late_source_correction_restarts_before_publication(self):
         calls = []
         revised = fixtures()
