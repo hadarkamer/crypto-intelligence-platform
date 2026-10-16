@@ -310,7 +310,8 @@ class WaveReportPostgresTests(unittest.TestCase):
         self.source = duplicate_hype_source(body_bytes=3_000_000)
         for route, symbol in ((archive.BINANCE_SPOT, 'ETH'), (archive.HYPERLIQUID_PERP, 'HYPE')):
             archive.write_bars(self.conn, route, symbol,
-                [{**candle(i, high=101., low=99.5), 'volume': None} for i in range(120)])
+                [{**candle(i, high=101., low=99.5),
+                  'volume': None if route == archive.HYPERLIQUID_PERP else 1.} for i in range(120)])
         legacy_source = {'waves': self.source['waves'],
             'events': [worker._compact_source_event(row) for row in self.source['events']]}
         compact_source = worker.compact_source(legacy_source)
