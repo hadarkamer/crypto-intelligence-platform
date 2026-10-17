@@ -214,7 +214,8 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.reconnect();self.worker.receive([value]);self.cycle(entries=True)
         self.assertEqual(self.store.archive_record(cid)['trade'],trade)
         self.assertEqual(len(self.oracle.requests),1)
-        self.start(alert(side='SHORT',cycle='pg-after-rejected-order',approved_ms=self.oracle.now()))
+        self.start(alert(side='SHORT',cycle='pg-after-rejected-order',
+                         approved_ms=self.oracle.now()//60000*60000))
         self.assertEqual(len(self.oracle.requests),2)
 
     def test_rejected_entry_record_is_durable_and_never_retried_after_restart(self):
