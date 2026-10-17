@@ -128,16 +128,62 @@ class RetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved['legacy_source_state']['history'][-1]['status'], 'STOP_TOUCHED')
         self.assertEqual(w.status()['state'], 'RETIRED')
 
-    async def test_absent_scope_does_not_create_or_repeatedly_poll(self):
+    async def test_absent_scope_reads_at_most_once_per_minute_without_creation(self):
         w = self.make_worker()
         await w.tick()
         calls = len(self.db.calls)
-        self.clock += M
         await w.tick()
         self.assertEqual(len(self.db.calls), calls)
+        self.clock += M
+        await w.tick()
+        self.assertEqual(len(self.db.calls), calls+1)
+        await w.tick()
+        self.assertEqual(len(self.db.calls), calls+1)
         self.assertEqual(self.db.values, {})
         self.assertEqual(self.fetches, [])
         self.assertEqual(w.status()['state'], 'RETIRED')
+
+    async def test_late_old_process_pending_cancels_after_drain_and_restart(self):
+        w = self.make_worker()
+        scope = self.install(w, pending())
+        await w.tick()
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                late = dict(deepcopy(pending()['active'][0]), position_id='late-'+str(restart))
+                store.transact(scope, self.clock, w.config_sha256,
+                               lambda st: st['active'].append(deepcopy(late)))
+                self.clock += M
+                if restart:
+                    w = self.make_worker()
+                await w.tick()
+                saved = store.snapshot(scope)
+                self.assertFalse(saved['active'])
+                self.assertEqual(saved['history'][-1]['position_id'], late['position_id'])
+                self.assertEqual(saved['history'][-1]['status'], 'CANCELLED_FORMULA_RETIRED')
+                self.assertFalse(saved['counts'].get('FILLED', 0))
+        self.assertEqual(self.fetches, [])
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_late_old_process_intake_between_snapshot_and_advance_cannot_fill(self):
+        w = self.make_worker()
+        scope = self.install(w, self.open_state())
+        await w.tick()
+        original_fetch = w.cache.fetch
+        def racing_fetch(symbol, start, end):
+            late = dict(deepcopy(pending()['active'][0]), position_id='between-read-and-advance')
+            store.transact(scope, self.clock, w.config_sha256,
+                           lambda st: st['active'].append(late))
+            return original_fetch(symbol, start, end)
+        w.cache.fetch = racing_fetch
+        self.clock += M
+        await w.tick()
+        saved = store.snapshot(scope)
+        self.assertEqual(len(saved['active']), 1)
+        self.assertEqual(saved['counts']['FILLED'], 1)
+        self.assertEqual(saved['history'][-1]['position_id'], 'between-read-and-advance')
+        self.assertEqual(saved['history'][-1]['status'], 'CANCELLED_FORMULA_RETIRED')
+        self.bot.send_message.assert_not_awaited()
+        self.restore.assert_not_called()
 
     async def test_retired_observation_and_delivery_are_blocked(self):
         w = self.make_worker()

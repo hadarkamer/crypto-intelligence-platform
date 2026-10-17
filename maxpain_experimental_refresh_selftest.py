@@ -83,7 +83,7 @@ class Definitions(unittest.TestCase):
         eth = worker.ADDITIONAL_WORKERS['ETH']
         self.assertEqual(eth.spec.research_id, '88a0ed51ab391d6e')
         self.assertNotEqual(eth.scope_for(1), worker.WORKER.scope_for(1))
-        self.assertTrue(eth.policy_enabled())
+        self.assertFalse(eth.policy_enabled())  # Retired by the owner's top-four roster.
 
     def test_range_is_closed_complete_before_decision(self):
         now = BASE+10000

@@ -115,7 +115,6 @@ class SolProximityWorker:
         self.legacy_cache = legacy_cache or SolPriceCache(fetch=legacy_fetch_rows, symbol=spec.coin)
         self.task = self.bot = self.subscription = None
         self.scopes, self.lock = set(), asyncio.Lock()
-        self.retired_scopes, self.retired_drained_scopes = set(), set()
         self.retry_ms, self.last_poll, self.last_price_poll = 0, None, None
         self.last_legacy_price_poll = None
         self.transient_failures = 0
@@ -207,7 +206,7 @@ class SolProximityWorker:
                             retry_class=retry_class, next_retry_at=dt(self.retry_ms).isoformat())
         print(f'[sol-proximity] evidence unavailable type={type(exc).__name__} retry={retry_class}', flush=True)
 
-    async def monitor(self, scope, state):
+    async def monitor(self, scope, state, *, retired=False):
         legacy = state.get('legacy_source_state')
         if legacy and any(p['status'] in ('PENDING', 'OPEN') for p in legacy['active']):
             old_start = legacy['bar_cursor_ms']+MINUTE
@@ -215,7 +214,10 @@ class SolProximityWorker:
             old_slot = (scope, self.clock()//MINUTE)
             if old_start < old_end and self.last_legacy_price_poll != old_slot:
                 rows = await asyncio.to_thread(self.legacy_cache.fill, self.spec.coin, old_start, old_end)
-                await self.db(self.store.advance_legacy_source, scope, rows, self.clock())
+                if retired:
+                    await self.advance_retired(scope, rows, legacy=True)
+                else:
+                    await self.db(self.store.advance_legacy_source, scope, rows, self.clock())
                 self.last_legacy_price_poll = old_slot
                 state = await asyncio.to_thread(self.store.snapshot, scope)
         start = state['bar_cursor_ms']+MINUTE
@@ -226,7 +228,10 @@ class SolProximityWorker:
                 return state
             if state['episodes'] or state['active']:
                 rows = await asyncio.to_thread(self.cache.fill, self.spec.coin, start, end)
-                await self.db(self.store.advance, scope, rows, self.clock())
+                if retired:
+                    await self.advance_retired(scope, rows)
+                else:
+                    await self.db(self.store.advance, scope, rows, self.clock())
                 self.last_price_poll = slot
             else:
                 # With no source baseline there is no historical exposure.
@@ -370,10 +375,17 @@ class SolProximityWorker:
                     intent['status'] = 'CANCELLED_FORMULA_RETIRED'
         return deepcopy(state)
 
+    async def advance_retired(self, scope, rows, *, legacy=False):
+        # An older process can still admit while a rolling deployment drains.
+        # Cancel under the same row lock as advancement so it cannot fill here.
+        now = self.clock()
+        def action(state):
+            self.retire_pending(state, now)
+            return self.signal.advance(state['legacy_source_state'] if legacy else state, rows, now)
+        return await self.db(self.store.transact, scope, now, action=action)
+
     async def drain_retired(self, scope):
         """Resume existing exits after restart, without intake or alert replay."""
-        if scope in self.retired_drained_scopes:
-            return
         slot = (scope, self.clock()//MINUTE)
         if self.last_poll == slot:
             return
@@ -381,18 +393,19 @@ class SolProximityWorker:
             state = await asyncio.to_thread(self.store.snapshot, scope)
             if state is None:
                 # Retirement must not initialize a new observation or migrate it.
-                self.retired_drained_scopes.add(scope)
+                self.last_poll = slot
                 self.runtime.update(ready=True, state='RETIRED', active_pending=0, active_open=0,
                                     active_unknown=0, legacy_open=0, legacy_unknown=0)
                 return
-            if scope not in self.retired_scopes:
+            if any(p['status'] == 'PENDING'
+                   for source_state in (state, state.get('legacy_source_state', {}))
+                   for p in source_state.get('active', []) + source_state.get('intents', [])):
                 retired_at = self.clock()
                 state = await self.db(self.store.transact, scope, retired_at,
                                       action=lambda s: self.retire_pending(s, retired_at))
-                self.retired_scopes.add(scope)
             active = state['active'] + state.get('legacy_source_state', {}).get('active', [])
             if any(p['status'] in ('OPEN', 'UNKNOWN') for p in active):
-                state = await self.monitor(scope, state)
+                state = await self.monitor(scope, state, retired=True)
                 active = state['active'] + state.get('legacy_source_state', {}).get('active', [])
                 draining = any(p['status'] in ('OPEN', 'UNKNOWN') for p in active)
             else:
@@ -406,8 +419,6 @@ class SolProximityWorker:
                                 counts=state['counts'], last_error_type=None, next_retry_at=None)
             self.transient_failures = self.retry_ms = 0
             self.last_poll = slot
-            if not draining:
-                self.retired_drained_scopes.add(scope)
             self.cache.prune({self.spec.coin: self.clock()-1005*MINUTE})
             self.legacy_cache.prune({self.spec.coin: self.clock()-1005*MINUTE})
 
