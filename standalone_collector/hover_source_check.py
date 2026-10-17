@@ -3,11 +3,31 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
 
 HERE=Path(__file__).resolve().parent
+
+
+def run_probe(command, env, timeout=180):
+    # A timed-out browser must close before the next map opens.
+    process=subprocess.Popen(command,env=env,start_new_session=True)
+    try:
+        process.wait(timeout=timeout)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode,command)
+    finally:
+        try:os.killpg(process.pid,signal.SIGTERM)
+        except ProcessLookupError:pass
+        try:process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        # Include descendants that ignored TERM even if their parent exited.
+        try:os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+        process.wait(timeout=5)
 
 
 def single(model,timeframe,directory):
@@ -46,8 +66,7 @@ def main():
             dest=args.output/f'model{model}-{tf}'
             env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':''}
             try:
-                subprocess.run([sys.executable,str(Path(__file__).resolve()),'--single',str(model),tf,'--output',str(dest)],
-                    env=env,check=True,timeout=180)
+                run_probe([sys.executable,str(Path(__file__).resolve()),'--single',str(model),tf,'--output',str(dest)],env)
                 report=json.loads((dest/'report.json').read_text())
             except (subprocess.SubprocessError,OSError,ValueError):
                 report={'model':model,'timeframe':tf,'status':'failed','code':'probe_process_failed'}
