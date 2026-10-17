@@ -22,6 +22,7 @@ from . import test_experimental_live_service as service_tests
 from . import test_history_gap_budget as budget_tests
 from . import experimental_execution_runtime as runtime
 from . import experimental_live_state as state_module
+from . import card_sync_evidence as sync
 from . import request_budget as quota
 from .experimental_live_provider import LiveEvidenceProvider
 from .test_experimental_live_provider import RawTestnetFixture, LegacyFixture
@@ -102,6 +103,7 @@ def completed_fixture():
             stop=next(oid for oid,leg in trade['order_legs'].items() if leg=='STOP')
             h.oracle.fill(take,trade['quantity'])
             h.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=h.oracle.t)
+        h.exchange_requests=deepcopy(state['requests'])
         h.oracle.t+=51*3600000
         return h
     except BaseException:
@@ -113,7 +115,12 @@ def completed_fixture():
 def public_transport(h, *, transform=None):
     """Transport-only replacement: all permits/refunds run in production code."""
     calls=[]
-    raw=RawTestnetFixture(h.oracle,h.store.load,h.budget)
+    def exchange_state():
+        state=h.store.load()
+        # Venue order metadata outlives the worker's active request records.
+        state['requests']={**h.exchange_requests,**state['requests']}
+        return state
+    raw=RawTestnetFixture(h.oracle,exchange_state,h.budget)
     class Connection:
         def __init__(self,host,**kwargs):
             if host!='api.hyperliquid.xyz':raise AssertionError('UNEXPECTED_HOST')
@@ -244,8 +251,9 @@ class LiveHistoryQuotaPostgresTests(unittest.TestCase):
         with public_transport(self.h):self.h.service.tick()
         before=deepcopy(self.h.store.load().get('formula_accounting'))
         self.assertIsNotNone(before)
-        self.assertTrue(all(t.get('settlement') for t in self.h.store.load()['trades'].values()
-                            if t.get('entry_risk')))
+        settled=[t for t in self.h.store.load()['trades'].values() if t.get('entry_risk')]
+        self.assertEqual(len(settled),2)
+        self.assertTrue(all(t.get('settlement') for t in settled))
         self.reconnect()
         with public_transport(self.h):
             for _ in range(3):self.h.service.tick()
@@ -280,6 +288,16 @@ class LiveHistoryQuotaMemoryTests(LiveHistoryQuotaPostgresTests):
         self.budget.tickets['seed']=[self.h.oracle.t,weight,False]
 
     def expire_tickets(self):self.budget.tickets.clear()
+
+    def test_exchange_fixture_retains_fills_after_local_requests_are_archived(self):
+        state=self.h.store.load();rows=[]
+        state.update(requests={},trades={},sources={})
+        with patch.object(self.h.store,'load',side_effect=lambda:deepcopy(state)),public_transport(self.h):
+            for account in state['routes'].values():
+                rows.extend(sync.PublicReader(budget=self.budget).read('userFillsByTime',account,
+                    start=service_tests.T,end=self.h.oracle.t))
+        self.assertEqual(len(rows),4)
+        self.assertEqual({r['coin'] for r in rows},{'XRP','HYPE'})
 
     def test_forty_cycles_of_rolling_load_make_progress_without_duplicate_orders(self):
         h=self.h
