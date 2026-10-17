@@ -185,6 +185,39 @@ class FullConnectionTests(unittest.TestCase):
         self.assertEqual(len(self.http), 4)
         self.assertEqual(sum(row['proposal']['operation']=='ENTRY' for row in self.oracle.requests), 1)
 
+    def test_margin_rejection_with_order_record_retires_once_and_next_alert_can_trade(self):
+        rejected=r2732_message(entry=2.3,decision_ms=T-60000)
+        self.seed(rejected);self.reject_next_entry=True
+        self.assertEqual(self.service.tick().get('operation'),'ENTRY')
+        request=next(iter(self.store.load()['requests'].values()))
+        # The venue retained the exact rejected order, despite an ACK with no OID.
+        self.oracle.instant_fraction=Decimal(0)
+        self.oracle.send(request,admission=SimpleNamespace(consume=lambda request:None))
+        oid=self.oracle.oid('ENTRY')
+        self.oracle.orders[oid]['view'].update(status='REJECTED',at_ms=self.oracle.t)
+        original=self.raw.status
+        def rejected_status(value):
+            raw=original(value)
+            if str(value)==oid:raw['order']['status']='perpMarginRejected'
+            return raw
+        with patch.object(self.raw,'status',side_effect=rejected_status):
+            self.service.tick();self.reconnect()
+            self.assertEqual(self.ingest(rejected)['status'],'DUPLICATE')
+            self.service.tick();self.service.tick()
+        state=self.store.load();trade=state['trades'][rejected['occurrence_id']]
+        self.assertEqual(trade['phase'],'CANCELED_WITHOUT_FILL')
+        self.assertEqual(trade['orders'][oid]['status'],'REJECTED')
+        self.assertFalse(trade['entry_fills']);self.assertFalse(trade['exit_fills'])
+        self.assertEqual(state['requests'][request['request_id']]['phase'],'OBSERVED')
+        self.assertEqual(state['requests'][request['request_id']]['observed_oid'],oid)
+        self.assertEqual(len(self.http),1)
+        self.oracle.instant_fraction=Decimal(1);self.oracle.t=T+900000+10000
+        later=r2732_message(entry=2.3,decision_ms=T+900000-60000);self.seed(later)
+        self.assertEqual(self.service.tick().get('operation'),'ENTRY')
+        for _ in range(3):self.service.tick()
+        self.assertEqual(self.store.load()['trades'][later['occurrence_id']]['phase'],'OPEN')
+        self.assertEqual(len(self.http),4)
+
     def test_intake_wakes_only_after_commit_and_not_for_duplicate_or_failed_commit(self):
         msg = r2732_message(entry=2.3, decision_ms=T-60000)
         receive = self.worker.receive
@@ -336,6 +369,39 @@ class FullConnectionTests(unittest.TestCase):
         for _ in range(3): self.service.tick()
         self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'], 'CLOSED')
         self.assertEqual(len(self.http), 4)
+
+    def test_filled_take_released_trigger_and_canceled_stop_close_without_any_send(self):
+        msg=r2732_message(entry=2.3,decision_ms=T-60000);self.seed(msg)
+        for _ in range(4):self.service.tick()
+        trade=self.store.load()['trades'][msg['occurrence_id']]
+        take=self.oracle.oid('TAKE_PROFIT');stop=self.oracle.oid('STOP')
+        self.oracle.fill(take,trade['quantity'])
+        self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
+        original=self.raw.status
+        def terminal_status(oid):
+            raw=original(oid)
+            if str(oid)==take:raw['order']['order'].update(isTrigger=False,triggerPx='0.0',sz='0.0')
+            if str(oid)==stop:raw['order']['status']='reduceOnlyCanceled'
+            return raw
+        self.raw.calls.clear()
+        with patch.object(self.raw,'status',side_effect=terminal_status):
+            self.service.tick();self.reconnect()
+            self.assertEqual(self.ingest(msg)['status'],'DUPLICATE')
+            self.service.tick();self.service.tick()
+        closed=self.store.load()['trades'][msg['occurrence_id']]
+        self.assertEqual(closed['phase'],'CLOSED')
+        self.assertEqual(closed['orders'][take]['status'],'FILLED')
+        self.assertEqual(closed['orders'][stop]['status'],'CANCELED')
+        self.assertEqual(sum(Decimal(f['quantity']) for f in closed['exit_fills'].values()),Decimal(trade['quantity']))
+        self.assertEqual(len(self.http),3)
+        # Existing cloid/status reuse still applies: no additional lookup per cycle.
+        self.assertEqual(sum(c[0]=='lookup' for c in self.raw.calls),0)
+        self.oracle.t=T+900000+10000
+        later=r2732_message(entry=2.3,decision_ms=T+900000-60000);self.seed(later)
+        self.assertEqual(self.service.tick().get('operation'),'ENTRY')
+        for _ in range(3):self.service.tick()
+        self.assertEqual(self.store.load()['trades'][later['occurrence_id']]['phase'],'OPEN')
+        self.assertEqual(len(self.http),6)
 
     def test_unknown_reply_then_new_port_reconciles_without_duplicate(self):
         msg = r2732_message(entry=2.3, decision_ms=T-60000); self.seed(msg)
