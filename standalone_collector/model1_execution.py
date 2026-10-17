@@ -17,6 +17,7 @@ CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable',
     'analysis_incomplete','analysis_response_invalid','analysis_unauthorized',
     'analysis_rate_limited','analysis_quota_exceeded','analysis_http_error',
     'price_uncertain','zones_invalid','worker_crashed'})
+VALIDATION_REASONS=frozenset(['invalid_positive_number', 'evidence_text_invalid', 'evidence_number_mismatch', 'axis_shape', 'axis_does_not_cover_price', 'level_list_shape', 'level_object', 'level_confidence', 'right_edge_missing', 'colour_or_shape', 'yellow_shape', 'green_shape', 'blue_intensity', 'level_outside_axis', 'point_count', 'point_outside_bounds', 'uncertainty_invalid', 'exact_price_not_verified', 'exact_point_bounds', 'axis_estimate_invalid', 'uncertainty_does_not_cover_bounds', 'price_precision', 'strength_score', 'side_invalid', 'side_conflicts_with_price'])
 STAGES=frozenset({'startup','capture','image_check','analysis','validation','saving'})
 PHASES=frozenset({'capture','select_12h','select_24h','select_48h','model_selection',
     'symbol_selection','wait_for_chart','screenshot','navigation','browser_launch',
@@ -96,7 +97,8 @@ def capture_operation(phase):
         _active_capture_phase=previous_phase;_write_progress()
 
 class StageFailure(RuntimeError):
-    def __init__(self,code):
+    def __init__(self,code,reason=None):
+        self.reason=reason if isinstance(reason,str) and reason in VALIDATION_REASONS else None
         self.code=code if code in CODES else 'worker_crashed'
         super().__init__(self.code)
 
@@ -179,6 +181,8 @@ def failure_detail(exc):
     phase=getattr(exc,'_model1_capture_phase','capture')
     detail={'exception_kind':kind if kind in KINDS else 'other',
             'capture_phase':phase if phase in PHASES else 'capture'}
+    reason=getattr(exc,'reason',None)
+    if isinstance(reason,str) and reason in VALIDATION_REASONS:detail['validation_reason']=reason
     capture_state=getattr(exc,'_model1_source_capture_state',None)
     if capture_state is not None:
         from capture_failure_observer import safe_failure_state,CLICK_FAILURES
@@ -248,7 +252,7 @@ def read_failure(path,job_id,returncode):
             raw=json.loads(path.read_text())
             if isinstance(raw,dict):
                 for key,allowed in {'code':CODES,'stage':STAGES,'capture_phase':PHASES,
-                    'exception_kind':KINDS|{'other'},
+                    'exception_kind':KINDS|{'other'},'validation_reason':VALIDATION_REASONS,
                     'selector_issue':{'trigger_missing','option_missing','selection_not_settled','action_timeout'},
                     'observed_timeframe':{'12h','24h','48h','unknown'},
                     'current_price_confidence':{'high','medium','low'},
