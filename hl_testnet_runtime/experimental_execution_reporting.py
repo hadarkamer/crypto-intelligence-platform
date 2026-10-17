@@ -1,7 +1,7 @@
 """Read-only isolated execution ledger; planned prices never become fill prices.
 
-Only a completely reconciled closed trade has a final gross P/L. Fees/funding
-are not part of the isolated exchange evidence, so net P/L remains unknown.
+Only a completely reconciled closed trade has a final gross P/L. A formula
+settlement receipt supplies actual net P/L; older records retain unknown net.
 This projection is not registered with any live or Telegram reporting route.
 """
 from decimal import Decimal
@@ -83,6 +83,13 @@ def _project_rows(state):
             net_pnl_status='ACTUAL_FEES_AND_FUNDING_NOT_AVAILABLE',
             submitted_attempts=len(requests), unresolved_attempts=unresolved,
             owned_order_ids=sorted(trade['orders'])))
+        if trade.get('entry_risk'):
+            rows[-1]['entry_risk'] = dict(trade['entry_risk'])
+            rows[-1]['net_pnl_status'] = trade.get('accounting_pending', 'FORMULA_NET_SETTLEMENT_PENDING')
+        if trade.get('settlement'):
+            receipt = trade['settlement']
+            rows[-1].update(fees=receipt['fees_usd'], funding=receipt['funding_usd'],
+                net_pnl=receipt['net_usd'], net_pnl_status='ACTUAL_NET_SETTLED', settlement=dict(receipt))
         manual=trade.get('manual_management')
         if manual:
             row=rows[-1]

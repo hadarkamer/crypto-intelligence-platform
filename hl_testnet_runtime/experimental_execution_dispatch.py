@@ -58,7 +58,7 @@ def _source(source, current, now, *, entry):
     return source
 
 
-def _terms(request, source, metadata):
+def _terms(request, source, metadata, *, formula_risk=None):
     p=request['proposal']
     role='long_account' if source['side']=='LONG' else 'short_account'
     if (p['card_id'] != source['occurrence_id'] or p['symbol'] != source['symbol']
@@ -95,7 +95,8 @@ def _terms(request, source, metadata):
             for leg,field in (('sl','stop'),('tp','take_profit')):
                 exits.append(dict(a=index,b=not o['b'],p=levels[field],s=o['s'],r=True,
                     t=dict(trigger=dict(isMarket=leg=='sl',triggerPx=levels[field],tpsl=leg)),c=o['c']))
-            risk_policy.assert_new_entry_budget(dict(type='order',orders=[bracket]+exits,grouping='normalTpsl'))
+            risk_policy.assert_new_entry_budget(dict(type='order',orders=[bracket]+exits,grouping='normalTpsl'),
+                                                formula_risk=formula_risk)
         elif (p['leg'] not in ('STOP','TAKE_PROFIT') or o['r'] is not True
                 or o['b'] is not (source['side']=='SHORT')):
             raise BoundaryError('REDUCE_ONLY_EXACT_OWNER_EXIT_REQUIRED')
@@ -179,7 +180,14 @@ def review(request, context, *, now_ms):
         raise BoundaryError('INDEPENDENT_ACCOUNT_ROUTES_REQUIRED')
     if context['host']!=HOST:
         raise BoundaryError('TESTNET_HOST_REQUIRED')
-    prepared,action=_terms(request,source,context['metadata'])
+    formula_risk = context.get('entry_risk') if entry else None
+    if entry:
+        if p.get('entry_risk') != formula_risk:
+            raise BoundaryError('DURABLE_FORMULA_RISK_MISMATCH')
+        if formula_risk is not None:
+            from .formula_accounting import validate_risk
+            validate_risk(formula_risk, source['rule_id'])
+    prepared,action=_terms(request,source,context['metadata'], formula_risk=formula_risk)
     safety=context['safety']
     _fresh(safety['at_ms'],now_ms,15000,'ACCOUNT_SAFETY_EVIDENCE_EXPIRED')
     if safety['account']!=p['account'] or safety['role']!=p['role']:
