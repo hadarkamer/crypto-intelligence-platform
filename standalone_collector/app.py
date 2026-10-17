@@ -160,6 +160,7 @@ def create_app():
             'new_capture_hourly_limit':store.hourly_limit if store is not None else None,
             'worker_concurrency':1,'automatic_cache_minutes':15}
         result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
+        result['numeric_reader']='displayed-hover.v1'
         result['store_connectivity']=await asyncio.to_thread(store_readiness,store)
         report=read_public_probe_report()
         if report is not None:result['source_probe']=report

@@ -181,13 +181,26 @@ class ProminentTests(unittest.TestCase):
         self.assertGreater(source.index("if __name__ == '__main__':"),source.index('def normalize('))
     def test_actual_child_entrypoint_saves_new_contract(self):
         from PIL import Image
+        from heatmap_hover import parse_tooltip
+        hover_rows=[]
+        for i,price in enumerate([110,100,90]):
+            row=parse_tooltip(f'2026-01-01 00:00 Price {price} Liquidation Leverage 1.00M')
+            row.update(id=f'r{i}',time_text='2026-01-01 00:00',y_fraction=i/2)
+            hover_rows.append(row)
+        snapshot={'version':'displayed-hover.v1','rows':hover_rows,'total_value':3000000,
+            'metric':'Liquidation Leverage','unit':'source_metric','scope':'displayed_latest_column',
+            'source_time':'2026-01-01T00:00:00Z','heatmap_model':1,'timeframe':'12H',
+            'complete':True,'price_step':10,'rounding_error':15000,'duration_seconds':1}
+        raw=sample()
+        for level,index in zip(raw['scans'][0]['prominent_levels'],[0,2]):
+            level.update(confidence='high',source_row_ids=[f'r{index}'])
         def capture(directory,*,timeframes):
             directory.mkdir()
             path=directory/'coinglass_btc_heatmap_12h.png'
             Image.new('RGB',(10,10)).save(path)
-            return [{'image':str(path),'timeframe':'12h'}]
+            return [{'image':str(path),'timeframe':'12h','hover_snapshot':snapshot}]
         capture_module=types.SimpleNamespace(capture_heatmaps=capture,COINGLASS_HEATMAP_URL=task.SOURCE)
-        scanner_module=types.SimpleNamespace(analyze_heatmap_images=lambda *a,**kw:sample())
+        scanner_module=types.SimpleNamespace(analyze_heatmap_images=lambda *a,**kw:raw)
         with tempfile.TemporaryDirectory() as root,patch.dict(sys.modules,{
             'market_vision.coinglass_heatmap_capture':capture_module,
             'market_vision.openai_heatmap_scanner':scanner_module}),patch.object(sys,'argv',[
