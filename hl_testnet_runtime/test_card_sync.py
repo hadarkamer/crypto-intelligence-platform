@@ -305,16 +305,13 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(r['snapshot']['fills']),2)
         self.assertEqual(reader.windows[0][0],T+60000)
 
-    def test_day_old_checkpoint_replays_bounded_overlapping_history(self):
+    def test_day_old_checkpoint_reads_one_complete_range_per_pass(self):
         ev=evidence();reader=Reader(ev)
         end=T+DAY_AND_THREE_HOURS
         result=e.collect(ev,reader,clock=lambda:end,elapsed=lambda:0)
         self.assertEqual(result['snapshot']['fills'],ev['snapshot']['fills'])
         self.assertEqual(result['cursor_ms'],end)
-        self.assertGreaterEqual(len(reader.windows),4)
-        self.assertTrue(all(0<=b-a<=e.DAY_MS for a,b in reader.windows))
-        self.assertEqual(reader.windows[0],reader.windows[1])
-        self.assertLessEqual(reader.windows[2][0],reader.windows[0][1])
+        self.assertEqual(reader.windows,[(T-e.OVERLAP_MS,end)]*2)
 
     def test_catchup_keeps_missing_old_fill_blocked(self):
         ev=evidence();reader=Reader(ev);reader.data['fills']=[]
@@ -333,11 +330,7 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(reader.windows[0],(anchor,anchor))
                 self.assertEqual(reader.windows[-1],(anchor,anchor))
                 windows=reader.windows[1:-1]
-                self.assertTrue(all(0<=b-a<=e.DAY_MS for a,b in windows))
-                self.assertEqual(windows[::2],windows[1::2])
-                self.assertEqual(windows[0][0],T-e.OVERLAP_MS)
-                self.assertEqual(windows[-1][1],T+gap)
-                self.assertTrue(all(b[0]<=a[1] for a,b in zip(windows,windows[1:])))
+                self.assertEqual(windows,[(T-e.OVERLAP_MS,T+gap)]*2)
 
     def test_old_gap_missing_or_changed_anchor_never_advances_input(self):
         for failure in ('missing','changed','lost_after_collection'):
@@ -381,7 +374,7 @@ class EvidenceTests(unittest.TestCase):
                     return rows
                 reader.read=read
                 if unstable:
-                    with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+                    with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY|PREVIOUS_FILL_MISSING'):
                         e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
                 else:
                     result=e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
@@ -420,12 +413,12 @@ class EvidenceTests(unittest.TestCase):
             e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
         self.assertEqual((reader.calls,ev),(0,before))
 
-    def test_old_gap_stops_between_windows_at_existing_deadline(self):
+    def test_old_gap_rejects_late_observation_at_existing_deadline(self):
         ev=evidence(is_open=True);reader=Reader(evidence());before=deepcopy(ev)
         with self.assertRaisesRegex(e.SyncError,'OBSERVATION_TOO_SLOW'):
             e.collect(ev,reader,clock=lambda:T+50*3600000,
                       elapsed=lambda:16 if reader.calls>=3 else 0)
-        self.assertEqual(reader.calls,3)  # Anchor + one twice-checked window.
+        self.assertEqual(reader.windows.count((ev['snapshot']['fills'][0]['at_ms'],)*2),1)
         self.assertEqual(ev,before)
 
     def test_old_gap_late_retention_bracket_cannot_extend_deadline(self):
@@ -730,11 +723,11 @@ class EvidenceTests(unittest.TestCase):
         for value in (T-1,T+20000,T-e.DAY_MS):
             with self.assertRaises(e.SyncError):collected(evidence(),cursor_ms=value)
 
-    def test_oversized_history_plan_is_bounded_before_any_read(self):
+    def test_sparse_long_history_does_not_allocate_empty_daily_pages(self):
         reader=Reader(evidence())
-        with self.assertRaisesRegex(e.SyncError,'READ_BUDGET_EXCEEDED'):
-            e.collect(evidence(),reader,clock=lambda:T+10000*e.DAY_MS,elapsed=lambda:0)
-        self.assertEqual(reader.calls,0)
+        result=e.collect(evidence(),reader,clock=lambda:T+10000*e.DAY_MS,elapsed=lambda:0)
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+        self.assertEqual(len(reader.windows),4)  # Two retained anchors, two complete passes.
 
     def test_incomplete_bootstrap_rejected(self):
         ev=evidence();ev['snapshot']['history_complete']=False
@@ -754,6 +747,17 @@ class EvidenceTests(unittest.TestCase):
             def read(self,*a,start=None,end=None,**kw):return [dict(time=t) for t in range(start,end+1)]
         rows=e.history(Pages(),A,T,T+999)
         self.assertEqual(len(rows),1000);self.assertEqual(len({r['time'] for r in rows}),1000)
+
+    def test_existing_pagination_recovers_capped_pages_across_seven_days(self):
+        times=[T+i*e.DAY_MS*7//1000 for i in range(1000)]
+        calls=[]
+        class Pages:
+            def read(self,*a,start=None,end=None,**kw):
+                calls.append((start,end))
+                return [dict(time=t) for t in times if start<=t<=end][:500]
+        rows=e.history(Pages(),A,T,T+7*e.DAY_MS)
+        self.assertEqual([r['time'] for r in rows],times)
+        self.assertGreater(len(calls),1)
 
     def test_parallel_reads_overlap_with_four_workers_and_sequential_verification(self):
         ev=evidence(is_open=True)
@@ -996,10 +1000,10 @@ class ObservationFundingTests(unittest.TestCase):
         bodies=e._planned_observation_reads(ev['bindings'],ev['snapshot'],T,
             T+DAY_AND_THREE_HOURS,reuse_verified_terminals=True)
         fills=[body for body in bodies if body['type']=='userFillsByTime']
-        self.assertEqual(len(fills),4)
-        self.assertEqual(fills[0],fills[1]);self.assertEqual(fills[2],fills[3])
-        self.assertEqual(fills[0]['endTime'],T+e.DAY_MS-2*e.OVERLAP_MS)
-        self.assertEqual(fills[2]['startTime'],fills[0]['endTime']-e.OVERLAP_MS)
+        self.assertEqual(len(fills),2)
+        self.assertEqual(fills[0],fills[1])
+        self.assertEqual((fills[0]['startTime'],fills[0]['endTime']),
+                         (T-e.OVERLAP_MS,T+DAY_AND_THREE_HOURS))
         self.assertEqual(Counter(body['oid'] for body in bodies if body['type']=='orderStatus'),
                          {11:2,12:2})
 

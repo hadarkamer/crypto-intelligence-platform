@@ -797,6 +797,10 @@ class LiveEvidenceProvider:
                         for leg,price in (('STOP',trade['prices']['stop']),
                                           ('TAKE_PROFIT',trade['prices']['take_profit']))))
                 if not stable:market_lanes.add((trade['account'],trade['symbol']))
+            # A failed observation cannot consume a mark. Filter before the
+            # shared quote read, retaining all actionable protection lanes.
+            market_lanes={(account,symbol) for account,symbol in market_lanes
+                if account in inventories and runtime._lane(account,symbol) not in result['blocked_lanes']}
             market=None;market_error=None
             if market_lanes:
                 market_at=self.now()
