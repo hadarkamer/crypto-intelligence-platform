@@ -48,6 +48,30 @@ def normalized(raw=None):
         run_id='00000000-0000-4000-8000-000000000001',captured_at='2026-01-01T00:00:00Z',image=b'synthetic')
 
 class ProminentTests(unittest.TestCase):
+    def test_rejected_levels_keep_specific_safe_rule_in_worker_log(self):
+        from contextlib import redirect_stdout
+        import io
+        from model1_execution import run_task, read_failure, stage
+        cases=[('axis_does_not_cover_price',lambda s:s['price_axis_range'].update(high=99)),
+               ('right_edge_missing',lambda s:s['prominent_levels'][0].update(right_edge_visible=False)),
+               ('side_conflicts_with_price',lambda s:s['prominent_levels'][0].update(side='below'))]
+        for reason,change in cases:
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as directory:
+                raw=sample();change(raw['scans'][0])
+                def rejected(*args):
+                    stage('validation');normalized(raw)
+                self.assertEqual(run_task(rejected,'12H','offline-job',directory),1)
+                output=io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(read_failure(Path(directory)/'error.json','offline-job',1),'zones_invalid')
+                logged=json.loads(output.getvalue().split(' ',1)[1])
+                self.assertEqual(logged['validation_reason'],reason)
+                self.assertNotIn('prominent_levels',logged)
+    def test_unknown_validation_reason_is_not_retained(self):
+        from model1_execution import failure_detail
+        failure=StageFailure('zones_invalid','private-source-content')
+        self.assertNotIn('validation_reason',failure_detail(failure))
+        self.assertNotIn('private-source-content',str(failure))
     def reject(self,raw):
         with self.assertRaises(StageFailure):normalized(raw)
     def test_installed_scan_requires_variable_prominent_list(self):

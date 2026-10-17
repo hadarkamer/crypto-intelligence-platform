@@ -19,15 +19,15 @@ NUMBER_TOKEN=re.compile(r'(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.]
 
 def num(value):
     if type(value) not in (int,float) or not math.isfinite(value) or value<=0:
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'invalid_positive_number')
     return float(value)
 
 def evidence(value, prices=()):
     if not isinstance(value,str) or not value.strip() or len(value)>500:
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'evidence_text_invalid')
     found={float(token.replace(',','')) for token in NUMBER_TOKEN.findall(value)}
     if any(price not in found for price in prices):
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'evidence_number_mismatch')
     return value.strip()
 
 def identity(raw,timeframe):
@@ -51,67 +51,67 @@ def normalize_prominent(raw,*,timeframe,run_id,captured_at,image):
     current=validate_price_range(scan.get('current_price_range'))
     axis=scan.get('price_axis_range')
     if not isinstance(axis,dict) or set(axis)!={'low','high','price_evidence'}:
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'axis_shape')
     axis_low,axis_high=num(axis['low']),num(axis['high'])
     if not axis_low<=current['low']<current['high']<=axis_high:
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'axis_does_not_cover_price')
     axis_text=evidence(axis['price_evidence'],(axis_low,axis_high))
     candidates=scan.get('prominent_levels')
     if not isinstance(candidates,list) or len(candidates)>MAX_LEVELS:
-        raise StageFailure('zones_invalid')
+        raise StageFailure('zones_invalid', 'level_list_shape')
     model=raw.get('model')
     if not isinstance(model,str) or not model.strip() or len(model)>100:
         raise StageFailure('analysis_response_invalid')
     zones=[];seen=set();omitted=0
     for item in candidates:
-        if not isinstance(item,dict):raise StageFailure('zones_invalid')
+        if not isinstance(item,dict):raise StageFailure('zones_invalid', 'level_object')
         if item.get('confidence')=='low':continue
-        if item.get('confidence') not in ('high','medium'):raise StageFailure('zones_invalid')
-        if item.get('right_edge_visible') is not True:raise StageFailure('zones_invalid')
+        if item.get('confidence') not in ('high','medium'):raise StageFailure('zones_invalid', 'level_confidence')
+        if item.get('right_edge_visible') is not True:raise StageFailure('zones_invalid', 'right_edge_missing')
         colour=item.get('row_colour');shape=item.get('shape');intensity=item.get('intensity')
         if colour not in ('yellow','green','blue') or shape not in ('point','range'):
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'colour_or_shape')
         if colour=='yellow' and (intensity!='many' or (shape=='range' and
             (item.get('continuous') is not True or item.get('weak_gap_present') is not False))):
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'yellow_shape')
         if colour=='green' and (shape!='range' or intensity!='normal'
             or item.get('continuous') is not True or item.get('weak_gap_present') is not False):
-            raise StageFailure('zones_invalid')
-        if colour=='blue' and intensity!='few':raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'green_shape')
+        if colour=='blue' and intensity!='few':raise StageFailure('zones_invalid', 'blue_intensity')
         low,high=num(item.get('price_low')),num(item.get('price_high'))
         if not axis_low<=low<=high<=axis_high or (shape=='range' and not low<high):
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'level_outside_axis')
         raw_prices=item.get('prices')
         if not isinstance(raw_prices,list) or len(raw_prices)!=(1 if shape=='point' else 0):
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'point_count')
         prices=[num(p) for p in raw_prices]
-        if any(p<low or p>high for p in prices):raise StageFailure('zones_invalid')
+        if any(p<low or p>high for p in prices):raise StageFailure('zones_invalid', 'point_outside_bounds')
         precision=item.get('price_precision');basis=item.get('evidence_basis')
         uncertainty=item.get('uncertainty_usd')
         if type(uncertainty) not in (int,float) or not math.isfinite(uncertainty) or uncertainty<0:
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'uncertainty_invalid')
         text=evidence(item.get('price_evidence'))
         if precision=='verified_label':
             if (basis not in ('numeric_row_label','tooltip') or uncertainty!=0
                 or item.get('confidence')!='high'):
-                raise StageFailure('zones_invalid')
+                raise StageFailure('zones_invalid', 'exact_price_not_verified')
             evidence(text,prices or (low,high))
-            if shape=='point' and not low==high==prices[0]:raise StageFailure('zones_invalid')
+            if shape=='point' and not low==high==prices[0]:raise StageFailure('zones_invalid', 'exact_point_bounds')
         elif precision=='axis_estimate':
             if basis!='axis_interpolation' or uncertainty<=0 or not low<high:
-                raise StageFailure('zones_invalid')
+                raise StageFailure('zones_invalid', 'axis_estimate_invalid')
             if prices and uncertainty+1e-9<max(prices[0]-low,high-prices[0]):
-                raise StageFailure('zones_invalid')
-        else:raise StageFailure('zones_invalid')
+                raise StageFailure('zones_invalid', 'uncertainty_does_not_cover_bounds')
+        else:raise StageFailure('zones_invalid', 'price_precision')
         score=item.get('strength_score')
         if type(score) not in (int,float) or not math.isfinite(score) or not 0<=score<=1:
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'strength_score')
         side=item.get('side')
-        if side not in ('above','below'):raise StageFailure('zones_invalid')
+        if side not in ('above','below'):raise StageFailure('zones_invalid', 'side_invalid')
         if low<=current['high'] and high>=current['low']:
             omitted+=1;continue
         if (side=='above' and low<=current['high']) or (side=='below' and high>=current['low']):
-            raise StageFailure('zones_invalid')
+            raise StageFailure('zones_invalid', 'side_conflicts_with_price')
         key=(side,shape,low,high,tuple(prices))
         if key in seen:continue
         seen.add(key)
