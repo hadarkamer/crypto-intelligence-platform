@@ -115,6 +115,7 @@ class SolProximityWorker:
         self.legacy_cache = legacy_cache or SolPriceCache(fetch=legacy_fetch_rows, symbol=spec.coin)
         self.task = self.bot = self.subscription = None
         self.scopes, self.lock = set(), asyncio.Lock()
+        self.retired_scopes, self.retired_drained_scopes = set(), set()
         self.retry_ms, self.last_poll, self.last_price_poll = 0, None, None
         self.last_legacy_price_poll = None
         self.transient_failures = 0
@@ -353,6 +354,63 @@ class SolProximityWorker:
         print(f'[sol-proximity] delivery status={outcome}', flush=True)
         return not source_failed
 
+    def retire_pending(self, state, now):
+        """Withdraw unfilled observations only; retain filled/uncertain levels."""
+        for source_state in (state, state.get('legacy_source_state')):
+            if not source_state:
+                continue
+            for position in list(source_state['active']):
+                if position['status'] == 'PENDING':
+                    self.signal._finish(source_state, position, 'CANCELLED_FORMULA_RETIRED', now)
+                    episode = source_state['episodes'].get(position['episode_key'])
+                    if episode and episode['generation'] == position['episode_generation']:
+                        episode.update(consumed=True, consume_reason='FORMULA_RETIRED')
+            for intent in source_state.get('intents', []):
+                if intent['status'] == 'PENDING':
+                    intent['status'] = 'CANCELLED_FORMULA_RETIRED'
+        return deepcopy(state)
+
+    async def drain_retired(self, scope):
+        """Resume existing exits after restart, without intake or alert replay."""
+        if scope in self.retired_drained_scopes:
+            return
+        slot = (scope, self.clock()//MINUTE)
+        if self.last_poll == slot:
+            return
+        async with self.lock:
+            state = await asyncio.to_thread(self.store.snapshot, scope)
+            if state is None:
+                # Retirement must not initialize a new observation or migrate it.
+                self.retired_drained_scopes.add(scope)
+                self.runtime.update(ready=True, state='RETIRED', active_pending=0, active_open=0,
+                                    active_unknown=0, legacy_open=0, legacy_unknown=0)
+                return
+            if scope not in self.retired_scopes:
+                retired_at = self.clock()
+                state = await self.db(self.store.transact, scope, retired_at,
+                                      action=lambda s: self.retire_pending(s, retired_at))
+                self.retired_scopes.add(scope)
+            active = state['active'] + state.get('legacy_source_state', {}).get('active', [])
+            if any(p['status'] in ('OPEN', 'UNKNOWN') for p in active):
+                state = await self.monitor(scope, state)
+                active = state['active'] + state.get('legacy_source_state', {}).get('active', [])
+                draining = any(p['status'] in ('OPEN', 'UNKNOWN') for p in active)
+            else:
+                draining = False
+            self.runtime.update(ready=True, state='RETIRED_DRAINING' if draining else 'RETIRED',
+                                active_pending=0,
+                                active_open=sum(p['status'] == 'OPEN' for p in state['active']),
+                                active_unknown=sum(p['status'] == 'UNKNOWN' for p in state['active']),
+                                legacy_open=sum(p['status'] == 'OPEN' for p in state.get('legacy_source_state', {}).get('active', [])),
+                                legacy_unknown=sum(p['status'] == 'UNKNOWN' for p in state.get('legacy_source_state', {}).get('active', [])),
+                                counts=state['counts'], last_error_type=None, next_retry_at=None)
+            self.transient_failures = self.retry_ms = 0
+            self.last_poll = slot
+            if not draining:
+                self.retired_drained_scopes.add(scope)
+            self.cache.prune({self.spec.coin: self.clock()-1005*MINUTE})
+            self.legacy_cache.prune({self.spec.coin: self.clock()-1005*MINUTE})
+
     async def tick(self):
         if not self.subscription:
             return
@@ -360,6 +418,9 @@ class SolProximityWorker:
         if chat_id is None:
             return
         scope = self.scope_for(chat_id)
+        if self.spec.rule_id in policy.RETIRED_EXPERIMENTAL_RULES:
+            await self.drain_retired(scope)
+            return
         if not self.allowed(chat_id) and scope not in self.scopes:
             return
         minute = self.clock()//MINUTE

@@ -13,16 +13,13 @@ from manual_formula_alert_store_selftest import BASE, c1274_bundle, c1274_refere
 _STRICT_MANUAL_RULE_ENABLED = policy.manual_rule_enabled
 _EXPECTED = {
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'HYPE_ROW71205_SHORT',
-    'SOL_MAXPAIN_DIST1_3_RANGE24', 'SOL_G65_K49_PROFIT_LOCK',
-    'HYPE_MAXPAIN_DIST05_15_LONG_TF', 'DOGE_MAXPAIN_DIST15_25_LONG_TF',
-    'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
-    'ETH_MAXPAIN_LONG_DIST1_3',
+    'SOL_G65_K49_PROFIT_LOCK',
     'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
 }
 
 
 class PolicyTests(unittest.TestCase):
-    def test_all_profiles_preserve_exact_nine_rule_roster(self):
+    def test_all_profiles_preserve_exact_four_rule_roster(self):
         for profile in ('ALL', 'SELECTED_EXPERIMENTAL_ONLY', 'ORDINARY_AND_SELECTED_EXPERIMENTAL'):
             with self.subTest(profile=profile), patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
                 self.assertEqual(policy.ordinary_alerts_enabled(), profile != 'SELECTED_EXPERIMENTAL_ONLY')
@@ -30,7 +27,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertFalse(policy.u21_experimental_enabled())
                 self.assertTrue(policy.xrp_r2732_experimental_enabled())
                 self.assertTrue(policy.hype_row71205_experimental_enabled())
-                self.assertTrue(policy.sol_proximity_experimental_enabled())
+                self.assertFalse(policy.sol_proximity_experimental_enabled())
                 self.assertTrue(policy.sol_g65_experimental_enabled())
                 self.assertEqual(set(policy.status()['selected_experimental_rule_ids']), _EXPECTED)
                 self.assertEqual(policy.status()['manual_rule_allowlist'], [])
@@ -51,7 +48,7 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.u21_experimental_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['roster_version'], 'owner-r2732-and-later-20261008-v3-doge-partial')
+            self.assertEqual(policy.status()['roster_version'], 'owner-top4-20261017-v4')
             self.assertTrue(policy.ordinary_alerts_enabled())
 
     def test_unknown_profile_fails_closed(self):
