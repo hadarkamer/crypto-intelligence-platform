@@ -148,34 +148,38 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertEqual(core._remaining(current['trades'][value['occurrence_id']]), Decimal(0))
         return value, current
 
-    def test_released_filled_take_closes_durably_without_sends_on_either_side(self):
-        for side in ('LONG','SHORT'):
-            with self.subTest(side=side):
-                value=alert(side=side,cycle='pg-released-take-'+side)
-                entry=self.start(value)
-                quantity=self.oracle.orders[entry]['view']['wire_order']['s']
-                self.oracle.fill(entry,quantity)
-                for _ in range(3):self.cycle()
-                take=self.oracle.oid('TAKE_PROFIT');stop=self.oracle.oid('STOP')
-                self.oracle.fill(take,quantity)
-                self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
-                original=self.raw.status
-                def terminal_status(oid):
-                    raw=original(oid)
-                    if str(oid)==take:raw['order']['order'].update(isTrigger=False,triggerPx='0.0',sz='0.0')
-                    if str(oid)==stop:raw['order']['status']='reduceOnlyCanceled'
-                    return raw
-                sent=len(self.oracle.requests)
-                with patch.object(self.raw,'status',side_effect=terminal_status):self.cycle()
-                cid=value['occurrence_id'];closed=self.store.load()['trades'][cid]
-                self.assertEqual(closed['phase'],'CLOSED')
-                self.reconnect();self.worker.receive([value,value]);self.cycle(entries=True)
-                self.assertEqual(self.store.load()['trades'][cid],closed)
-                self.assertEqual(len(self.oracle.requests),sent)
-                self.assertEqual(self.compact()['archived'],1)
-                self.reconnect();self.worker.receive([value]);self.cycle(entries=True)
-                self.assertEqual(self.store.archive_record(cid)['trade'],closed)
-                self.assertEqual(len(self.oracle.requests),sent)
+    def released_filled_take_closes_durably(self,side):
+        value=alert(side=side,cycle='pg-released-take-'+side)
+        entry=self.start(value)
+        quantity=self.oracle.orders[entry]['view']['wire_order']['s']
+        self.oracle.fill(entry,quantity)
+        for _ in range(3):self.cycle()
+        take=self.oracle.oid('TAKE_PROFIT');stop=self.oracle.oid('STOP')
+        self.oracle.fill(take,quantity)
+        self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
+        original=self.raw.status
+        def terminal_status(oid):
+            raw=original(oid)
+            if str(oid)==take:raw['order']['order'].update(isTrigger=False,triggerPx='0.0',sz='0.0')
+            if str(oid)==stop:raw['order']['status']='reduceOnlyCanceled'
+            return raw
+        sent=len(self.oracle.requests)
+        with patch.object(self.raw,'status',side_effect=terminal_status):self.cycle()
+        cid=value['occurrence_id'];closed=self.store.load()['trades'][cid]
+        self.assertEqual(closed['phase'],'CLOSED')
+        self.reconnect();self.worker.receive([value,value]);self.cycle(entries=True)
+        self.assertEqual(self.store.load()['trades'][cid],closed)
+        self.assertEqual(len(self.oracle.requests),sent)
+        self.assertEqual(self.compact()['archived'],1)
+        self.reconnect();self.worker.receive([value]);self.cycle(entries=True)
+        self.assertEqual(self.store.archive_record(cid)['trade'],closed)
+        self.assertEqual(len(self.oracle.requests),sent)
+
+    def test_released_filled_long_take_closes_durably_without_sends(self):
+        self.released_filled_take_closes_durably('LONG')
+
+    def test_released_filled_short_take_closes_durably_without_sends(self):
+        self.released_filled_take_closes_durably('SHORT')
 
     def test_rejected_entry_record_is_durable_and_never_retried_after_restart(self):
         value=alert(side='SHORT',cycle='pg-rejected-order')
