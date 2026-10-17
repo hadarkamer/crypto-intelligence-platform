@@ -625,6 +625,9 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
         self.assertGreater(next_approval,released_at)
         self.oracle.t=next_approval+1000
         second=pg_fixture.alert(cycle='pg-manual-successor',approved_ms=next_approval)
+        other=pg_fixture.alert(symbol='ETH',cycle='pg-other-formula',approved_ms=next_approval)
+        # Seed the oracle before the shared all-asset market sample is cached.
+        self.oracle.mark[pg_fixture.core._lane(account,other['symbol'])]=other['entry']
         self.worker.receive([second]);self.cycle(entries=True)
         after=self.store.load()
         self.assertNotIn(second['occurrence_id'],after['trades'])
@@ -633,12 +636,23 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
         self.assertEqual(after['formula_accounting']['portfolios'][first['rule_id']]['balance_usd'],'40')
         self.assertNotIn('settlement',after['trades'][cid])
         # Other formulas on the same account retain their existing admission.
-        other=pg_fixture.alert(symbol='ETH',cycle='pg-other-formula',approved_ms=next_approval)
         self.start(other)
         self.cycle()
         self.assertEqual(len(self.replayed_entries),2)
         self.assertIn(other['occurrence_id'],self.store.load()['trades'])
         self.assertFalse(self.store.load().get('blocked_lanes'))
+
+
+class MemoryManualFormulaAccountingTests(unittest.TestCase):
+    """Local version of the manual accounting scenario, without claiming SQL."""
+    setUp=pg_fixture.MemoryProviderClosureSmokeTests.setUp
+    reconnect=pg_fixture.MemoryProviderClosureSmokeTests.reconnect
+    oracle_state=pg_fixture.ExecutionHistoryPostgresTests.oracle_state
+    cycle=pg_fixture.ExecutionHistoryPostgresTests.cycle
+    start=pg_fixture.ExecutionHistoryPostgresTests.start
+    compact=pg_fixture.ExecutionHistoryPostgresTests.compact
+    _manual_exchange_observation=PostgresExternalActivityReviewTests._manual_exchange_observation
+    test_manual_formula_isolated=PostgresExternalActivityReviewTests.test_real_pg_manual_handoff_preserves_unallocated_formula_capital_after_restart
 
 
 if __name__=='__main__':
