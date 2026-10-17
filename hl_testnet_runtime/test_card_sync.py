@@ -321,10 +321,148 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(e.SyncError,'PREVIOUS_FILL_MISSING'):
             e.collect(ev,reader,clock=lambda:T+DAY_AND_THREE_HOURS,elapsed=lambda:0)
 
-    def test_older_than_two_days_requires_review(self):
-        ev=evidence()
-        with self.assertRaisesRegex(e.SyncError,'HISTORY_GAP_REQUIRES_REVIEW'):
-            e.collect(ev,Reader(ev),clock=lambda:T+2*e.DAY_MS+1)
+    def test_old_checkpoint_uses_retention_brackets_and_complete_bounded_history(self):
+        for gap in (2*e.DAY_MS+1,50*3600000,7*e.DAY_MS):
+            with self.subTest(gap=gap):
+                ev=evidence(is_open=True);before=deepcopy(ev);reader=Reader(evidence())
+                result=e.collect(ev,reader,clock=lambda:T+gap,elapsed=lambda:0)
+                self.assertTrue(result['report']['cards'][0]['closure_verified'])
+                self.assertEqual(result['cursor_ms'],T+gap)
+                self.assertEqual(ev,before)
+                anchor=ev['snapshot']['fills'][0]['at_ms']
+                self.assertEqual(reader.windows[0],(anchor,anchor))
+                self.assertEqual(reader.windows[-1],(anchor,anchor))
+                windows=reader.windows[1:-1]
+                self.assertTrue(all(0<=b-a<=e.DAY_MS for a,b in windows))
+                self.assertEqual(windows[::2],windows[1::2])
+                self.assertEqual(windows[0][0],T-e.OVERLAP_MS)
+                self.assertEqual(windows[-1][1],T+gap)
+                self.assertTrue(all(b[0]<=a[1] for a,b in zip(windows,windows[1:])))
+
+    def test_old_gap_missing_or_changed_anchor_never_advances_input(self):
+        for failure in ('missing','changed','lost_after_collection'):
+            with self.subTest(failure=failure):
+                ev=evidence(is_open=True);before=deepcopy(ev);reader=Reader(evidence())
+                original=reader.read;anchors=[]
+                def read(kind,*args,start=None,end=None,**kw):
+                    rows=original(kind,*args,start=start,end=end,**kw)
+                    if kind=='userFillsByTime' and start==end:
+                        anchors.append(start)
+                        if failure=='missing' or failure=='lost_after_collection' and len(anchors)==2:return []
+                        if failure=='changed':rows[0]['fee']='123'
+                    return rows
+                reader.read=read
+                with self.assertRaisesRegex(e.SyncError,'PREVIOUS_FILL_MISSING|FILL_FACT_CHANGED'):
+                    e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+                self.assertEqual(ev,before)
+
+    def test_old_gap_missing_exit_fill_still_blocks(self):
+        ev=evidence(is_open=True);reader=Reader(evidence());before=deepcopy(ev)
+        reader.data['fills']=reader.data['fills'][:1]
+        with self.assertRaisesRegex(e.SyncError,'FILLED_ORDER_HISTORY_INCOMPLETE'):
+            e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+        self.assertEqual(ev,before)
+
+    def test_old_gap_collects_exit_in_middle_window_and_rejects_disagreement(self):
+        for unstable in (False,True):
+            with self.subTest(unstable=unstable):
+                ev=evidence(is_open=True);before=deepcopy(ev);reader=Reader(evidence())
+                take=ev['bindings'][0]['orders']['TAKE_PROFIT'][0]
+                stamp=T+e.DAY_MS+123456
+                next(f for f in reader.data['fills'] if str(f['oid'])==take)['time']=stamp
+                reader.data['statuses'][take]['order']['statusTimestamp']=stamp+1
+                reader.data['statuses'][ev['bindings'][0]['orders']['STOP'][0]]['order']['statusTimestamp']=stamp+1
+                original=reader.read;seen=[]
+                def read(kind,*args,start=None,end=None,**kw):
+                    rows=original(kind,*args,start=start,end=end,**kw)
+                    if kind=='userFillsByTime' and start<=stamp<=end:
+                        seen.append(start)
+                        if unstable and len(seen)==2:return []
+                    return rows
+                reader.read=read
+                if unstable:
+                    with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+                        e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+                else:
+                    result=e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+                    self.assertTrue(result['report']['cards'][0]['closure_verified'])
+                    self.assertEqual(next(f for f in result['snapshot']['fills'] if f['oid']==take)['at_ms'],stamp)
+                self.assertEqual(ev,before)
+
+    def test_old_gap_without_anchor_accepts_only_exact_zero_fill_rejection(self):
+        b=binding(side='SHORT');b['orders']['STOP']=[];b['orders']['TAKE_PROFIT']=[]
+        ev=dict(bindings=[b],snapshot=snapshot(b));oid=b['orders']['ENTRY'][0]
+        for status in ('perpMarginRejected','canceled','open'):
+            with self.subTest(status=status):
+                reader=Reader(ev);row=reader.data['statuses'][oid]
+                row['order']['status']=status
+                if status=='open':
+                    row['order']['order']['sz']=b['planned_quantity']
+                    reader.data['inventory']=[deepcopy(row['order']['order'])]
+                if status=='perpMarginRejected':
+                    result=e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+                    self.assertEqual(result['snapshot']['terminal_orders'][0]['state'],'REJECTED')
+                    self.assertFalse(result['snapshot']['fills'])
+                else:
+                    with self.assertRaisesRegex(e.SyncError,'HISTORY_RETENTION_DURABLE_ANCHOR_REQUIRED'):
+                        e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+
+    def test_old_gap_budget_denial_does_not_read_or_change_checkpoint(self):
+        from .request_budget import BudgetError
+        ev=evidence(is_open=True);before=deepcopy(ev)
+        class Denied(Reader):
+            @contextmanager
+            def observation_batch(self,bodies):
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+                yield
+        reader=Denied(evidence())
+        with self.assertRaisesRegex(BudgetError,'EXHAUSTED'):
+            e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0)
+        self.assertEqual((reader.calls,ev),(0,before))
+
+    def test_old_gap_stops_between_windows_at_existing_deadline(self):
+        ev=evidence(is_open=True);reader=Reader(evidence());before=deepcopy(ev)
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_TOO_SLOW'):
+            e.collect(ev,reader,clock=lambda:T+50*3600000,
+                      elapsed=lambda:16 if reader.calls>=3 else 0)
+        self.assertEqual(reader.calls,3)  # Anchor + one twice-checked window.
+        self.assertEqual(ev,before)
+
+    def test_old_gap_late_retention_bracket_cannot_extend_deadline(self):
+        ev=evidence(is_open=True);reader=Reader(evidence());before=deepcopy(ev)
+        anchor=ev['snapshot']['fills'][0]['at_ms']
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_TOO_SLOW'):
+            e.collect(ev,reader,clock=lambda:T+50*3600000,
+                      elapsed=lambda:16 if reader.windows.count((anchor,anchor))==2 else 0)
+        self.assertEqual(ev,before)
+
+    def test_old_gap_cache_reuse_keeps_retention_brackets_independent(self):
+        class Funded(Reader):
+            @contextmanager
+            def observation_batch(self,bodies):
+                assert bodies
+                assert not getattr(self,'funded',None)
+                self.funded=Counter(json.dumps(b,sort_keys=True) for b in bodies)
+                try:
+                    yield
+                    assert not +self.funded
+                finally:self.funded=None
+            def read(self,kind,account,*,oid=None,start=None,end=None):
+                body=dict(type=kind,user=account)
+                if oid is not None:body['oid']=int(oid)
+                if start is not None:body.update(startTime=start,endTime=end,aggregateByTime=False)
+                key=json.dumps(body,sort_keys=True)
+                assert self.funded[key]>0
+                self.funded[key]-=1
+                return super().read(kind,account,oid=oid,start=start,end=end)
+        ev=evidence(is_open=True);reader=Funded(evidence());cache=e.ObservationReadCache(reader)
+        first=e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0,
+                        observation_cache=cache)
+        count=reader.calls
+        again=e.collect(ev,reader,clock=lambda:T+50*3600000,elapsed=lambda:0,
+                        observation_cache=cache)
+        self.assertEqual(first,again)
+        self.assertEqual(reader.calls-count,2)
 
     def test_open_to_closed_only_on_complete_evidence(self):
         ev=evidence(is_open=True);target=evidence()
@@ -592,8 +730,11 @@ class EvidenceTests(unittest.TestCase):
         for value in (T-1,T+20000,T-e.DAY_MS):
             with self.assertRaises(e.SyncError):collected(evidence(),cursor_ms=value)
 
-    def test_long_gap_explicitly_blocked(self):
-        with self.assertRaisesRegex(e.SyncError,'GAP'):e.collect(evidence(),Reader(evidence()),clock=lambda:T+2*e.DAY_MS+1)
+    def test_oversized_history_plan_is_bounded_before_any_read(self):
+        reader=Reader(evidence())
+        with self.assertRaisesRegex(e.SyncError,'READ_BUDGET_EXCEEDED'):
+            e.collect(evidence(),reader,clock=lambda:T+10000*e.DAY_MS,elapsed=lambda:0)
+        self.assertEqual(reader.calls,0)
 
     def test_incomplete_bootstrap_rejected(self):
         ev=evidence();ev['snapshot']['history_complete']=False
