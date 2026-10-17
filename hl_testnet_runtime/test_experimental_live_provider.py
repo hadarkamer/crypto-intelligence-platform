@@ -46,6 +46,7 @@ class RawTestnetFixture:
     def __init__(self,exchange,state_loader,budget):
         self.exchange=exchange; self.state_loader=state_loader; self.budget=budget
         self.extra_orders=[];self.extra_positions=[];self.calls=[];self.mutate=None
+        self.funding=[]
 
     def status(self,oid):
         item=self.exchange.orders.get(str(oid))
@@ -91,6 +92,8 @@ class RawTestnetFixture:
             return dict(assetPositions=values+deepcopy(self.extra_positions),withdrawable='50000',
                 marginSummary=dict(accountValue='50000',totalRawUsd='50000',totalMarginUsed='0',totalNtlPos='0'))
         if kind=='orderStatus':return self.status(oid)
+        if kind=='userFunding':
+            return deepcopy([row for row in self.funding if start<=row['time']<=end])
         if kind=='userFillsByTime':
             rows=[]
             for oid,item in self.exchange.orders.items():

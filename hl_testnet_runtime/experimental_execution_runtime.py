@@ -10,7 +10,7 @@ The existing same-symbol fence remains: pooled reduce-only orders cannot provide
 independent per-formula OCO guarantees. Unknown submissions never get retried.
 """
 from copy import deepcopy
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, localcontext
 
 import approved_alert_contract as contract
 from . import card_lifecycle as life, price_precision, request_budget
@@ -298,10 +298,13 @@ class IsolatedExecutionRuntime:
             raise RuntimeError('ALLOCATION_RECONCILIATION_FAILED')
 
     def _proposal(self, state, trade, leg, action, quantity, now, *, operation):
-        return dict(version=VERSION,card_id=trade['cid'],account=trade['account'],role=trade['role'],symbol=trade['symbol'],
+        proposal = dict(version=VERSION,card_id=trade['cid'],account=trade['account'],role=trade['role'],symbol=trade['symbol'],
             leg=leg,operation=operation,quantity=quantity,action=wire.canonical_wire_action(action),
             source_at=trade['source']['source_at'],source_expires_at=trade['source']['expires_at'],
             basis=life.digest(state['snapshots']),observed_at_ms=now)
+        if operation == 'ENTRY' and trade.get('entry_risk'):
+            proposal['entry_risk'] = deepcopy(trade['entry_risk'])
+        return proposal
 
     def _order(self, state, trade, leg, quantity, price, meta, now, *, old_oid=None):
         index, decimals = wire.asset(meta, trade['symbol'])
@@ -433,7 +436,7 @@ class IsolatedExecutionRuntime:
     _r2732_initial = staticmethod(r2732_entry.initial)
     _r2732_admission = staticmethod(r2732_entry.entry_admission)
 
-    def _admit(self, state, cid, context, now):
+    def _admit(self, state, cid, context, now, *, risk_snapshot=None):
         source = state['sources'][cid]; msg = source['source']
         if not _source_active(source,now) or cid in state['trades'] or cid in state.get('source_condition_errors',{}):
             return None
@@ -461,6 +464,12 @@ class IsolatedExecutionRuntime:
                 or life.number(state['snapshots'][lane]['position_quantity'],signed=True)!=0):
             raise RuntimeError('EMPTY_OWNED_MARKET_EVIDENCE_REQUIRED')
         approved = contract.is_approved(msg)
+        entry_risk = None
+        risk_budget = budget()
+        if approved and state.get('domain') == 'mainnet':
+            from . import formula_accounting as accounting
+            entry_risk = deepcopy(risk_snapshot) if risk_snapshot is not None else accounting.risk_for(state, msg)
+            risk_budget = accounting.validate_risk(entry_risk, msg['rule_id'])
         if approved:
             mark = _number(self._mark(dict(account=account,symbol=msg['symbol']),context,now)['mark_price'])
         else:
@@ -476,7 +485,9 @@ class IsolatedExecutionRuntime:
             # The producer's approved alert owns formula admission. Do not run
             # another touch/overlap search, or request a pre-touch MARK history.
             step=Decimal(1).scaleb(-decimals)
-            quantity=life.text((budget()/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
+            with localcontext() as ctx:
+                ctx.prec = 60
+                quantity=life.text((risk_budget/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
         elif msg['family']=='r2732':
             rs=self._r2732_initial({k:dict(account=a) for k,a in state['routes'].items()},not_before_ms=state['not_before_ms'])
             relevant={k:s for k,s in state['sources'].items() if s['source']['family']=='r2732'}
@@ -512,7 +523,9 @@ class IsolatedExecutionRuntime:
                 raise RuntimeError('APPROVED_FORMULA_ADAPTER_REQUIRED')
             step=Decimal(1).scaleb(-decimals)
             quantity=life.text((budget()/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
-        if _number(quantity)*abs(entry-stop)>budget():
+        if Decimal(quantity) <= 0:
+            raise RuntimeError('OUTSIDE_LAB_SIZE_BOUNDS')
+        if _number(quantity)*abs(entry-stop)>risk_budget:
             raise RuntimeError('CURRENT_RISK_BUDGET_EXCEEDED')
         account_check=context['entry_accounts'][cid]
         if (account_check.get('account')!=account or type(account_check.get('at_ms')) is not int
@@ -538,13 +551,15 @@ class IsolatedExecutionRuntime:
             trade['execution_audit'] = dict(approved_at=msg['approved_at'],
                 received_at=source['created_at'], entry_decision_at_ms=now,
                 prices=deepcopy(prepared['audit']))
+        if entry_risk is not None:
+            trade['entry_risk'] = entry_risk
         # Reuse the independent current-risk defense with the same frozen terms.
         bracket=[]
         for leg,price in (('ENTRY',prices['entry']),('STOP',prices['stop']),('TAKE_PROFIT',prices['take_profit'])):
             order=self._order(state,trade,leg,quantity,price,metadata,now)['action']['orders'][0]
             if leg=='ENTRY':order['t']={'limit':{'tif':'Gtc'}}
             bracket.append(order)
-        assert_new_entry_budget(dict(type='order',orders=bracket,grouping='normalTpsl'))
+        assert_new_entry_budget(dict(type='order',orders=bracket,grouping='normalTpsl'), formula_risk=entry_risk)
         state['trades'][cid]=trade
         return self._order(state,trade,'ENTRY',quantity,prices['entry'],metadata,now)
 

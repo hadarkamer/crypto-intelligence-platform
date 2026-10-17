@@ -84,7 +84,7 @@ def _retired_experimental(state, now):
         in state.get('blocked_lanes',{}).items() if reason not in COLD_HISTORY_RETRY_ERRORS})
     result = {}
     for cid, trade in state['trades'].items():
-        if cid not in state['sources'] or not _eligible(eligible_state, cid, now):
+        if cid not in state['sources'] or not _eligible(eligible_state, cid, now, require_settlement=False):
             continue
         if trade['phase']==external.MANUAL_CLOSED:
             result[cid]=dict(binding=None,snapshot=None,orders=[])
@@ -141,6 +141,12 @@ def _merge_bucket(target, cold):
 
 class LiveEvidenceProvider:
     domain='mainnet'
+
+    def collect_funding(self, task):
+        # Reuse the existing public /info transport and shared background
+        # budget. No credentials, signer, extra thread or polling loop.
+        reader = self._public_reader or sync.PublicReader(budget=self.budget, priority='background')
+        return reader.read('userFunding', task['account'], start=task['start'], end=task['end'])
 
     def __init__(self, env, *, legacy_store, experimental_store, price_evidence,
                  budget, clock=None, info_reader=None, public_reader=None,
@@ -1102,7 +1108,7 @@ class LiveEvidenceProvider:
                 raise ProviderError('ENTRY_ALREADY_HAS_OBSERVED_EXPOSURE')
             del replay['trades'][cid];del replay['requests'][request['request_id']]
             planner=object.__new__(TestnetExecutionRuntime)
-            expected=planner._admit(replay,cid,ctx,self.now())
+            expected=planner._admit(replay,cid,ctx,self.now(),risk_snapshot=trade.get('entry_risk'))
             if expected is None:
                 raise ProviderError('FINAL_SOURCE_ENTRY_ADMISSION_RETIRED')
             expected['observed_at_ms']=p['observed_at_ms']
@@ -1129,6 +1135,7 @@ class LiveEvidenceProvider:
         if p['action']['type']!='cancel':
             result['market']={k:v for k,v in ctx['marks'][lane].items() if k!='account'}
         if entry:
+            result['entry_risk']=deepcopy(trade.get('entry_risk'))
             result['entry_account']=deepcopy(ctx['entry_accounts'][cid])
             if not contract.is_approved(trade['source']):
                 result.update(source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])

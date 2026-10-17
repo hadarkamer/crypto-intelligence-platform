@@ -17,6 +17,7 @@ from .experimental_execution_runtime import (
 from .experimental_live_state import TestnetExecutionState
 from . import r2732_entry
 from . import experimental_live_release as releases
+from . import formula_accounting as accounting
 import approved_alert_contract as contract
 
 VERSION = 'experimental-mainnet-worker-v1'
@@ -25,6 +26,7 @@ MODE = 'explicit_approved_mainnet_worker_v1'
 # These are expected candidate refusals, not permission to swallow corrupt
 # state, missing fields, ownership conflicts or an arbitrary implementation bug.
 LOCAL_ENTRY_REFUSALS = frozenset((
+    'FORMULA_NET_SETTLEMENT_PENDING', 'FORMULA_CAPITAL_EXHAUSTED',
     'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS', 'ASSET_NOT_FOUND',
     'ASSET_PRECISION_OR_LISTING_INVALID', 'ASSET_UNAVAILABLE',
     'PRICES_COLLAPSED_AFTER_ROUNDING', 'PRICE_PRECISION_NO_ROUNDING',
@@ -150,7 +152,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
     _r2732_initial = staticmethod(r2732_entry.initial_testnet)
     _r2732_admission = staticmethod(r2732_entry.testnet_entry_admission)
 
-    def _admit(self, state, cid, context, now):
+    def _admit(self, state, cid, context, now, *, risk_snapshot=None):
         msg = state['sources'][cid]['source']
         # Provider replays the pure admission with an unconstructed planner;
         # the actual worker and final sender independently enforce release.
@@ -174,7 +176,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         retry = entry_retry_ready(candidate, cid, now)
         previous = candidate['trades'].pop(cid) if retry else None
         try:
-            proposal = super()._admit(candidate, cid, context, now)
+            proposal = super()._admit(candidate, cid, context, now, risk_snapshot=risk_snapshot)
         except ValueError as exc:
             reason = str(exc)
             if reason not in LOCAL_ENTRY_REFUSALS:
@@ -426,6 +428,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         safe = {**state, 'trades': {cid:t for cid,t in state['trades'].items()
             if _lane(t['account'], t['symbol']) not in blocked}}
         proposal = self._maintain_live(safe, scoped, now)
+        accounting.retain_fees(state, context)
+        accounting.settle(state, now)
         unavailable = {r['proposal']['account'] for r in state['requests'].values()
             if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
         emergency_accounts = {t['account'] for t in state['trades'].values()
@@ -609,6 +613,34 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             feed.acknowledge_fills(batch)
         return errors
 
+    def _accounting_maintenance(self, state):
+        """At most one background funding read after protection found no action.
+
+        No HTTP in a journal transaction. The existing state lock and trade
+        digest reject concurrent changes; a failure affects only this formula.
+        """
+        # This is the pure projection just committed by the cycle. Reuse it;
+        # record_funding checks the trade again under lock after the read.
+        if any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values()):
+            return
+        from .experimental_live_provider import _original_stop_needed
+        if any(_original_stop_needed(state, t) for t in state['trades'].values() if t['phase'] not in FINAL):
+            return
+        task = accounting.funding_task(state, self.venue.now())
+        if task is None:
+            return
+        try:
+            page = accounting.funding_page(task, self.venue.collect_funding(task))
+            error = None
+        except (ValueError, OSError) as exc:
+            page = None
+            error = str(exc) if isinstance(exc, accounting.AccountingError) else 'FORMULA_FUNDING_READ_PENDING'
+        now = self.venue.now()
+        def commit(current):
+            if accounting.record_funding(current, task, page, now, error):
+                accounting.settle(current, now)
+        self.store.mutate(commit)
+
     def _run_once(self, *, entries_enabled):
         owner=getattr(self,'startup_owner',None)
         if owner is not None:
@@ -657,6 +689,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             except Exception:
                 observation_verified = False
             if request is None:
+                if observation_verified:
+                    self._accounting_maintenance(prepared_state)
                 return dict(status='OBSERVED_NO_ACTION' if observation_verified else
                     'OBSERVED_SAFETY_CHECKPOINT_PENDING', **readiness())
 
@@ -724,6 +758,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 for r in state['requests'].values()),
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
             entry_decisions=deepcopy(state.get('entry_decisions', {})),
+            formula_accounting=deepcopy(state.get('formula_accounting', {})),
             cards=cards_from_state(state, domain='mainnet'),
             external_activity=deepcopy(state.get('external_activity',{})),
             blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **capabilities)

@@ -116,10 +116,12 @@ class PublicReader:
             life.ident(oid, r'[0-9]{1,20}')
             if not 0 < int(oid) < 2**64: raise SyncError('INVALID_ORDER_ID')
             body['oid'] = int(oid)
-        elif kind == 'userFillsByTime' and oid is None:
+        elif kind in ('userFillsByTime', 'userFunding') and oid is None:
             life.moment(start); life.moment(end)
             if not 0 <= end-start <= DAY_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
-            body.update(startTime=start, endTime=end, aggregateByTime=False)
+            body.update(startTime=start, endTime=end)
+            if kind == 'userFillsByTime':
+                body['aggregateByTime'] = False
         elif kind in ('clearinghouseState','frontendOpenOrders') and oid is None and start is None and end is None:
             pass
         else:

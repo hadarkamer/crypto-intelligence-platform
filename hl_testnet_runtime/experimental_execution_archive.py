@@ -78,13 +78,15 @@ def _lane(account, symbol):
     return life.digest([account, symbol])
 
 
-def _eligible(state, cid, now):
+def _eligible(state, cid, now, *, require_settlement=True):
     source = state['sources'][cid]
     # Unknown extension obligations are retained conservatively. An archive
     # may never infer that an outstanding notification or action was delivered.
     if any(state.get(k) for k in ('pending_actions', 'pending_notifications', 'notification_outbox', 'outbox')):
         return False
     trade = state['trades'].get(cid)
+    if require_settlement and trade and trade.get('entry_risk') and not trade.get('settlement'):
+        return False  # Keep exact economic evidence until the balance commits.
     requests = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
     if trade is None:
         if requests:

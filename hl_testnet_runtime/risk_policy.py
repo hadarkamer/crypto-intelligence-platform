@@ -1,9 +1,10 @@
 """Versioned planned price-distance budget. Never reads credentials or settings.
 
-The current $2 budget is before fees, funding and slippage; NOT a loss cap.
+The legacy $2 budget is before fees, funding and slippage; NOT a loss cap.
 Old $10/$20 profiles are retained only for exact historical action reconstruction.
 Existing positions and immutable order records must never be resized by a config
-change. Signing and transport independently reject NEW entries above $2.
+change. Approved formula entries can use a separately validated journal-bound
+5% risk snapshot; every other entry retains the legacy $2 ceiling.
 """
 from decimal import Decimal, InvalidOperation, localcontext
 
@@ -47,11 +48,12 @@ def _positive(value):
     return n
 
 
-def assert_new_entry_budget(action):
+def assert_new_entry_budget(action, *, formula_risk=None):
     """Defense at signing/transport. Reduce-only repair is not a new entry.
 
-    Historical profiles may be rebuilt and inspected, but may not authorize
-    another $10/$20 entry. Do not change order sizes, prices, IDs or exit types here.
+    Historical profiles cannot authorize another $10/$20 entry. A dynamic
+    snapshot must be bound to trusted durable context by the caller. Do not
+    change order sizes, prices, IDs or exit types here.
     """
     try:
         if not isinstance(action, dict) or action.get('type') != 'order':
@@ -86,7 +88,11 @@ def assert_new_entry_budget(action):
             raise RiskError('RISK_BRACKET_PRICE_ORDER_INVALID')
         with localcontext() as ctx:
             ctx.prec = 60
-            if size * abs(price - stop_price) > budget():
+            limit = budget()
+            if formula_risk is not None:
+                from .formula_accounting import validate_risk
+                limit = validate_risk(formula_risk)
+            if size * abs(price - stop_price) > limit:
                 raise RiskError('NEW_ENTRY_EXCEEDS_CURRENT_RISK_BUDGET')
     except RiskError:
         raise
