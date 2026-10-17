@@ -557,7 +557,7 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
             return result
         self.raw.read=current
 
-    def test_real_pg_manual_handoff_restart_flat_release_archive_and_new_same_coin_entry(self):
+    def test_real_pg_manual_handoff_preserves_unallocated_formula_capital_after_restart(self):
         first=pg_fixture.alert(cycle='pg-manual-first')
         cid=first['occurrence_id'];symbol=first['symbol']
         account=self.release['routes']['long_account']
@@ -598,12 +598,16 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
         self.assertEqual(closed['trades'][cid]['phase'],ext.MANUAL_CLOSED)
         self.assertEqual(len(self.oracle.requests),sent)
         self.assertIsNone(self.worker.report()['cards'][0]['summary']['net_pnl'])
-        self.assertEqual(self.compact()['archived'],1)
+        # Flatness releases market ownership, but cannot establish this new
+        # formula portfolio's realized net after unallocated manual fills.
+        # Retain its evidence and block only that formula's next sizing.
+        self.assertEqual(self.compact()['archived'],0)
         self.reconnect();self._manual_exchange_observation(account,symbol,manual_fills)
-        self.assertEqual(self.store.archive_record(cid)['trade']['phase'],ext.MANUAL_CLOSED)
+        self.assertIsNone(self.store.archive_record(cid))
+        self.assertEqual(self.store.load()['trades'][cid]['phase'],ext.MANUAL_CLOSED)
         released_at=closed['external_activity']['retired_markets'][ext.lane(account,symbol)]['confirmed_at_ms']
         # Rounding the current time down yields a closed-minute decision from
-        # BEFORE release. Archive/restart must not make that stale alert eligible.
+        # BEFORE release. Restart must not make that stale alert eligible.
         stale_at=self.oracle.t//60000*60000
         self.assertLessEqual(stale_at,released_at)
         stale=pg_fixture.alert(cycle='pg-manual-stale-before-release',approved_ms=stale_at)
@@ -621,10 +625,19 @@ class PostgresExternalActivityReviewTests(unittest.TestCase):
         self.assertGreater(next_approval,released_at)
         self.oracle.t=next_approval+1000
         second=pg_fixture.alert(cycle='pg-manual-successor',approved_ms=next_approval)
-        self.start(second)
+        self.worker.receive([second]);self.cycle(entries=True)
+        after=self.store.load()
+        self.assertNotIn(second['occurrence_id'],after['trades'])
+        self.assertEqual(after['entry_blocked'][second['occurrence_id']],
+            'FORMULA_NET_SETTLEMENT_PENDING')
+        self.assertEqual(after['formula_accounting']['portfolios'][first['rule_id']]['balance_usd'],'40')
+        self.assertNotIn('settlement',after['trades'][cid])
+        # Other formulas on the same account retain their existing admission.
+        other=pg_fixture.alert(symbol='ETH',cycle='pg-other-formula',approved_ms=next_approval)
+        self.start(other)
         self.cycle()
         self.assertEqual(len(self.replayed_entries),2)
-        self.assertIn(second['occurrence_id'],self.store.load()['trades'])
+        self.assertIn(other['occurrence_id'],self.store.load()['trades'])
         self.assertFalse(self.store.load().get('blocked_lanes'))
 
 
