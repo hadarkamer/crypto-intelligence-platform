@@ -420,6 +420,36 @@ class ProviderTests(unittest.TestCase):
             account=request['proposal']['account'],symbol=request['proposal']['symbol'],
             at_ms=self.exchange.t,lookup_status='unknownOid',reply_digest=life.digest(request['reply']))])
 
+    def test_released_filled_take_still_requires_complete_actual_fills(self):
+        self.active(steps=4);oid=self.exchange.oid('TAKE_PROFIT')
+        view=self.exchange.orders[oid]['view'];original=self.raw.status
+        def released(value):
+            raw=original(value)
+            if str(value)==oid:raw['order']['order'].update(isTrigger=False,triggerPx='0.0',sz='0.0')
+            return raw
+        with patch.object(self.raw,'status',side_effect=released):
+            for partial in (False,True):
+                with self.subTest(partial=partial):
+                    if partial:self.exchange.fill(oid,str(Decimal(view['wire_order']['s'])/2))
+                    view.update(status='FILLED',at_ms=self.exchange.t)
+                    value=self.provider.collect(self.state)
+                    self.assertIn('FILLED_ORDER_HISTORY_INCOMPLETE',value['blocked_lanes'].values())
+                    self.assertFalse(value['snapshots'])
+
+    def test_rejected_entry_record_with_any_fill_remains_blocked(self):
+        self.active();request=next(iter(self.state['requests'].values()))
+        request['reply']=dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
+        oid=self.exchange.oid('ENTRY');view=self.exchange.orders[oid]['view']
+        self.assertTrue(view['fills']);view['status']='REJECTED'
+        original=self.raw.status
+        def rejected(value):
+            raw=original(value)
+            if str(value)==oid:raw['order']['status']='perpMarginRejected'
+            return raw
+        with patch.object(self.raw,'status',side_effect=rejected):value=self.provider.collect(self.state)
+        self.assertIn('REJECTED_ORDER_HAS_FILLS',value['blocked_lanes'].values())
+        self.assertFalse(value['snapshots']);self.assertFalse(value['rejected_requests'])
+
     def test_unknown_oid_without_definitive_rejection_keeps_outcome_fenced(self):
         self.active();self.exchange.orders.clear()
         value=self.provider.collect(self.state)
