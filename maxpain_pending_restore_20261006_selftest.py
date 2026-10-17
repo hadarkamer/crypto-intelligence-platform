@@ -202,7 +202,10 @@ class IntegrationSchedulingTests(unittest.IsolatedAsyncioTestCase):
         async def monitor(scope,state):trace.append('monitor');return state
         async def deliver(scope,chat):trace.append('deliver');return False
         w.initialize=init;w.monitor=monitor;w.deliver=deliver
-        with patch.object(r,'schedule',side_effect=lambda w,scope:trace.append('schedule')):
+        # This historical restore fixture deliberately exercises an active
+        # source; production retirement is covered by its dedicated tests.
+        with patch.object(worker_module.policy,'RETIRED_EXPERIMENTAL_RULES',frozenset()), \
+                patch.object(r,'schedule',side_effect=lambda w,scope:trace.append('schedule')):
             await w.tick()
         self.assertEqual(trace,['initialize','monitor','deliver','schedule'])
 
