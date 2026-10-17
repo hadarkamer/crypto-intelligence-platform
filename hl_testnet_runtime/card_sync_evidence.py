@@ -118,7 +118,8 @@ class PublicReader:
             body['oid'] = int(oid)
         elif kind in ('userFillsByTime', 'userFunding') and oid is None:
             life.moment(start); life.moment(end)
-            if not 0 <= end-start <= DAY_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+            if end < start or kind == 'userFunding' and end-start > DAY_MS:
+                raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
             body.update(startTime=start, endTime=end)
             if kind == 'userFillsByTime':
                 body['aggregateByTime'] = False
@@ -410,8 +411,7 @@ def triggered_take_profit(binding, leg, oid, order, inventory, fills, original,
 
 
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
-            reuse_verified_terminals=False, inventory_guard=None, read_fills=True,
-            staged_fills=None):
+            reuse_verified_terminals=False, inventory_guard=None, read_fills=True):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
@@ -423,8 +423,7 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         responses, raw_fills, raw_inventory, position = (
             read_inputs(account, current_oids, start, end) if callable(read_inputs)
             else observation_inputs(reader, account, current_oids, start, end))
-        fills = merge_fills(previous['fills'] if staged_fills is None else staged_fills,
-                            raw_fills,account,symbol,start,end)
+        fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
     else:
         responses = {oid: reader.read('orderStatus', account, oid=oid) for oid in current_oids}
         raw_inventory = reader.read('frontendOpenOrders', account)
@@ -588,12 +587,9 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
     def fills(start, stop):
         return dict(type='userFillsByTime',user=account,startTime=start,endTime=stop,
                     aggregateByTime=False)
-    while end-cursor >= DAY_MS-OVERLAP_MS:
-        if len(bodies) >= 200:
-            raise SyncError('READ_BUDGET_EXCEEDED')
-        stop=cursor+DAY_MS-2*OVERLAP_MS
-        bodies.extend([fills(max(1,cursor-OVERLAP_MS),stop)]*2)
-        cursor=stop
+    # userFillsByTime is bounded by returned rows, not calendar days. The
+    # existing history() pagination funds both children only on a full page.
+    # Empty days must not reserve another pair of worst-case 2000-row pages.
     start=max(1,cursor-OVERLAP_MS)
     one_pass=([fills(start,end)] if read_fills else [])+[dict(type='frontendOpenOrders',user=account),
               dict(type='clearinghouseState',user=account)]
@@ -628,7 +624,7 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     if end<cursor: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
     catchup=end-cursor>MAX_CATCHUP_MS
     # Time alone does not make the venue's latest-10,000-fill history expire.
-    # Reuse the existing retention brackets and bounded window collector for
+    # Reuse the existing retention brackets and bounded page collector for
     # a long gap; keep the original checkpoint until the whole proof succeeds.
     anchor=None
     if catchup:
@@ -801,24 +797,6 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     account,symbol=life.validate_snapshot(previous)
     pass_readers=([observation_cache.pass_reader(i) for i in (0,1)]
                   if observation_cache is not None else [reader,reader])
-    staged_fills=previous['fills']
-    # Reconstruct a short missed interval before taking the current order and
-    # position snapshot. Each bounded window is observed twice; nothing is
-    # persisted until the final full lifecycle review succeeds.
-    while end-cursor >= DAY_MS-OVERLAP_MS:
-        if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
-        stop = cursor+DAY_MS-2*OVERLAP_MS
-        start = max(1,cursor-OVERLAP_MS)
-        first_fills = merge_fills(staged_fills,history(pass_readers[0],account,start,stop),
-                                  account,symbol,start,stop)
-        second_fills = merge_fills(staged_fills,history(pass_readers[1],account,start,stop),
-                                   account,symbol,start,stop)
-        if first_fills != second_fills: raise SyncError('OBSERVATION_CHANGED_RETRY')
-        # Keep the durable snapshot and its terminal certificates immutable.
-        # New fills may be newer than that checkpoint; only the final fresh
-        # order/position proof can commit them with the actual observation time.
-        staged_fills = first_fills
-        cursor = stop
     start = max(1,cursor-OVERLAP_MS)
     # A full audit compares two independent passes. The fast stream uses one
     # cross-checked inventory/status/fill/position pass for immediate protection;
@@ -826,10 +804,9 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     # Each pass uses only certificates that existed before this collection.
     guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
     first = observe(bindings,previous,pass_readers[0],start,end,plain_take_profit_oids=plain,
-                    reuse_verified_terminals=reuse_verified_terminals,read_fills=read_fills,
-                    staged_fills=staged_fills,**guard)
+                    reuse_verified_terminals=reuse_verified_terminals,read_fills=read_fills,**guard)
     second = (observe(bindings,previous,pass_readers[1],start,end,plain_take_profit_oids=plain,
-                     reuse_verified_terminals=reuse_verified_terminals,staged_fills=staged_fills,**guard)
+                     reuse_verified_terminals=reuse_verified_terminals,**guard)
               if verification_passes == 2 else first)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
