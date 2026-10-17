@@ -246,18 +246,26 @@ class LiveHistoryQuotaPostgresTests(unittest.TestCase):
         self.assertEqual(phases,{'XRP':'OPEN','HYPE':'OPEN','SOL':'CANCELED_WITHOUT_FILL'})
 
     def test_settlement_is_once_after_recovery_and_restart(self):
+        def settlements():
+            trades=list(self.h.store.load()['trades'].values())
+            trades.extend(row['trade'] for row in self.h.store.history_page()['records']
+                          if row.get('trade'))
+            settled=[t for t in trades if t.get('entry_risk')]
+            self.assertEqual(len(settled),2)
+            self.assertEqual({t['symbol'] for t in settled},{'HYPE','SOL'})
+            self.assertTrue(all(t.get('settlement') for t in settled))
+            return {t['symbol']:deepcopy(t['settlement']) for t in settled}
         self.recover_loaded(120);self.expire_tickets()
         self.h.oracle.t+=60001  # Existing funding retry follows a denied background page.
         with public_transport(self.h):self.h.service.tick()
         before=deepcopy(self.h.store.load().get('formula_accounting'))
         self.assertIsNotNone(before)
-        settled=[t for t in self.h.store.load()['trades'].values() if t.get('entry_risk')]
-        self.assertEqual(len(settled),2)
-        self.assertTrue(all(t.get('settlement') for t in settled))
+        before_settlements=settlements()
         self.reconnect()
         with public_transport(self.h):
             for _ in range(3):self.h.service.tick()
         self.assertEqual(self.h.store.load().get('formula_accounting'),before)
+        self.assertEqual(settlements(),before_settlements)
 
 
 class LiveHistoryQuotaMemoryTests(LiveHistoryQuotaPostgresTests):
