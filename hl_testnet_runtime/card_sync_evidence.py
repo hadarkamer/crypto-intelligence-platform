@@ -410,7 +410,8 @@ def triggered_take_profit(binding, leg, oid, order, inventory, fills, original,
 
 
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
-            reuse_verified_terminals=False, inventory_guard=None, read_fills=True):
+            reuse_verified_terminals=False, inventory_guard=None, read_fills=True,
+            staged_fills=None):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
@@ -422,7 +423,8 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         responses, raw_fills, raw_inventory, position = (
             read_inputs(account, current_oids, start, end) if callable(read_inputs)
             else observation_inputs(reader, account, current_oids, start, end))
-        fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
+        fills = merge_fills(previous['fills'] if staged_fills is None else staged_fills,
+                            raw_fills,account,symbol,start,end)
     else:
         responses = {oid: reader.read('orderStatus', account, oid=oid) for oid in current_oids}
         raw_inventory = reader.read('frontendOpenOrders', account)
@@ -587,6 +589,8 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
         return dict(type='userFillsByTime',user=account,startTime=start,endTime=stop,
                     aggregateByTime=False)
     while end-cursor >= DAY_MS-OVERLAP_MS:
+        if len(bodies) >= 200:
+            raise SyncError('READ_BUDGET_EXCEEDED')
         stop=cursor+DAY_MS-2*OVERLAP_MS
         bodies.extend([fills(max(1,cursor-OVERLAP_MS),stop)]*2)
         cursor=stop
@@ -595,6 +599,8 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
               dict(type='clearinghouseState',user=account)]
     one_pass.extend(dict(type='orderStatus',user=account,oid=int(oid)) for oid in oids)
     bodies.extend(one_pass*verification_passes)
+    if len(bodies)>200:
+        raise SyncError('READ_BUDGET_EXCEEDED')
     return bodies
 
 
@@ -619,7 +625,18 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     if cursor < previous['at_ms']: raise SyncError('CHECKPOINT_BEHIND_EVIDENCE')
     end,started = clock() if observation_end_ms is None else life.moment(observation_end_ms),elapsed()
     if end > clock(): raise SyncError('OBSERVATION_TIME_IN_FUTURE')
-    if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+    if end<cursor: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+    catchup=end-cursor>MAX_CATCHUP_MS
+    # Time alone does not make the venue's latest-10,000-fill history expire.
+    # Reuse the existing retention brackets and bounded window collector for
+    # a long gap; keep the original checkpoint until the whole proof succeeds.
+    anchor=None
+    if catchup:
+        owned={oid for binding in bindings for leg in life.order_legs(binding)
+               for oid in binding['orders'][leg]}
+        anchors=[f for f in previous['fills'] if f['oid'] in owned
+                 and f['at_ms']<=previous['at_ms'] and f['fill_id'].startswith('hl:')]
+        anchor=max(anchors,key=lambda f:(f['at_ms'],f['fill_id'])) if anchors else None
     if observation_cache is not None:
         if type(observation_cache) is not ObservationReadCache or observation_cache.reader is not reader:
             raise SyncError('EXACT_OBSERVATION_CACHE_OWNER_REQUIRED')
@@ -671,11 +688,24 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
         read_fills=read_fills)
     if observation_cache is not None:
         bodies=observation_cache.missing_plan(bodies)
-    context=(reader.observation_batch(bodies) if callable(plan) and bodies else nullcontext())
+    context=(retained_observation(reader,account,anchor,bodies) if anchor is not None else
+             reader.observation_batch(bodies) if callable(plan) and bodies else nullcontext())
     with context:
-        return _collect_funded(bindings,previous,reader,history_cursor,end,started,clock,elapsed,
+        result=_collect_funded(bindings,previous,reader,history_cursor,end,started,clock,elapsed,
             plain=plain,reuse_verified_terminals=reuse_verified_terminals,
             verification_passes=verification_passes,observation_cache=observation_cache,read_fills=read_fills)
+    if catchup and anchor is None:
+        # A never-filled rejected request has no fill to use as an anchor.
+        # Only exact public REJECTED statuses prove zero execution; an empty
+        # history, canceled order or flat account alone never supplies it.
+        snap=result['snapshot']
+        if (not owned or snap['fills'] or snap['open_orders']
+                or life.number(snap['position_quantity'],signed=True)!=0
+                or any(o['state']!='REJECTED' for o in snap['terminal_orders'])
+                or {o['oid'] for o in snap['terminal_orders']}!=owned):
+            raise SyncError('HISTORY_RETENTION_DURABLE_ANCHOR_REQUIRED')
+    if anchor is not None and elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
+    return result
 
 
 def retained_anchor(reader, account, fill):
@@ -724,7 +754,7 @@ def retained_observation(reader, account, anchor, bodies):
                                                 'ceiling','retry_after_ms')})
     plan=getattr(type(reader),'observation_batch',None)
     def phase(reads):
-        return reader.observation_batch(reads) if callable(plan) else nullcontext()
+        return reader.observation_batch(reads) if callable(plan) and reads else nullcontext()
     with phase([body]):
         retained_anchor(reader,account,anchor)
     with phase(bodies):
@@ -771,18 +801,23 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     account,symbol=life.validate_snapshot(previous)
     pass_readers=([observation_cache.pass_reader(i) for i in (0,1)]
                   if observation_cache is not None else [reader,reader])
+    staged_fills=previous['fills']
     # Reconstruct a short missed interval before taking the current order and
     # position snapshot. Each bounded window is observed twice; nothing is
     # persisted until the final full lifecycle review succeeds.
     while end-cursor >= DAY_MS-OVERLAP_MS:
+        if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
         stop = cursor+DAY_MS-2*OVERLAP_MS
         start = max(1,cursor-OVERLAP_MS)
-        first_fills = merge_fills(previous['fills'],history(pass_readers[0],account,start,stop),
+        first_fills = merge_fills(staged_fills,history(pass_readers[0],account,start,stop),
                                   account,symbol,start,stop)
-        second_fills = merge_fills(previous['fills'],history(pass_readers[1],account,start,stop),
+        second_fills = merge_fills(staged_fills,history(pass_readers[1],account,start,stop),
                                    account,symbol,start,stop)
         if first_fills != second_fills: raise SyncError('OBSERVATION_CHANGED_RETRY')
-        previous['fills'] = first_fills
+        # Keep the durable snapshot and its terminal certificates immutable.
+        # New fills may be newer than that checkpoint; only the final fresh
+        # order/position proof can commit them with the actual observation time.
+        staged_fills = first_fills
         cursor = stop
     start = max(1,cursor-OVERLAP_MS)
     # A full audit compares two independent passes. The fast stream uses one
@@ -791,9 +826,10 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     # Each pass uses only certificates that existed before this collection.
     guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
     first = observe(bindings,previous,pass_readers[0],start,end,plain_take_profit_oids=plain,
-                    reuse_verified_terminals=reuse_verified_terminals,read_fills=read_fills,**guard)
+                    reuse_verified_terminals=reuse_verified_terminals,read_fills=read_fills,
+                    staged_fills=staged_fills,**guard)
     second = (observe(bindings,previous,pass_readers[1],start,end,plain_take_profit_oids=plain,
-                     reuse_verified_terminals=reuse_verified_terminals,**guard)
+                     reuse_verified_terminals=reuse_verified_terminals,staged_fills=staged_fills,**guard)
               if verification_passes == 2 else first)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')

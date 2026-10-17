@@ -148,7 +148,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertEqual(core._remaining(current['trades'][value['occurrence_id']]), Decimal(0))
         return value, current
 
-    def released_filled_take_closes_durably(self,side):
+    def released_filled_take_closes_durably(self,side,*,gap_ms=0):
         value=alert(side=side,cycle='pg-released-take-'+side)
         entry=self.start(value)
         quantity=self.oracle.orders[entry]['view']['wire_order']['s']
@@ -157,6 +157,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         take=self.oracle.oid('TAKE_PROFIT');stop=self.oracle.oid('STOP')
         self.oracle.fill(take,quantity)
         self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
+        self.oracle.t+=gap_ms
         original=self.raw.status
         def terminal_status(oid):
             raw=original(oid)
@@ -181,7 +182,13 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
     def test_released_filled_short_take_closes_durably_without_sends(self):
         self.released_filled_take_closes_durably('SHORT')
 
-    def test_rejected_entry_record_is_durable_and_never_retried_after_restart(self):
+    def test_fifty_hour_long_take_closes_durably_without_sends(self):
+        self.released_filled_take_closes_durably('LONG',gap_ms=50*3600000)
+
+    def test_fifty_hour_short_take_closes_durably_without_sends(self):
+        self.released_filled_take_closes_durably('SHORT',gap_ms=50*3600000)
+
+    def rejected_entry_record_is_durable(self,*,gap_ms=0):
         value=alert(side='SHORT',cycle='pg-rejected-order')
         original=self.port.send
         def reject(request,*,admission=None):
@@ -189,6 +196,7 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
             self.oracle.orders[result['oid']]['view']['status']='REJECTED'
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
         with patch.object(self.port,'send',side_effect=reject):oid=self.start(value)
+        self.oracle.t+=gap_ms
         original_status=self.raw.status
         def rejected_status(order_id):
             raw=original_status(order_id)
@@ -206,8 +214,14 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.reconnect();self.worker.receive([value]);self.cycle(entries=True)
         self.assertEqual(self.store.archive_record(cid)['trade'],trade)
         self.assertEqual(len(self.oracle.requests),1)
-        self.start(alert(side='SHORT',cycle='pg-after-rejected-order'))
+        self.start(alert(side='SHORT',cycle='pg-after-rejected-order',approved_ms=self.oracle.now()))
         self.assertEqual(len(self.oracle.requests),2)
+
+    def test_rejected_entry_record_is_durable_and_never_retried_after_restart(self):
+        self.rejected_entry_record_is_durable()
+
+    def test_fifty_hour_rejected_entry_is_durable_and_never_retried_after_restart(self):
+        self.rejected_entry_record_is_durable(gap_ms=50*3600000)
 
     def compact(self, store=None):
         return (store or self.store).compact_history(now_ms=self.oracle.now(), force=True)

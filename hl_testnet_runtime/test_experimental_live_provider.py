@@ -43,6 +43,7 @@ class RawTestnetFixture:
     only raw official-shape responses and their actual shared budget identity.
     """
     parallel=False
+    priority='protection'
     def __init__(self,exchange,state_loader,budget):
         self.exchange=exchange; self.state_loader=state_loader; self.budget=budget
         self.extra_orders=[];self.extra_positions=[];self.calls=[];self.mutate=None
