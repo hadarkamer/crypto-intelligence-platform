@@ -142,6 +142,13 @@ class RetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.values, {})
         self.assertEqual(self.fetches, [])
         self.assertEqual(w.status()['state'], 'RETIRED')
+        scope = self.install(w, pending())  # A retiring old process appears late.
+        self.clock += M
+        await w.tick()
+        saved = store.snapshot(scope)
+        self.assertFalse(saved['active'])
+        self.assertEqual(saved['history'][-1]['status'], 'CANCELLED_FORMULA_RETIRED')
+        self.assertEqual(self.fetches, [])
 
     async def test_late_old_process_pending_cancels_after_drain_and_restart(self):
         w = self.make_worker()
