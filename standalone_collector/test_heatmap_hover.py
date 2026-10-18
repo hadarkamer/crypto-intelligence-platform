@@ -130,6 +130,20 @@ class HoverTests(unittest.TestCase):
                 close_heatmap_settings(page)  # Already closed: no further action.
             finally:browser.close()
 
+    def test_settings_action_timeout_requires_panel_to_be_closed(self):
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        for still_visible in (False,True):
+            page=Mock();panel=page.get_by_role.return_value
+            panel.count.return_value=1
+            merged=Mock();merged.count.return_value=0
+            close=Mock();close.click.side_effect=BrowserTimeout('synthetic delayed action')
+            panel.get_by_role.side_effect=lambda role,**kwargs: merged if role=='spinbutton' else close
+            panel.is_visible.return_value=still_visible
+            if still_visible:
+                with self.assertRaises(BrowserTimeout):close_heatmap_settings(page)
+            else:close_heatmap_settings(page)
+            close.click.assert_called_once()
+
     def test_plot_finder_excludes_time_navigator_in_same_canvas(self):
         # Live Model 1/12H observation: the plot ended at y=674, but the
         # previous finder included the blue navigator down to y=741.
