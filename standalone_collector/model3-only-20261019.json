@@ -1,0 +1,160 @@
+{
+  "result": {
+    "model": 3,
+    "timeframe": "48H",
+    "status": "failed",
+    "ai_calls": 0,
+    "database_writes": 0,
+    "code": "source_capture_failed",
+    "exception_kind": "other",
+    "capture_phase": "screenshot",
+    "validation_reason": "hover_cookie_overlay",
+    "source_capture_state": {
+      "observation_status": "observed",
+      "source_identity": "canonical",
+      "reason": "state-observed",
+      "label": "48 hour",
+      "heading_visible": true,
+      "chart_present": true,
+      "login_gate_visible": false,
+      "dialog_visible": false,
+      "loading_visible": false,
+      "challenge_visible": false,
+      "trigger_present": true,
+      "trigger_visible": true,
+      "trigger_disabled": false,
+      "trigger_hit_target": true,
+      "model_selected": true,
+      "symbol_selected": true
+    },
+    "click_failure": "unclassified",
+    "source_network": {
+      "http_errors": [
+        {
+          "host_group": "other",
+          "count": 2,
+          "status": 429
+        }
+      ],
+      "network_errors": [],
+      "page_error_count": 0
+    },
+    "elapsed_seconds": 56.76,
+    "kind": "PAID_RUNTIME_RESULT",
+    "exit_code": 0,
+    "guard_reason": null,
+    "total_seconds": 56.995,
+    "peak_mib": {
+      "anon": 478.18,
+      "file": 503.22,
+      "kernel": 33.22,
+      "sock": 0.3,
+      "current": 1003.42
+    },
+    "cpu_delta": {
+      "usage_usec": 56420029,
+      "user_usec": 49327601,
+      "system_usec": 7092428,
+      "nice_usec": 0,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 570,
+      "nr_throttled": 558,
+      "throttled_usec": 189840852,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory_events_delta": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "data_writes": 0
+  },
+  "diagnostics": [
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "count",
+      "status": "completed",
+      "value": 1,
+      "seconds": 0.502
+    },
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "is_visible",
+      "status": "completed",
+      "value": true,
+      "seconds": 0.7071
+    },
+    {
+      "phase": "settings_close",
+      "role": "spinbutton",
+      "operation": "count",
+      "status": "completed",
+      "value": 1,
+      "seconds": 0.0059
+    },
+    {
+      "phase": "settings_close",
+      "role": "spinbutton",
+      "operation": "input_value",
+      "status": "completed",
+      "is_unmerged": true,
+      "seconds": 0.6993
+    },
+    {
+      "phase": "settings_close",
+      "role": "button",
+      "operation": "click",
+      "status": "failed",
+      "exception_class": "TimeoutError",
+      "click_failure": "action_timeout",
+      "call_log_flags": {
+        "click_action_started": true,
+        "click_action_done": false,
+        "waiting_navigation": false,
+        "waiting_visible": true,
+        "waiting_locator": false
+      },
+      "seconds": 3.0075
+    },
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "is_visible",
+      "status": "completed",
+      "value": false,
+      "seconds": 1.3782
+    },
+    {
+      "phase": "settings_close",
+      "operation": "finished"
+    }
+  ],
+  "source_commit": "b62bce2ed6aa32282efcd9084cee1c7685897ab1",
+  "test_commit": "29e8744e18daef6e4e3cd3d45d844f65e5ea2b3e",
+  "date_israel": "2026-10-19",
+  "source_cases": 1,
+  "models_started": [
+    3
+  ],
+  "timeframes_started": [
+    "48H"
+  ],
+  "deployments": 0,
+  "production_data_writes": 0,
+  "postcheck": {
+    "remaining_processes": [],
+    "worker_lock_available": true,
+    "queued_or_running_jobs": 0,
+    "health_ok": true,
+    "store_ready": true,
+    "memory_current_mib": 367.49,
+    "profiles": []
+  }
+}
