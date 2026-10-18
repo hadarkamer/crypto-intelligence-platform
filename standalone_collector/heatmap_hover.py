@@ -193,6 +193,26 @@ def validate_rows(rows, *, complete=True):
     return step
 
 
+
+def close_heatmap_settings(page):
+    """Close only the observed Model 3 settings drawer before image/geometry.
+
+    Its normal Close button preserves settings while restoring the plot width.
+    Account, consent and other dialogs are outside this function's scope.
+    """
+    panel = page.get_by_role('dialog', name='Heatmap settings', exact=True)
+    count = panel.count()
+    if not count:
+        return
+    if count != 1:
+        raise HoverError('hover_geometry_invalid')
+    merged = panel.get_by_role('spinbutton', name='Merge Y ticks', exact=True)
+    if merged.count() and merged.input_value() != '1':
+        raise HoverError('hover_rows_merged')
+    panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=1500)
+    panel.wait_for(state='hidden', timeout=1500)
+
+
 def capture_column(page, image_path, geometry, *, model, timeframe):
     started = time.monotonic()
     bounds = plot_bounds(image_path, geometry)
@@ -216,17 +236,15 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     read_count = 0
     def wait_for_tooltip(expression, *, arg=None, timeout_ms):
         # Model 3 can settle its DOM without satisfying a requestAnimationFrame
-        # waiter before its deadline. Observe the actual state first and poll on
-        # a timer, then check once at the deadline before rejecting the map.
+        # waiter before its deadline. Poll on a timer, then check the actual DOM
+        # once at the deadline before rejecting the map. Do not add a redundant
+        # evaluate before every successful wait: that delays every row.
         # The SAME predicate is used throughout: a visible old price never
         # becomes an accepted new sample just because a wait timed out.
         from playwright.sync_api import TimeoutError as BrowserTimeout
         remaining = MAX_SECONDS - (time.monotonic()-started)
         if remaining <= 0:
             raise HoverError('hover_deadline')
-        result = page.evaluate(expression, arg)
-        if result:
-            return result
         try:
             handle = page.wait_for_function(expression, arg=arg,
                 timeout=max(1, min(timeout_ms, remaining*1000)), polling=25)

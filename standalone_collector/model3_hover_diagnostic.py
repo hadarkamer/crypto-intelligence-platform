@@ -168,8 +168,8 @@ def main():
         return 0
     args.output.mkdir(parents=True, exist_ok=False)
     reports = []
-    # This follow-up diagnoses only the remaining 48H case; no repeat of 12H/24H.
-    for tf in ('48H',):
+    # Final acceptance of the corrected reader, one pass per Model 3 horizon.
+    for tf in ('12H', '24H', '48H'):
         dest = args.output / tf
         env = {**os.environ, 'COLLECTION_HEATMAP_MODEL': '3',
                'OPENAI_API_KEY': '', 'DATABASE_URL': '', 'COLLECTION_BRIDGE_ENABLED': '0'}
