@@ -216,14 +216,24 @@ class HoverTests(unittest.TestCase):
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
-                for stuck in (False,True):
-                    page.set_content(html.replace('STUCK',str(stuck).lower()))
+                for mode in ('normal','stuck','no-animation-frame','changed-time'):
+                    fixture=html.replace('STUCK',str(mode=='stuck').lower())
+                    if mode=='no-animation-frame':
+                        # DOM updates continue while animation-frame callbacks
+                        # never run. Timer polling must still read every row.
+                        fixture=fixture.replace('<script>', '<script>window.requestAnimationFrame=()=>0;')
+                        fixture=fixture.replace("t.style.display='none';};", "setTimeout(()=>t.style.display='none',80);};")
+                    if mode=='changed-time':
+                        fixture=fixture.replace("t.innerText='"+stamp+" Price '",
+                            "t.innerText=(row===14?'2020-01-01 00:00':'"+stamp+"')+' Price '")
+                    page.set_content(fixture)
                     path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
-                    if stuck:
-                        with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
+                    if mode in ('stuck','changed-time'):
+                        reason='hover_update_timeout' if mode=='stuck' else 'hover_snapshot_changed'
+                        with self.assertRaisesRegex(HoverError,reason):
                             capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
                     else:
-                        snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
+                        snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3 if mode=='no-animation-frame' else 2,timeframe='24h')
                         self.assertEqual(len(snapshot['rows']),30)
                         self.assertEqual(snapshot['total_value'],30000000)
             finally:browser.close()

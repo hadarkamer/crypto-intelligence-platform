@@ -51,8 +51,9 @@ def install_observer():
                 # Read only our Python reader's numeric locals, never browser
                 # internals, credentials or arbitrary page content.
                 frame = inspect.currentframe().f_back
-                local = frame.f_locals
-                parent = frame.f_back
+                reader = frame.f_back if frame.f_code.co_name == 'wait_for_tooltip' else frame
+                local = reader.f_locals
+                parent = reader.f_back
                 for _ in range(4):
                     if parent is None or parent.f_code.co_name == 'capture_column':
                         break
@@ -64,7 +65,7 @@ def install_observer():
                     'expected_price' if kwargs.get('arg') is not None else 'show',
                     timeout_ms=kwargs.get('timeout'), bounds=outer.get('bounds'),
                     rows_collected=len(outer.get('rows', [])))
-                del frame, parent, local, outer
+                del frame, reader, parent, local, outer
                 try:
                     event['tooltip'] = tooltip(self.page)
                 except Exception:
@@ -74,8 +75,14 @@ def install_observer():
 
     def observed_capture(page, image, geometry, **kwargs):
         probe = ObservedPage(page)
+        initial = page.evaluate(STATE_SCRIPT, 3)
+        emit('before_reader', {'timeframe': kwargs['timeframe'], 'state': initial})
         try:
-            return original(probe, image, geometry, **kwargs)
+            result = original(probe, image, geometry, **kwargs)
+            emit('reader_completed', {'timeframe': kwargs['timeframe'],
+                'recovered_waits': len(probe.events), 'rows': len(result['rows']),
+                'state': page.evaluate(STATE_SCRIPT, 3)})
+            return result
         except hover.HoverError as exc:
             if exc.reason != 'hover_update_timeout' or not probe.events:
                 raise
@@ -93,6 +100,11 @@ def install_observer():
                 return {hit:hit?{tag:hit.tagName,role:hit.getAttribute('role'),
                     class:String(hit.className||'').slice(0,100)}:null,
                     dialogs:dialogs.slice(0,3).map(e=>{const t=e.innerText||'';return {
+                        role:e.getAttribute('role'),class:String(e.className||'').slice(0,120),
+                        label:(e.getAttribute('aria-label')||'').slice(0,120),
+                        headings:[...e.querySelectorAll('h1,h2,h3,[role=heading]')].slice(0,3).map(n=>n.innerText.slice(0,120)),
+                        controls:[...e.querySelectorAll('button,[role=button]')].slice(0,5).map(n=>(n.getAttribute('aria-label')||n.innerText||'').slice(0,80)),
+                        rect:(()=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};})(),
                         cookie:/cookies?|consent/i.test(t),login:/log\s*in|sign\s*in/i.test(t),
                         subscription:/subscribe|subscription|upgrade|trial/i.test(t),
                         security:/verify.*human|security verification/i.test(t)};})};

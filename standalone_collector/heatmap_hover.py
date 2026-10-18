@@ -214,24 +214,47 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     scroll_y = page.evaluate('() => window.scrollY')
     x = bounds['right']-.25
     read_count = 0
+    def wait_for_tooltip(expression, *, arg=None, timeout_ms):
+        # Model 3 can settle its DOM without satisfying a requestAnimationFrame
+        # waiter before its deadline. Observe the actual state first and poll on
+        # a timer, then check once at the deadline before rejecting the map.
+        # The SAME predicate is used throughout: a visible old price never
+        # becomes an accepted new sample just because a wait timed out.
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        remaining = MAX_SECONDS - (time.monotonic()-started)
+        if remaining <= 0:
+            raise HoverError('hover_deadline')
+        result = page.evaluate(expression, arg)
+        if result:
+            return result
+        try:
+            handle = page.wait_for_function(expression, arg=arg,
+                timeout=max(1, min(timeout_ms, remaining*1000)), polling=25)
+            try:
+                return handle.json_value()
+            finally:
+                handle.dispose()
+        except BrowserTimeout:
+            if time.monotonic()-started > MAX_SECONDS:
+                raise HoverError('hover_deadline') from None
+            result = page.evaluate(expression, arg)
+            if result:
+                return result
+            raise HoverError('hover_update_timeout') from None
+
     def read(y, expected=None):
         nonlocal read_count
         if time.monotonic()-started > MAX_SECONDS:
             raise HoverError('hover_deadline')
-        from playwright.sync_api import TimeoutError as BrowserTimeout
-        try:
-            if expected is None:
-                # Only calibration clears the tooltip. Row centres below have an
-                # expected price, so a stale previous tooltip cannot pass.
-                page.mouse.move(0, 0)
-                page.wait_for_function('() => ('+READ_TOOLTIP+')() === null', timeout=450)
-            page.mouse.move(x, y-scroll_y)
-            handle = page.wait_for_function(
-                READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
-                arg=expected, timeout=700, polling='raf')
-            text = handle.json_value(); handle.dispose()
-        except BrowserTimeout:
-            raise HoverError('hover_update_timeout') from None
+        if expected is None:
+            # Calibration must observe disappearance before another pointer move.
+            # Row centres have an expected price, so they need no leave/re-enter.
+            page.mouse.move(0, 0)
+            wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+        page.mouse.move(x, y-scroll_y)
+        text = wait_for_tooltip(
+            READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
+            arg=expected, timeout_ms=700)
         read_count += 1
         row = parse_tooltip(text)
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]
