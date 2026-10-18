@@ -10,6 +10,18 @@ import render_hover_check as check
 
 
 class IsolationTests(unittest.TestCase):
+    def test_model3_diagnostic_uses_only_its_scoped_runner(self):
+        with patch.dict(os.environ, {'HOVER_CHECK_MODE': 'model3-diagnostic',
+                    'COINGLASS_COOKIE_HEADER': 'synthetic=session'}, clear=True), \
+                patch.object(check.subprocess, 'run') as run, \
+                patch.object(check, 'publish_status') as publish:
+            check.main()
+            self.assertEqual(run.call_count, 3)
+            calls = str(run.call_args_list)
+            self.assertIn('model3_hover_diagnostic.py', calls)
+            self.assertNotIn('hover_source_check.py', calls)
+            publish.assert_called_once_with(diagnostic_only=True)
+
     def test_only_source_session_reaches_source_child(self):
         with patch.dict(os.environ, {'PATH': '/bin', 'DATABASE_URL': 'synthetic-db',
                 'OPENAI_API_KEY': 'synthetic-ai', 'SUPABASE_SERVICE_ROLE_KEY': 'synthetic-db',

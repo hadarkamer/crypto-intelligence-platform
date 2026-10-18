@@ -45,7 +45,7 @@ def has_session(env):
         return False
 
 
-def publish_status(source_passed=False):
+def publish_status(source_passed=False, diagnostic_only=False):
     if PUBLIC.is_symlink():
         raise RuntimeError('Public output must not be a symlink')
     if PUBLIC.exists():
@@ -54,6 +54,8 @@ def publish_status(source_passed=False):
     message = ('Source checks passed for models 1, 2 and 3 at 12H, 24H and 48H.'
                if source_passed else
                'Preparation passed. No source scans have been run by this build.')
+    if diagnostic_only:
+        message = 'Model 3 diagnostic completed. See private build logs; full acceptance remains pending.'
     (PUBLIC / 'index.html').write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="robots" content="noindex,nofollow">'
@@ -67,10 +69,10 @@ def publish_status(source_passed=False):
 
 def main():
     mode = os.environ.get('HOVER_CHECK_MODE', 'prepare')
-    if mode not in ('prepare', 'source'):
-        raise RuntimeError('HOVER_CHECK_MODE must be prepare or source')
+    if mode not in ('prepare', 'source', 'model3-diagnostic'):
+        raise RuntimeError('Invalid HOVER_CHECK_MODE')
     source_env = child_environment(source=True)
-    if mode == 'source' and not has_session(source_env):
+    if mode != 'prepare' and not has_session(source_env):
         raise RuntimeError('Source session missing; no source scan was started')
     if mode == 'source' and (PRIVATE.exists() or PRIVATE.is_symlink()):
         raise RuntimeError('Source output already exists; refusing a duplicate run')
@@ -79,6 +81,12 @@ def main():
                    env=build_env, check=True, timeout=900)
     subprocess.run([sys.executable, '-m', 'unittest', 'test_render_hover_check', '-q'],
                    cwd=HERE, env=build_env, check=True, timeout=60)
+    if mode == 'model3-diagnostic':
+        subprocess.run([sys.executable, str(HERE / 'model3_hover_diagnostic.py'),
+                        '--output', str(HERE / 'model3-diagnostic-private')],
+                       cwd=HERE.parent, env=source_env, check=True, timeout=600)
+        publish_status(diagnostic_only=True)
+        return
     if mode == 'source':
         # Existing runner is sequential, bounded per map and closes each browser.
         subprocess.run([sys.executable, str(HERE / 'hover_source_check.py'),
