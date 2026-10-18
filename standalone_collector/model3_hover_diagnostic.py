@@ -15,7 +15,20 @@ def install_observer():
     sys.path.insert(0,str(HERE/'runtime'))
     import heatmap_hover as hover
     from capture_failure_observer import STATE_SCRIPT
+    from playwright.sync_api import Browser
+    new_context=Browser.new_context
+    def measured_context(browser,*args,**kwargs):
+        # Test-only controlled width experiment. Keep CSS pixels, height,
+        # timeframe, unmerged rows and all acceptance guards unchanged.
+        kwargs['viewport']={'width':1100,'height':1000}
+        return new_context(browser,*args,**kwargs)
+    Browser.new_context=measured_context
     original,original_close=hover.capture_column,hover.close_heatmap_settings
+    def cpu_state():
+        for path in ('/sys/fs/cgroup/cpu.stat','/sys/fs/cgroup/cpu/cpu.stat'):
+            try:return {k:int(v) for k,v in (line.split() for line in Path(path).read_text().splitlines())}
+            except (OSError,ValueError):pass
+        return {}
     def control_state(page):
         panel=page.get_by_role('dialog',name='Heatmap settings',exact=True)
         result={'panel_count':panel.count()}
@@ -74,7 +87,7 @@ def install_observer():
                 sample['ms']=(time.monotonic()-start)*1000
                 self.samples.append(sample)
     def observed_capture(page,image,geometry,**kwargs):
-        probe=ObservedPage(page);start=time.monotonic()
+        probe=ObservedPage(page);start=time.monotonic();cpu_before=cpu_state()
         emit('before_reader',{'timeframe':kwargs['timeframe'],'state':page.evaluate(STATE_SCRIPT,3)})
         try:
             result=original(probe,image,geometry,**kwargs)
@@ -100,6 +113,7 @@ def install_observer():
                     'median_ms':round(statistics.median(values),1),'max_ms':round(max(values),1),
                     'browser_sum_ms':round(sum(s.get('browser_ms',0) for s in selected),1)}
             emit('latency_profile',{'timeframe':kwargs['timeframe'],'total_seconds':round(time.monotonic()-start,3),
+                'viewport':page.viewport_size,'cpu_delta':{k:v-cpu_before.get(k,v) for k,v in cpu_state().items()},
                 'operations':totals,'slowest':sorted(probe.samples,key=lambda s:s['ms'],reverse=True)[:5]})
     hover.close_heatmap_settings=observed_close
     hover.capture_column=observed_capture
