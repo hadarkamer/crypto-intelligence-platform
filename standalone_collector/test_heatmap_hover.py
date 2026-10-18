@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
-    READ_TOOLTIP, HoverError)
+    READ_TOOLTIP, HoverError, price_overlay_point)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -107,16 +107,51 @@ class HoverTests(unittest.TestCase):
         bridge=(runtime/'collection_bridge.py').read_text()
         self.assertIn("result->'hover_snapshot'->>'version'='displayed-hover.v1'",bridge)
 
+    def test_plot_finder_excludes_time_navigator_in_same_canvas(self):
+        # Live Model 1/12H observation: the plot ended at y=674, but the
+        # previous finder included the blue navigator down to y=741.
+        from PIL import Image,ImageDraw
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'navigator.png'
+            im=Image.new('RGB',(1358,933),'white');draw=ImageDraw.Draw(im)
+            draw.rectangle((367,88,1250,674),fill=(68,1,84))
+            draw.rectangle((369,707,1250,741),fill=(189,204,244))
+            im.save(path)
+            bounds=plot_bounds(path,{'x':298,'y':48,'width':1018,'height':730})
+            self.assertEqual(bounds,{'left':367,'right':1250,'top':88,'bottom':674})
+            # A navigator alone cannot masquerade as a complete map.
+            draw.rectangle((367,88,1250,674),fill='white');im.save(path)
+            with self.assertRaisesRegex(HoverError,'hover_plot_not_found'):
+                plot_bounds(path,{'x':298,'y':48,'width':1018,'height':730})
+
+    def test_price_overlay_marker_is_restricted_to_unique_canvas_header_control(self):
+        from PIL import Image,ImageDraw
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'legend.png';im=Image.new('RGB',(1358,933),'white')
+            draw=ImageDraw.Draw(im);green=(43,184,153)
+            draw.rectangle((367,88,1250,674),fill=green)  # Map pixels are ineligible.
+            draw.rectangle((834,55,843,64),fill=green)
+            geometry={'x':298,'y':48,'width':1018,'height':730};bounds={'top':88}
+            im.save(path)
+            self.assertEqual(price_overlay_point(path,geometry,bounds),(838.5,59.5))
+            draw.rectangle((700,55,709,64),fill=green);im.save(path)
+            self.assertIsNone(price_overlay_point(path,geometry,bounds))
+
     def test_real_browser_sweep_clears_old_tooltip_and_covers_every_displayed_row(self):
         # Local deterministic fixture; no provider, network or application writes.
         from playwright.sync_api import sync_playwright
         stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
-        html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
+        html='''<canvas width="600" height="340" style="position:absolute;left:20px;top:40px"></canvas>
         <div id="tip" class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
         <script>
         const canvas=document.querySelector('canvas'),tip=document.querySelector('#tip');
-        const ctx=canvas.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
-        canvas.onmousemove=e=>{const row=Math.min(29,Math.floor(e.offsetY/10));
+        const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,600,340);
+        ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,40,600,300);
+        ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);let priceVisible=true;
+        canvas.onclick=e=>{if(e.offsetX>=300&&e.offsetX<=310&&e.offsetY>=10&&e.offsetY<=20)priceVisible=false;};
+        canvas.onmousemove=e=>{if(e.offsetY<41||e.offsetY>338){tip.style.display='none';return;}
+          const row=Math.min(29,Math.floor((e.offsetY-40)/10));
+          if(priceVisible&&row===14){tip.style.display='block';tip.innerText='STAMP Open 986 High 987 Low 985 Close 986';return;}
           tip.style.display='block';tip.innerText='STAMP Price '+(1000-row)+' Liquidation Leverage '+(row+1)+'.00M';};
         canvas.onmouseleave=()=>tip.style.display='none';
         </script>'''.replace('STAMP',stamp)
@@ -125,7 +160,7 @@ class HoverTests(unittest.TestCase):
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
                 page.set_content(html);path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
-                snap=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
+                snap=capture_column(page,path,{'x':20,'y':40,'width':600,'height':340},model=1,timeframe='24h')
                 self.assertEqual(len(snap['rows']),30)
                 self.assertEqual(snap['total_value'],465000000)
                 self.assertEqual([r['price'] for r in snap['rows']],list(range(1000,970,-1)))

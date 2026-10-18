@@ -112,6 +112,15 @@ def plot_bounds(image_path, geometry):
                 group = max(groups, key=len)
                 if group[-1]-group[0] >= (x1-x0)*.55:
                     spans.append((y, group[0], group[-1]))
+        # The same canvas also contains the coloured time navigator. Treat
+        # vertically separated regions independently, or its bottom becomes
+        # a false heatmap row and the first bottom hover never produces data.
+        regions = []
+        for span in spans:
+            if not regions or span[0]-regions[-1][-1][0] > 9:
+                regions.append([])
+            regions[-1].append(span)
+        spans = max(regions, key=len, default=[])
         if len(spans) < 60:
             raise HoverError('hover_plot_not_found')
         left = round(statistics.median(s[1] for s in spans))
@@ -127,6 +136,38 @@ def plot_bounds(image_path, geometry):
         return {'left': left, 'right': right, 'top': top, 'bottom': bottom}
     finally:
         image.close()
+
+
+def price_overlay_point(image_path, geometry, bounds):
+    """Locate the observed green Supercharts legend marker in Models 1/2.
+
+    Only the canvas header is eligible, never navigation links, map data or
+    page controls. Ambiguous/missing markers produce no click. The retained
+    screenshot still contains the price candles used by the analysis.
+    """
+    from PIL import Image
+    left, top = int(geometry['x']), max(0, int(geometry['y']))
+    right, bottom = int(geometry['x']+geometry['width']), bounds['top']-2
+    if not 8 <= bottom-top <= 100:return None
+    with Image.open(image_path) as original:
+        region = original.crop((left,top,min(right,original.width),bottom)).convert('RGB')
+    try:
+        pixels=region.load()
+        points={(x,y) for y in range(region.height) for x in range(region.width)
+                if (lambda c: .38 <= c[0] <= .48 and c[1] >= .55 and c[2] >= .45)(
+                    colorsys.rgb_to_hsv(*(v/255 for v in pixels[x,y])))}
+        markers=[]
+        while points:
+            pending=[points.pop()];component=[]
+            while pending:
+                x,y=pending.pop();component.append((x,y))
+                for point in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):
+                    if point in points:points.remove(point);pending.append(point)
+            xs,ys=zip(*component);w=max(xs)-min(xs)+1;h=max(ys)-min(ys)+1
+            if 6 <= w <= 16 and 6 <= h <= 16 and len(component)>=w*h*.65:
+                markers.append((left+(min(xs)+max(xs))/2,top+(min(ys)+max(ys))/2))
+        return markers[0] if len(markers)==1 else None
+    finally:region.close()
 
 
 def validate_rows(rows, *, complete=True):
@@ -164,6 +205,11 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     viewport = page.viewport_size
     if not viewport or bounds['bottom']-bounds['top']+40 > viewport['height']:
         raise HoverError('hover_plot_clipped')
+    if model in (1,2):
+        marker=price_overlay_point(image_path,geometry,bounds)
+        if marker is not None:
+            page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
+            page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
     page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
     x = bounds['right']-.25
@@ -191,8 +237,18 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]
         return row
 
+    def edge(y, direction):
+        try:
+            return read(y), y
+        except HoverError as exc:
+            if exc.reason != 'hover_update_timeout':raise
+        # A painted border may not be interactive. Move at most one pixel
+        # inward, less than the minimum accepted native row height below.
+        # This is a boundary probe, never a restart of the source scan.
+        return read(y+direction), y+direction
+
     top_y, bottom_y = bounds['top']+.25, float(bounds['bottom'])
-    top_row = read(top_y)
+    top_row, top_y = edge(top_y, 1)
     calibration = [top_row]
     transitions = []
     y = top_y
@@ -214,7 +270,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     if min(b-a for a,b in zip(transitions,transitions[1:])) < 2:
         raise HoverError('hover_resolution_insufficient')
 
-    bottom_row = read(bottom_y)
+    bottom_row, bottom_y = edge(bottom_y, -1)
     count = round((top_row['price']-bottom_row['price'])/initial_step)+1
     if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
     # Locate the last boundary too. This prevents a one-pixel calibration error
