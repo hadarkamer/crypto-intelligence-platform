@@ -50,8 +50,14 @@ def install(runtime: Path):
         "                    with capture_operation('overlay_dismissal'):\n"
         "                        close_heatmap_settings(page)\n"
         "                with capture_operation('chart_geometry'):\n")
+    anchor = "                    page.screenshot("
+    text = once(text, anchor,
+        "                    from heatmap_hover import dismiss_cookie_banner\n"
+        "                    dismiss_cookie_banner(page)\n" + anchor)
     anchor = '                    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)\n'
     text = once(text, anchor, anchor+
+        "                from heatmap_hover import require_cookie_banner_hidden\n"
+        "                require_cookie_banner_hidden(page)\n"
         "                from heatmap_hover import capture_column\n"
         "                with capture_operation('hover_collection'):\n"
         "                    hover_snapshot = capture_column(page, path, chart_rect, model=HEATMAP_MODEL, timeframe=timeframe)\n")

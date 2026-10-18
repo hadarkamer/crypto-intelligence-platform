@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
-    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings)
+    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,
+    dismiss_cookie_banner, require_cookie_banner_hidden)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -98,6 +99,9 @@ class HoverTests(unittest.TestCase):
         if not runtime.exists():self.skipTest('prepare creates the installed runtime')
         capture=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
         self.assertEqual(capture.count('page.screenshot('),1)
+        self.assertLess(capture.index('dismiss_cookie_banner(page)'),capture.index('page.screenshot('))
+        self.assertLess(capture.index('page.screenshot('),capture.index('require_cookie_banner_hidden(page)'))
+        self.assertLess(capture.index('require_cookie_banner_hidden(page)'),capture.index('hover_snapshot = capture_column'))
         self.assertIn("'timezone_id': 'UTC'",capture)
         self.assertLess(capture.index('close_heatmap_settings(page)'),capture.index('chart_rect = page.evaluate'))
         self.assertLess(capture.index('hover_snapshot = capture_column'),capture.index('context.close()'))
@@ -203,6 +207,59 @@ class HoverTests(unittest.TestCase):
                 self.assertEqual([r['price'] for r in snap['rows']],list(range(1000,970,-1)))
                 self.assertLess(snap['duration_seconds'],55)
                 self.assertLess(snap['tooltip_reads'],85)  # 300 pixels, only 30 native rows.
+            finally:browser.close()
+
+    def test_interior_grid_preserves_observed_boundary_prices_and_rejects_missing_row(self):
+        from playwright.sync_api import sync_playwright
+        stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        # First four prices reproduce the failed Model 2/12H source calibration.
+        prices=[round(89070.97-(i-1)*193.73,2) for i in range(30)]
+        prices[0]=89264.50;prices[-1]=round(prices[-1]+.15,2)
+        html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
+        <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
+        <script>(()=>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box'),prices=PRICES;
+        const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
+        c.onmousemove=e=>{const row=Math.min(29,Math.floor(e.offsetY/10));
+          t.style.display='block';t.innerText='STAMP Price '+prices[row]+' Liquidation Leverage '+(row+1)+'.00M';};
+        c.onmouseleave=()=>t.style.display='none';})();</script>'''.replace('STAMP',stamp)
+        with sync_playwright() as pw,tempfile.TemporaryDirectory() as temp:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
+                for missing in (False,True):
+                    values=prices.copy()
+                    if missing:values[14]=values[15]
+                    page.set_content(html.replace('PRICES',json.dumps(values)))
+                    path=Path(temp)/'grid.png';page.screenshot(path=str(path),full_page=True)
+                    if missing:
+                        with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
+                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='12h')
+                    else:
+                        result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='12h')
+                        self.assertEqual([r['price'] for r in result['rows']],prices)
+                        self.assertEqual(result['total_value'],465000000)
+            finally:browser.close()
+
+    def test_cookie_banner_is_closed_once_and_sticky_or_late_banner_is_rejected(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page()
+                for sticky in (False,True):
+                    page.set_content('''<button id="other" onclick="this.textContent='WRONG'">Accept</button>
+                    <div id="termly-code-snippet-support"><p>We use essential cookies to make our site work.</p>
+                    <button onclick="this.dataset.clicks=Number(this.dataset.clicks||0)+1;CLOSE">Decline</button></div>'''
+                        .replace('CLOSE','' if sticky else "setTimeout(()=>this.parentElement.remove(),60)"))
+                    if sticky:
+                        with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page)
+                        self.assertEqual(page.get_by_role('button',name='Decline').get_attribute('data-clicks'),'1')
+                    else:
+                        dismiss_cookie_banner(page);require_cookie_banner_hidden(page)
+                    self.assertEqual(page.locator('#other').inner_text(),'Accept')
+                page.set_content('<p>We use essential cookies to make our site work.</p>')
+                with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):require_cookie_banner_hidden(page)
+                page.set_content('<a>Cookie Preferences</a>');dismiss_cookie_banner(page)
             finally:browser.close()
 
     def test_complete_observed_tooltip_keeps_timestamp_and_ignores_hidden_ancestors(self):

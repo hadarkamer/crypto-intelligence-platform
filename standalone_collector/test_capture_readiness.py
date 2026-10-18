@@ -93,6 +93,8 @@ class InstalledGateTests(unittest.TestCase):
         driver=MagicMock();driver.__enter__.return_value=driver
         browser=driver.chromium.launch.return_value;context=browser.new_context.return_value
         page=context.new_page.return_value;page.url=source_url(1)
+        page.get_by_text.return_value.count.return_value=0  # No cookie banner.
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
         page.evaluate.side_effect=lambda script: state(reason) if script==readiness.STATE_SCRIPT else {
             'x':0,'y':20,'width':800,'height':600,'page_width':1000}
         page.wait_for_function.side_effect=TimeoutError('PRIVATE')
