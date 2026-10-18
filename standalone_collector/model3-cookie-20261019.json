@@ -1,0 +1,167 @@
+{
+  "date_israel": "2026-10-19",
+  "scope": "One isolated Model 3 / 48H source attempt in actual paid 1 CPU / 2 GiB runtime",
+  "source_commit": "b62bce2ed6aa32282efcd9084cee1c7685897ab1",
+  "production_commit": "cf2413f6a34ff9cac33e27e957990eeab2c3c0f7",
+  "service_id": "srv-dakhacou01pc73f58aug",
+  "bundle_sha256": "0ededf5e60782612a550b7963cccd1f8816cc65250bec05c82389b25a2383c15",
+  "cookie_input": {
+    "format_ok": true,
+    "session_cookie_present": true,
+    "temporary_process_override": true,
+    "production_configuration_changed": false
+  },
+  "result": {
+    "model": 3,
+    "timeframe": "48H",
+    "status": "failed",
+    "code": "source_timeout",
+    "total_seconds": 52.365,
+    "guard_reason": null,
+    "exit_code": 0,
+    "peak_mib": {
+      "anon": 479.13,
+      "file": 524,
+      "kernel": 33.62,
+      "sock": 0.39,
+      "current": 1013.98
+    },
+    "memory_events_delta": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "capture_phase": "overlay_dismissal",
+    "exception_kind": "TimeoutError",
+    "click_failure": "action_timeout",
+    "selector_issue": "action_timeout",
+    "source_capture_state": {
+      "observation_status": "observed",
+      "source_identity": "canonical",
+      "reason": "visible-dialog",
+      "label": "48 hour",
+      "heading_visible": true,
+      "chart_present": true,
+      "login_gate_visible": false,
+      "dialog_visible": true,
+      "loading_visible": false,
+      "challenge_visible": false,
+      "trigger_present": true,
+      "trigger_visible": true,
+      "trigger_disabled": false,
+      "trigger_hit_target": true,
+      "model_selected": true,
+      "symbol_selected": true
+    },
+    "source_network": {
+      "http_errors": [
+        {
+          "host_group": "other",
+          "count": 2,
+          "status": 429
+        }
+      ],
+      "network_errors": [],
+      "page_error_count": 0
+    },
+    "cpu_delta": {
+      "usage_usec": 51728793,
+      "user_usec": 44978047,
+      "system_usec": 6750746,
+      "nice_usec": 0,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 524,
+      "nr_throttled": 516,
+      "throttled_usec": 164857927,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    }
+  },
+  "diagnostics": [
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "count",
+      "status": "completed",
+      "value": 1,
+      "seconds": 0.0088
+    },
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "is_visible",
+      "status": "completed",
+      "value": true,
+      "seconds": 0.6068
+    },
+    {
+      "phase": "settings_close",
+      "role": "spinbutton",
+      "operation": "count",
+      "status": "completed",
+      "value": 1,
+      "seconds": 0.7856
+    },
+    {
+      "phase": "settings_close",
+      "role": "spinbutton",
+      "operation": "input_value",
+      "status": "completed",
+      "is_unmerged": true,
+      "seconds": 0.0077
+    },
+    {
+      "phase": "settings_close",
+      "role": "button",
+      "operation": "click",
+      "status": "failed",
+      "exception_class": "TimeoutError",
+      "click_failure": "action_timeout",
+      "call_log_flags": {
+        "click_action_started": false,
+        "click_action_done": false,
+        "waiting_navigation": false,
+        "waiting_visible": true,
+        "waiting_locator": false
+      },
+      "seconds": 3.0042
+    },
+    {
+      "phase": "settings_close",
+      "role": "dialog",
+      "operation": "is_visible",
+      "status": "completed",
+      "value": true,
+      "seconds": 0.4919
+    },
+    {
+      "phase": "settings_close",
+      "operation": "finished"
+    }
+  ],
+  "cleanup_before_removing_temp_directory": {
+    "test_processes": [],
+    "browser_processes": [],
+    "worker_lock_available": true,
+    "queued_or_running_jobs": 0,
+    "health_ok": true,
+    "store_ready": true,
+    "memory_after_mib": 367.48
+  },
+  "source_attempts": 1,
+  "models_1_2_attempts": 0,
+  "ai_calls": 0,
+  "application_writes": 0,
+  "deployments": 0,
+  "limitations": [
+    "Cookie dismissal and hover were never reached.",
+    "The reason the close button failed its visibility/actionability wait is not yet proven.",
+    "CPU saturation is observed but not proven causal."
+  ],
+  "temporary_directory_removed": true,
+  "temporary_cookie_unset": true
+}
