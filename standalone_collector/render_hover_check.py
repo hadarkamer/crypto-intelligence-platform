@@ -45,7 +45,7 @@ def has_session(env):
         return False
 
 
-def publish_status(source_passed=False, diagnostic_only=False):
+def publish_status(source_passed=False, diagnostic_only=False, models12=False):
     if PUBLIC.is_symlink():
         raise RuntimeError('Public output must not be a symlink')
     if PUBLIC.exists():
@@ -55,7 +55,7 @@ def publish_status(source_passed=False, diagnostic_only=False):
                if source_passed else
                'Preparation passed. No source scans have been run by this build.')
     if diagnostic_only:
-        message = 'Model 3 diagnostic completed. See private build logs; full acceptance remains pending.'
+        message = ('Models 1/2 source check completed.' if models12 else 'Model 3 diagnostic completed.') + ' See private build logs; full acceptance remains pending.'
     (PUBLIC / 'index.html').write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="robots" content="noindex,nofollow">'
@@ -69,7 +69,7 @@ def publish_status(source_passed=False, diagnostic_only=False):
 
 def main():
     mode = os.environ.get('HOVER_CHECK_MODE', 'prepare')
-    if mode not in ('prepare', 'source', 'model3-diagnostic'):
+    if mode not in ('prepare', 'source', 'model3-diagnostic', 'models12'):
         raise RuntimeError('Invalid HOVER_CHECK_MODE')
     source_env = child_environment(source=True)
     if mode != 'prepare' and not has_session(source_env):
@@ -81,11 +81,13 @@ def main():
                    env=build_env, check=True, timeout=900)
     subprocess.run([sys.executable, '-m', 'unittest', 'test_render_hover_check', '-q'],
                    cwd=HERE, env=build_env, check=True, timeout=60)
-    if mode == 'model3-diagnostic':
-        subprocess.run([sys.executable, str(HERE / 'model3_hover_diagnostic.py'),
-                        '--output', str(HERE / 'model3-diagnostic-private')],
-                       cwd=HERE.parent, env=source_env, check=True, timeout=600)
-        publish_status(diagnostic_only=True)
+    if mode in ('model3-diagnostic','models12'):
+        command=[sys.executable, str(HERE / 'model3_hover_diagnostic.py'),
+                        '--output', str(HERE / (mode+'-private'))]
+        if mode=='models12':command.append('--models12')
+        subprocess.run(command,cwd=HERE.parent,env=source_env,check=True,timeout=1200 if mode=='models12' else 600)
+        if mode=='models12':publish_status(diagnostic_only=True,models12=True)
+        else:publish_status(diagnostic_only=True)
         return
     if mode == 'source':
         # Existing runner is sequential, bounded per map and closes each browser.

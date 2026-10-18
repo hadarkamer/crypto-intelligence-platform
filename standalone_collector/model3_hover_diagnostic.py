@@ -1,11 +1,13 @@
-"""Test-only timing of the unchanged reader and named settings Close action."""
+"""Test-only source timing and resource sampling; no AI, database or worker."""
 import argparse
 import json
 import os
 from pathlib import Path
 import statistics
+import subprocess
 import sys
 import time
+import threading
 HERE=Path(__file__).resolve().parent
 
 def emit(kind,value):
@@ -84,7 +86,7 @@ def install_observer():
                 self.samples.append(sample)
     def observed_capture(page,image,geometry,**kwargs):
         probe=ObservedPage(page);start=time.monotonic();cpu_before=cpu_state()
-        emit('before_reader',{'timeframe':kwargs['timeframe'],'state':page.evaluate(STATE_SCRIPT,3)})
+        emit('before_reader',{'model':kwargs['model'],'timeframe':kwargs['timeframe'],'state':page.evaluate(STATE_SCRIPT,kwargs['model'])})
         try:
             result=original(probe,image,geometry,**kwargs)
             emit('reader_completed',{'timeframe':kwargs['timeframe'],'rows':len(result['rows']),
@@ -116,24 +118,56 @@ def install_observer():
     hover.close_heatmap_settings=observed_close
     hover.capture_column=observed_capture
 
+class ResourceSample:
+    """Sample the isolated BUILD cgroup, not production or one Chrome process."""
+    def __init__(self):
+        self.stop=threading.Event();self.peak={};self.samples=0
+        self.thread=threading.Thread(target=self.observe,daemon=True)
+    def observe(self):
+        while not self.stop.is_set():
+            try:
+                root=Path('/sys/fs/cgroup')
+                values={'current':int((root/'memory.current').read_text())}
+                values.update({k:int(v) for k,v in (line.split() for line in (root/'memory.stat').read_text().splitlines()) if k in ('anon','file')})
+                for key,value in values.items():self.peak[key]=max(self.peak.get(key,0),value)
+                self.samples+=1
+            except (OSError,ValueError):pass
+            self.stop.wait(.25)
+    def __enter__(self):self.thread.start();return self
+    def __exit__(self,*_):self.stop.set();self.thread.join(timeout=1)
+    def report(self):
+        result={'scope':'isolated_build_cgroup','sample_interval_seconds':.25,'samples':self.samples,
+                'peak_mib':{k:round(v/1024**2,2) for k,v in self.peak.items()}}
+        for name in ('cpu.max','memory.max'):
+            try:result[name]=Path('/sys/fs/cgroup',name).read_text().strip()
+            except OSError:pass
+        return result
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--single',choices=('12H','24H','48H'))
     parser.add_argument('--model',type=int,choices=(1,2,3),default=3)
+    parser.add_argument('--models12',action='store_true',help='Only the six still-pending Model 1/2 cases')
     args=parser.parse_args()
     from hover_source_check import single,run_probe
     if args.single:
         if os.environ.get('COLLECTION_HEATMAP_MODEL')!=str(args.model):raise RuntimeError('Diagnostic model mismatch')
-        if args.model==3:
-            install_observer()
+        install_observer()
         single(args.model,args.single,args.output);return 0
     args.output.mkdir(parents=True,exist_ok=False);reports=[]
-    for model,tf in [(3,'48H'),(3,'12H'),(3,'24H')]:
+    cases=[(m,t) for m in (1,2) for t in ('12H','24H','48H')] if args.models12 else [(3,'48H'),(3,'12H'),(3,'24H')]
+    for model,tf in cases:
         dest=args.output/f'model{model}-{tf}'
         env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}
-        run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--model',str(model),'--output',str(dest)],env)
-        report=json.loads((dest/'report.json').read_text());reports.append(report);emit('case_result',report)
+        with ResourceSample() as memory:
+            try:
+                run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--model',str(model),'--output',str(dest)],env)
+                report=json.loads((dest/'report.json').read_text())
+            except (subprocess.SubprocessError,OSError,ValueError):
+                report={'model':model,'timeframe':tf,'status':'failed','code':'probe_process_failed','ai_calls':0,'database_writes':0}
+        report['resources']=memory.report()
+        reports.append(report);emit('case_result',report)
         (args.output/'summary.json').write_text(json.dumps(reports,indent=2))
         if (report.get('source_capture_state') or {}).get('challenge_visible'):break
     return int(any(r['status']!='captured' for r in reports))

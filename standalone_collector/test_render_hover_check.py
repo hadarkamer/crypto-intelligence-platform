@@ -1,5 +1,6 @@
 """Isolation gates for the test-only Render build entrypoint."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +11,29 @@ import render_hover_check as check
 
 
 class IsolationTests(unittest.TestCase):
+    def test_models12_runs_six_distinct_cases_and_continues_after_one_failure(self):
+        import model3_hover_diagnostic as diagnostic
+        calls=[]
+        def probe(command,env):
+            model=int(command[command.index('--model')+1]);tf=command[command.index('--single')+1]
+            calls.append((model,tf))
+            if len(calls)==1:raise subprocess.TimeoutExpired(command,180)
+            dest=Path(command[-1]);dest.mkdir(parents=True)
+            (dest/'report.json').write_text(json.dumps({'model':model,'timeframe':tf,'status':'captured'}))
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('sys.argv',['check','--output',temp+'/cases','--models12']), \
+                patch('hover_source_check.run_probe',side_effect=probe),patch.object(diagnostic,'emit'):
+            self.assertEqual(diagnostic.main(),1)
+        self.assertEqual(calls,[(m,t) for m in (1,2) for t in ('12H','24H','48H')])
+    def test_models12_selects_only_pending_cases_without_ai_or_database(self):
+        with patch.dict(os.environ, {'HOVER_CHECK_MODE':'models12','COINGLASS_COOKIE_HEADER':'synthetic=session','OPENAI_API_KEY':'synthetic-ai'},clear=True), \
+                patch.object(check.subprocess,'run') as run, patch.object(check,'publish_status') as publish:
+            check.main()
+            command=run.call_args.args[0]
+            self.assertIn('--models12',command)
+            self.assertEqual(run.call_args.kwargs['env']['OPENAI_API_KEY'],'')
+            self.assertEqual(run.call_args.kwargs['env']['DATABASE_URL'],'')
+            publish.assert_called_once_with(diagnostic_only=True,models12=True)
     def test_model3_diagnostic_uses_only_its_scoped_runner(self):
         with patch.dict(os.environ, {'HOVER_CHECK_MODE': 'model3-diagnostic',
                     'COINGLASS_COOKIE_HEADER': 'synthetic=session'}, clear=True), \
