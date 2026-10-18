@@ -10,8 +10,8 @@ import time
 ROOT = Path(__file__).resolve().parent
 CG = Path('/sys/fs/cgroup')
 LOCK = 748230102  # Existing single-worker lock, shared across all three models.
-LIMIT = 430 * 1024 * 1024  # Leave >=82 MiB for allocation bursts / service health.
-CASES = ((2, '12H'), (3, '48H'))
+LIMIT = 1700 * 1024 * 1024  # Headroom within the user-upgraded 2 GiB service.
+CASES = ((2, '12H'), (3, '48H'), (1, '12H'))
 OS_KEYS = ('PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ',
            'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'PLAYWRIGHT_BROWSERS_PATH')
 
@@ -42,6 +42,12 @@ def pending(conn):
 
 def main():
     import psycopg
+    # Verify the running instance, not merely a pending dashboard configuration.
+    if int((CG/'memory.max').read_text()) != 2 * 1024**3:
+        raise RuntimeError('unexpected_runtime_memory_limit')
+    quota, period = map(int, (CG/'cpu.max').read_text().split())
+    if quota != period:
+        raise RuntimeError('unexpected_runtime_cpu_limit')
     env = {k: os.environ[k] for k in OS_KEYS if k in os.environ}
     env.update({k: os.environ[k] for k in ('COINGLASS_COOKIE_HEADER', 'COINGLASS_STORAGE_STATE_JSON') if k in os.environ})
     if not any(env.get(k) for k in ('COINGLASS_COOKIE_HEADER', 'COINGLASS_STORAGE_STATE_JSON')):
@@ -60,8 +66,8 @@ def main():
         try:
             emit({'kind':'PAID_RUNTIME_START','source_commit':'b62bce2ed6aa32282efcd9084cee1c7685897ab1',
                 'cpu.max':(CG/'cpu.max').read_text().strip(),'memory.max':(CG/'memory.max').read_text().strip(),
-                'memory_guard_mib':430,'baseline_mib':{k:round(v/1024**2,2) for k,v in sample().items()},
-                'ai_calls':0,'data_writes':0,'max_cases':2,'scope':'active_service_cgroup_including_existing_server'})
+                'memory_guard_mib':1700,'baseline_mib':{k:round(v/1024**2,2) for k,v in sample().items()},
+                'ai_calls':0,'data_writes':0,'max_cases':len(CASES),'scope':'active_service_cgroup_including_existing_server'})
             for model, tf in CASES:
                 if pending(conn):
                     emit({'kind':'PAID_RUNTIME_STOP','reason':'production_work_arrived','source_started':False})
@@ -75,9 +81,19 @@ def main():
                 log = out/f'model{model}-{tf}.log'
                 peak = initial.copy(); cpu_before = stat('cpu.stat'); events_before = stat('memory.events')
                 reason = None; started = time.monotonic(); next_queue_check = started + 1
+                # Reuse existing safe phase diagnostics for a bounded/guarded stop.
+                child_code = (
+                    'import sys,time; from pathlib import Path; '
+                    'sys.path.insert(0,str(Path("runtime").resolve())); '
+                    'import model1_execution as d; '
+                    f'd._progress_path=Path({str(dest)!r})/"execution_progress.json"; '
+                    'd._progress_started=time.monotonic(); '
+                    f'd._progress_identity={{"heatmap_model":{model},"timeframe":{tf!r}}}; '
+                    'from hover_source_check import single; '
+                    f'single({model},{tf!r},Path({str(dest)!r}))'
+                )
                 with log.open('xb') as stream:
-                    process = subprocess.Popen([sys.executable, str(ROOT/'hover_source_check.py'),
-                        '--single',str(model),tf,'--output',str(dest)],env=case_env,
+                    process = subprocess.Popen([sys.executable, '-c', child_code],env=case_env,
                         cwd=ROOT,stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
                     try:
                         while process.poll() is None:
@@ -96,6 +112,11 @@ def main():
                 result = {'model':model,'timeframe':tf,'status':'failed'}
                 if (dest/'report.json').is_file():
                     result.update(json.loads((dest/'report.json').read_text()))
+                progress = dest/'execution_progress.json'
+                if progress.is_file():
+                    sys.path.insert(0, str(ROOT/'runtime'))
+                    from model1_execution import safe_progress
+                    result['execution_progress'] = safe_progress(json.loads(progress.read_text()))
                 result.update(kind='PAID_RUNTIME_RESULT',exit_code=process.returncode,
                     guard_reason=reason,total_seconds=round(time.monotonic()-started,3),
                     peak_mib={k:round(v/1024**2,2) for k,v in peak.items()},
