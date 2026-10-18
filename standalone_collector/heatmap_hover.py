@@ -223,6 +223,11 @@ def close_heatmap_settings(page):
 
 def capture_column(page, image_path, geometry, *, model, timeframe):
     started = time.monotonic()
+    # Model 3's live DOM/mouse operations cost about 0.3 s each on the
+    # isolated source. 55 s truncated a valid, still-progressing sweep.
+    # Allow its complete grid and final anchors within a bounded budget;
+    # individual tooltip waits and the other models remain unchanged.
+    max_seconds = 120 if model == 3 else MAX_SECONDS
     bounds = plot_bounds(image_path, geometry)
     # UTC makes both visible tooltip timestamp formats unambiguous.
     if page.evaluate('() => Intl.DateTimeFormat().resolvedOptions().timeZone') != 'UTC':
@@ -247,7 +252,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
         # evaluate while the separate wait_for_function mechanism timed out.
         # Poll the SAME predicate inside this evaluation; return its value with
         # no JSHandle round-trips, extra preflight read or animation-frame wait.
-        remaining = MAX_SECONDS - (time.monotonic()-started)
+        remaining = max_seconds - (time.monotonic()-started)
         if remaining <= 0:
             raise HoverError('hover_deadline')
         result = page.evaluate(r"""({value, timeout}) => new Promise((resolve,reject) => {
@@ -264,7 +269,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
             }
             observe();
         })""", {'value': arg, 'timeout': max(1,min(timeout_ms,remaining*1000))})
-        if time.monotonic()-started > MAX_SECONDS:
+        if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
         if not result:
             raise HoverError('hover_update_timeout')
@@ -272,7 +277,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
 
     def read(y, expected=None):
         nonlocal read_count
-        if time.monotonic()-started > MAX_SECONDS:
+        if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
         if expected is None:
             # Calibration must observe disappearance before another pointer move.

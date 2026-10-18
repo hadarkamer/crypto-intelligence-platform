@@ -253,7 +253,7 @@ class HoverTests(unittest.TestCase):
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
-                for mode in ('normal','stuck','no-animation-frame','changed-time'):
+                for mode in ('normal','stuck','no-animation-frame','changed-time','expired-model3'):
                     fixture=html.replace('STUCK',str(mode=='stuck').lower())
                     if mode=='no-animation-frame':
                         # DOM updates continue while animation-frame callbacks
@@ -267,12 +267,25 @@ class HoverTests(unittest.TestCase):
                             "t.innerText=(row===14?'2020-01-01 00:00':'"+stamp+"')+' Price '")
                     page.set_content(fixture)
                     path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
-                    if mode in ('stuck','changed-time'):
+                    if mode=='expired-model3':
+                        with patch('heatmap_hover.time') as clock:
+                            clock.monotonic.side_effect=iter([0]+[121]*100)
+                            with self.assertRaisesRegex(HoverError,'hover_deadline'):
+                                capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
+                    elif mode in ('stuck','changed-time'):
                         reason='hover_update_timeout' if mode=='stuck' else 'hover_snapshot_changed'
                         with self.assertRaisesRegex(HoverError,reason):
                             capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
                     else:
-                        snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3 if mode=='no-animation-frame' else 2,timeframe='24h')
+                        if mode=='no-animation-frame':
+                            # A valid Model 3 sweep must survive the former
+                            # 55 s cutoff, including all final anchor checks.
+                            with patch('heatmap_hover.time') as clock:
+                                clock.monotonic.side_effect=iter([0]+[60]*2000)
+                                snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
+                            self.assertEqual(snapshot['duration_seconds'],60)
+                        else:
+                            snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
                         self.assertEqual(len(snapshot['rows']),30)
                         self.assertEqual(snapshot['total_value'],30000000)
             finally:browser.close()

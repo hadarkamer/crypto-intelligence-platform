@@ -41,15 +41,15 @@ def install_observer():
             }''')
         return result
     def observed_close(page):
-        before=control_state(page);start=time.monotonic()
+        start=time.monotonic()
         try:return original_close(page)
         except Exception as exc:
             lines=[line.strip()[:400] for line in str(exc).splitlines()
                 if any(w in line.lower() for w in ('timeout','locator','waiting','element','click','scroll','intercept','stable','viewport'))]
-            emit('close_failure',{'seconds':round(time.monotonic()-start,3),'before':before,
+            emit('close_failure',{'seconds':round(time.monotonic()-start,3),
                 'after':control_state(page),'action_log':lines[:20]})
             raise
-        finally:emit('close_timing',{'seconds':round(time.monotonic()-start,3),'panel_present':before['panel_count']!=0})
+        finally:emit('close_timing',{'seconds':round(time.monotonic()-start,3)})
     class ObservedMouse:
         def __init__(self,mouse,samples):self.mouse,self.samples=mouse,samples
         def __getattr__(self,name):return getattr(self.mouse,name)
@@ -126,19 +126,10 @@ def main():
     if args.single:
         if os.environ.get('COLLECTION_HEATMAP_MODEL')!=str(args.model):raise RuntimeError('Diagnostic model mismatch')
         if args.model==3:
-            # Test-only: stay within the existing CPU allowance rather than
-            # bursting across the host's CPUs and repeatedly hitting quota.
-            allowed=sorted(os.sched_getaffinity(0))
-            quota,period=Path('/sys/fs/cgroup/cpu.max').read_text().split()
-            if quota=='max':raise RuntimeError('Expected a measured CPU quota for this experiment')
-            count=max(1,min(len(allowed),int(quota)//int(period)))
-            os.sched_setaffinity(0,allowed[:count])
-            emit('cpu_affinity',{'host_allowed_cpus':len(allowed),'quota_cpu_count':int(quota)/int(period),
-                                'selected_cpu_count':len(os.sched_getaffinity(0))})
             install_observer()
         single(args.model,args.single,args.output);return 0
     args.output.mkdir(parents=True,exist_ok=False);reports=[]
-    for model,tf in [(3,'48H')]:
+    for model,tf in [(3,'48H'),(3,'12H'),(3,'24H')]:
         dest=args.output/f'model{model}-{tf}'
         env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}
         run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--model',str(model),'--output',str(dest)],env)
