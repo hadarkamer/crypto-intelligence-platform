@@ -262,6 +262,12 @@ class HoverTests(unittest.TestCase):
                 page.set_content('<a>Cookie Preferences</a>');dismiss_cookie_banner(page)
             finally:browser.close()
 
+    def test_cookie_failure_reason_survives_safe_failure_report(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('cookie_failure_execution',Path(__file__).with_name('model1_execution.py'))
+        execution=importlib.util.module_from_spec(spec);spec.loader.exec_module(execution)
+        self.assertEqual(execution.failure_detail(HoverError('hover_cookie_overlay'))['validation_reason'],'hover_cookie_overlay')
+
     def test_complete_observed_tooltip_keeps_timestamp_and_ignores_hidden_ancestors(self):
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
