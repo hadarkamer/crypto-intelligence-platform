@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
-    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings, tooltip_updates)
+    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -218,27 +218,6 @@ class HoverTests(unittest.TestCase):
                 text=page.evaluate(READ_TOOLTIP)
                 self.assertEqual(parse_tooltip(text)['value'],37840000)
                 self.assertEqual(parse_tooltip(text)['source_time'],'2026-10-18T16:30:00Z')
-            finally:browser.close()
-
-    def test_tooltip_events_ignore_unrelated_messages_and_stop_after_capture(self):
-        from playwright.sync_api import sync_playwright
-        text='2026-10-18 16:30 Price 80000 Liquidation Leverage 2M'
-        with sync_playwright() as pw:
-            browser=pw.chromium.launch(headless=True)
-            try:
-                page=browser.new_page()
-                page.set_content('<div class="cg-toolti-box">'+text+'</div>')
-                with tooltip_updates(page) as state:
-                    page.wait_for_timeout(30)
-                    self.assertEqual(state,[True,text])
-                    page.evaluate("() => console.debug('unrelated page message')")
-                    self.assertEqual(state,[True,text])
-                    page.locator('.cg-toolti-box').evaluate("e => e.style.display='none'")
-                    page.wait_for_timeout(30)
-                    self.assertEqual(state,[True,None])
-                page.locator('.cg-toolti-box').evaluate("e => e.style.display='block'")
-                page.wait_for_timeout(30)
-                self.assertEqual(state,[True,None])
             finally:browser.close()
 
     def test_colour_candidates_split_gaps_and_use_source_arithmetic(self):

@@ -94,7 +94,7 @@ def install_observer():
         except hover.HoverError as exc:
             trace,progress=exc.__traceback__,{}
             while trace is not None:
-                if trace.tb_frame.f_code.co_name=='_capture_column':
+                if trace.tb_frame.f_code.co_name in ('capture_column','_capture_column'):
                     scope=trace.tb_frame.f_locals
                     progress={'read_count':scope.get('read_count'),'rows_collected':len(scope.get('rows',[])),
                         'grid_count':scope.get('count'),'calibration_prices':[r['price'] for r in scope.get('calibration',[])],
@@ -125,10 +125,20 @@ def main():
     from hover_source_check import single,run_probe
     if args.single:
         if os.environ.get('COLLECTION_HEATMAP_MODEL')!=str(args.model):raise RuntimeError('Diagnostic model mismatch')
-        if args.model==3:install_observer()
+        if args.model==3:
+            # Test-only: stay within the existing CPU allowance rather than
+            # bursting across the host's CPUs and repeatedly hitting quota.
+            allowed=sorted(os.sched_getaffinity(0))
+            quota,period=Path('/sys/fs/cgroup/cpu.max').read_text().split()
+            if quota=='max':raise RuntimeError('Expected a measured CPU quota for this experiment')
+            count=max(1,min(len(allowed),int(quota)//int(period)))
+            os.sched_setaffinity(0,allowed[:count])
+            emit('cpu_affinity',{'host_allowed_cpus':len(allowed),'quota_cpu_count':int(quota)/int(period),
+                                'selected_cpu_count':len(os.sched_getaffinity(0))})
+            install_observer()
         single(args.model,args.single,args.output);return 0
     args.output.mkdir(parents=True,exist_ok=False);reports=[]
-    for model,tf in [(m,t) for m in (3,1,2) for t in ('48H','12H','24H')]:
+    for model,tf in [(3,'48H')]:
         dest=args.output/f'model{model}-{tf}'
         env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}
         run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--model',str(model),'--output',str(dest)],env)
