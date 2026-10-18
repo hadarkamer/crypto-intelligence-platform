@@ -15,14 +15,6 @@ def install_observer():
     sys.path.insert(0,str(HERE/'runtime'))
     import heatmap_hover as hover
     from capture_failure_observer import STATE_SCRIPT
-    from playwright.sync_api import Browser
-    new_context=Browser.new_context
-    def measured_context(browser,*args,**kwargs):
-        # Test-only controlled width experiment. Keep CSS pixels, height,
-        # timeframe, unmerged rows and all acceptance guards unchanged.
-        kwargs['viewport']={'width':1100,'height':1000}
-        return new_context(browser,*args,**kwargs)
-    Browser.new_context=measured_context
     original,original_close=hover.capture_column,hover.close_heatmap_settings
     def cpu_state():
         for path in ('/sys/fs/cgroup/cpu.stat','/sys/fs/cgroup/cpu/cpu.stat'):
@@ -70,6 +62,10 @@ def install_observer():
             self.page,self.samples=page,[]
             self.mouse=ObservedMouse(page.mouse,self.samples)
         def __getattr__(self,name):return getattr(self.page,name)
+        def wait_for_timeout(self,timeout):
+            start=time.monotonic()
+            try:return self.page.wait_for_timeout(timeout)
+            finally:self.samples.append({'operation':'driver_event_wait','ms':(time.monotonic()-start)*1000})
         def evaluate(self,expression,arg=None):
             start=time.monotonic()
             step='clear' if '=== null' in expression else 'expected' if 'replaceAll' in expression else 'show'
@@ -91,12 +87,14 @@ def install_observer():
         emit('before_reader',{'timeframe':kwargs['timeframe'],'state':page.evaluate(STATE_SCRIPT,3)})
         try:
             result=original(probe,image,geometry,**kwargs)
-            emit('reader_completed',{'timeframe':kwargs['timeframe'],'rows':len(result['rows'])})
+            emit('reader_completed',{'timeframe':kwargs['timeframe'],'rows':len(result['rows']),
+                'top_price':result['rows'][0]['price'],'bottom_price':result['rows'][-1]['price'],
+                'price_step':result['price_step'],'bounds':result['plot_bounds']})
             return result
         except hover.HoverError as exc:
             trace,progress=exc.__traceback__,{}
             while trace is not None:
-                if trace.tb_frame.f_code.co_name=='capture_column':
+                if trace.tb_frame.f_code.co_name=='_capture_column':
                     scope=trace.tb_frame.f_locals
                     progress={'read_count':scope.get('read_count'),'rows_collected':len(scope.get('rows',[])),
                         'grid_count':scope.get('count'),'calibration_prices':[r['price'] for r in scope.get('calibration',[])],
@@ -122,16 +120,18 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--single',choices=('12H','24H','48H'))
+    parser.add_argument('--model',type=int,choices=(1,2,3),default=3)
     args=parser.parse_args()
     from hover_source_check import single,run_probe
     if args.single:
-        if os.environ.get('COLLECTION_HEATMAP_MODEL')!='3':raise RuntimeError('Diagnostic must use Model 3')
-        install_observer();single(3,args.single,args.output);return 0
+        if os.environ.get('COLLECTION_HEATMAP_MODEL')!=str(args.model):raise RuntimeError('Diagnostic model mismatch')
+        if args.model==3:install_observer()
+        single(args.model,args.single,args.output);return 0
     args.output.mkdir(parents=True,exist_ok=False);reports=[]
-    for tf in ('48H','12H'):
-        dest=args.output/tf
-        env={**os.environ,'COLLECTION_HEATMAP_MODEL':'3','OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}
-        run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--output',str(dest)],env)
+    for model,tf in [(m,t) for m in (3,1,2) for t in ('48H','12H','24H')]:
+        dest=args.output/f'model{model}-{tf}'
+        env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}
+        run_probe([sys.executable,str(Path(__file__).resolve()),'--single',tf,'--model',str(model),'--output',str(dest)],env)
         report=json.loads((dest/'report.json').read_text());reports.append(report);emit('case_result',report)
         (args.output/'summary.json').write_text(json.dumps(reports,indent=2))
         if (report.get('source_capture_state') or {}).get('challenge_visible'):break

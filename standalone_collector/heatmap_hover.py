@@ -6,6 +6,7 @@ One vertical sweep covers the displayed latest column, not historical columns.
 from __future__ import annotations
 import copy
 import colorsys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -14,6 +15,7 @@ import math
 import re
 import statistics
 import time
+import uuid
 
 VERSION = 'displayed-hover.v1'
 MAX_ROWS = 1600
@@ -75,14 +77,6 @@ READ_TOOLTIP = r'''() => {
   const text=candidates[0].innerText;
   return text.length<=220 && text.includes('Liquidation Leverage') ? text : null;
 }'''
-
-READ_EXPECTED_TOOLTIP = r'''expected => {
-  const text = (''' + READ_TOOLTIP + r''')();
-  if(!text)return false;
-  const price=/\bPrice\s+(\d[\d,.]*)/.exec(text);
-  return price && Math.abs(Number(price[1].replaceAll(',',''))-expected)<0.025 ? text : false;
-}'''
-
 
 def plot_bounds(image_path, geometry):
     """Locate the large saturated heatmap rectangle within its saved canvas."""
@@ -202,7 +196,7 @@ def close_heatmap_settings(page):
     """
     panel = page.get_by_role('dialog', name='Heatmap settings', exact=True)
     count = panel.count()
-    if not count:
+    if not count or (count == 1 and not panel.is_visible()):
         return
     if count != 1:
         raise HoverError('hover_geometry_invalid')
@@ -211,7 +205,7 @@ def close_heatmap_settings(page):
         raise HoverError('hover_rows_merged')
     from playwright.sync_api import TimeoutError as BrowserTimeout
     try:
-        panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=1500)
+        panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=3000)
         if panel.is_visible():
             panel.wait_for(state='hidden', timeout=1500)
     except BrowserTimeout:
@@ -221,8 +215,68 @@ def close_heatmap_settings(page):
             raise
 
 
+@contextmanager
+def tooltip_updates(page):
+    """Deliver visible DOM changes without another renderer command per row.
+
+    Source timing measurements showed 300-400ms per renderer round-trip while
+    the predicate itself took about 1ms. Observe the same DOM text and keep all
+    downstream price/time checks; never access chart internals or source APIs.
+    """
+    state = [False, None]
+    prefix = '__collector_hover_' + uuid.uuid4().hex + ':'
+    def changed(message):
+        text = message.text
+        if not text.startswith(prefix) or len(text) > 1024:
+            return
+        try:
+            value = json.loads(text[len(prefix):])
+        except (ValueError, TypeError):
+            return
+        if value is None or (isinstance(value, str) and len(value) <= 220):
+            state[:] = [True, value]
+    # Console events are one-way. Exposed bindings would send an additional
+    # evaluate back to the busy renderer to resolve each callback's Promise.
+    # This private prefixed stream is consumed here, never printed or stored.
+    page.on('console', changed)
+    observer = None
+    try:
+        observer = page.evaluate_handle(r'''prefix => {
+            const read = (''' + READ_TOOLTIP + r''');
+            let previous = Symbol('initial');
+            const check = () => {
+                const value = read();
+                if (value !== previous) { previous=value; console.debug(prefix+JSON.stringify(value)); }
+            };
+            const observer = new MutationObserver(check);
+            observer.observe(document.documentElement, {subtree:true,childList:true,
+                characterData:true,attributes:true,attributeFilter:['style','class','hidden']});
+            check();
+            return observer;
+        }''', prefix)
+        yield state
+    finally:
+        page.remove_listener('console', changed)
+        try:
+            if observer is not None:
+                observer.evaluate('observer => observer.disconnect()')
+                observer.dispose()
+        except Exception:
+            # Capture owns the browser lifetime, including failure cleanup.
+            # A closed browser must not replace the original capture error.
+            pass
+
+
 def capture_column(page, image_path, geometry, *, model, timeframe):
     started = time.monotonic()
+    with tooltip_updates(page) as current_tooltip:
+        return _capture_column(page, image_path, geometry, model=model,
+                               timeframe=timeframe, started=started,
+                               current_tooltip=current_tooltip)
+
+
+def _capture_column(page, image_path, geometry, *, model, timeframe, started,
+                    current_tooltip):
     bounds = plot_bounds(image_path, geometry)
     # UTC makes both visible tooltip timestamp formats unambiguous.
     if page.evaluate('() => Intl.DateTimeFormat().resolvedOptions().timeZone') != 'UTC':
@@ -242,33 +296,27 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     scroll_y = page.evaluate('() => window.scrollY')
     x = bounds['right']-.25
     read_count = 0
-    def wait_for_tooltip(expression, *, arg=None, timeout_ms):
-        # One DOM evaluation per sample. The source returned visible values to
-        # evaluate while the separate wait_for_function mechanism timed out.
-        # Poll the SAME predicate inside this evaluation; return its value with
-        # no JSHandle round-trips, extra preflight read or animation-frame wait.
-        remaining = MAX_SECONDS - (time.monotonic()-started)
-        if remaining <= 0:
-            raise HoverError('hover_deadline')
-        result = page.evaluate(r"""({value, timeout}) => new Promise((resolve,reject) => {
-            const predicate = (""" + expression + r""");
-            const end = performance.now() + timeout;
-            function observe() {
-                try {
-                    const current = predicate(value);
-                    if (current) { resolve(current); return; }
-                    const left = end-performance.now();
-                    if (left <= 0) { resolve(null); return; }
-                    setTimeout(observe, Math.min(25,left));
-                } catch (error) { reject(error); }
-            }
-            observe();
-        })""", {'value': arg, 'timeout': max(1,min(timeout_ms,remaining*1000))})
-        if time.monotonic()-started > MAX_SECONDS:
-            raise HoverError('hover_deadline')
-        if not result:
-            raise HoverError('hover_update_timeout')
-        return result
+    def wait_for_tooltip(*, expected=None, clear=False, timeout_ms):
+        end = time.monotonic() + timeout_ms/1000
+        while True:
+            now = time.monotonic()
+            if now-started > MAX_SECONDS:
+                raise HoverError('hover_deadline')
+            seen, text = current_tooltip
+            if seen:
+                if clear and text is None:
+                    return
+                if not clear and text:
+                    match = re.search(r'\bPrice\s+(\d[\d,.]*)', text)
+                    if expected is None or (match and
+                        abs(float(match[1].replace(',',''))-expected)<.025):
+                        return text
+            remaining = min(end-now, MAX_SECONDS-(now-started))
+            if remaining <= 0:
+                raise HoverError('hover_update_timeout')
+            # Pump the local driver so DOM change events can arrive. This
+            # timer does not issue another evaluate into the busy renderer.
+            page.wait_for_timeout(min(25,remaining*1000))
 
     def read(y, expected=None):
         nonlocal read_count
@@ -278,11 +326,9 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
             # Calibration must observe disappearance before another pointer move.
             # Row centres have an expected price, so they need no leave/re-enter.
             page.mouse.move(0, 0)
-            wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+            wait_for_tooltip(clear=True, timeout_ms=450)
         page.mouse.move(x, y-scroll_y)
-        text = wait_for_tooltip(
-            READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
-            arg=expected, timeout_ms=700)
+        text = wait_for_tooltip(expected=expected, timeout_ms=700)
         read_count += 1
         row = parse_tooltip(text)
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]
