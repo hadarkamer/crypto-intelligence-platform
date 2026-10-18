@@ -91,6 +91,7 @@ def install_observer():
                     scope = trace.tb_frame.f_locals
                     progress = {'read_count': scope.get('read_count'),
                         'calibration_prices': [r['price'] for r in scope.get('calibration', [])],
+                        'calibration_times': [r['source_time'] for r in scope.get('calibration', [])],
                         'rows_collected': len(scope.get('rows', [])),
                         'bounds': scope.get('bounds'), 'grid_count': scope.get('count')}
                     del scope
@@ -98,6 +99,13 @@ def install_observer():
             emit('reader_failure', {'timeframe': kwargs['timeframe'],
                 'reason': exc.reason, 'timed_out_waits': len(probe.events), **progress})
             if not probe.events:
+                emit('page_state', {'timeframe': kwargs['timeframe'],
+                    'state': page.evaluate(STATE_SCRIPT, 3), 'tooltip': tooltip(page),
+                    'saved_geometry': geometry,
+                    'layout': page.evaluate('''() => ({scrollY:scrollY,
+                        canvases:[...document.querySelectorAll('canvas')].map(e=>{
+                            const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};
+                        }).filter(r=>r.width>400&&r.height>200).slice(0,4)})''')})
                 raise
             event = probe.events[-1]
             emit('reader_timeout', {'timeframe': kwargs['timeframe'],

@@ -209,8 +209,16 @@ def close_heatmap_settings(page):
     merged = panel.get_by_role('spinbutton', name='Merge Y ticks', exact=True)
     if merged.count() and merged.input_value() != '1':
         raise HoverError('hover_rows_merged')
-    panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=1500)
-    panel.wait_for(state='hidden', timeout=1500)
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+    try:
+        panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=1500)
+        if panel.is_visible():
+            panel.wait_for(state='hidden', timeout=1500)
+    except BrowserTimeout:
+        # The isolated source closed the drawer but its action wait timed out.
+        # Check the resulting state; never click again or ignore an open panel.
+        if panel.is_visible():
+            raise
 
 
 def capture_column(page, image_path, geometry, *, model, timeframe):
@@ -235,30 +243,32 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     x = bounds['right']-.25
     read_count = 0
     def wait_for_tooltip(expression, *, arg=None, timeout_ms):
-        # Model 3 can settle its DOM without satisfying a requestAnimationFrame
-        # waiter before its deadline. Poll on a timer, then check the actual DOM
-        # once at the deadline before rejecting the map. Do not add a redundant
-        # evaluate before every successful wait: that delays every row.
-        # The SAME predicate is used throughout: a visible old price never
-        # becomes an accepted new sample just because a wait timed out.
-        from playwright.sync_api import TimeoutError as BrowserTimeout
+        # One DOM evaluation per sample. The source returned visible values to
+        # evaluate while the separate wait_for_function mechanism timed out.
+        # Poll the SAME predicate inside this evaluation; return its value with
+        # no JSHandle round-trips, extra preflight read or animation-frame wait.
         remaining = MAX_SECONDS - (time.monotonic()-started)
         if remaining <= 0:
             raise HoverError('hover_deadline')
-        try:
-            handle = page.wait_for_function(expression, arg=arg,
-                timeout=max(1, min(timeout_ms, remaining*1000)), polling=25)
-            try:
-                return handle.json_value()
-            finally:
-                handle.dispose()
-        except BrowserTimeout:
-            if time.monotonic()-started > MAX_SECONDS:
-                raise HoverError('hover_deadline') from None
-            result = page.evaluate(expression, arg)
-            if result:
-                return result
-            raise HoverError('hover_update_timeout') from None
+        result = page.evaluate(r"""({value, timeout}) => new Promise((resolve,reject) => {
+            const predicate = (""" + expression + r""");
+            const end = performance.now() + timeout;
+            function observe() {
+                try {
+                    const current = predicate(value);
+                    if (current) { resolve(current); return; }
+                    const left = end-performance.now();
+                    if (left <= 0) { resolve(null); return; }
+                    setTimeout(observe, Math.min(25,left));
+                } catch (error) { reject(error); }
+            }
+            observe();
+        })""", {'value': arg, 'timeout': max(1,min(timeout_ms,remaining*1000))})
+        if time.monotonic()-started > MAX_SECONDS:
+            raise HoverError('hover_deadline')
+        if not result:
+            raise HoverError('hover_update_timeout')
+        return result
 
     def read(y, expected=None):
         nonlocal read_count
