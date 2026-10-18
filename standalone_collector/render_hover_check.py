@@ -51,7 +51,7 @@ def has_session(env):
         return False
 
 
-def publish_status(source_passed=False, diagnostic_only=False, models12=False, ai_check=False):
+def publish_status(source_passed=False, diagnostic_only=False, models12=False, ai_check=False, focused=False):
     if PUBLIC.is_symlink():
         raise RuntimeError('Public output must not be a symlink')
     if PUBLIC.exists():
@@ -64,6 +64,8 @@ def publish_status(source_passed=False, diagnostic_only=False, models12=False, a
         message = ('Models 1/2 source check completed.' if models12 else 'Model 3 diagnostic completed.') + ' See private build logs; full acceptance remains pending.'
     if ai_check:
         message = 'Three bounded GPT checks completed. See private build logs; full acceptance remains pending.'
+    if focused:
+        message = 'Two focused source repair checks completed. See private build logs; full acceptance remains pending.'
     isolation = ('No application database or background worker. At most three AI requests.'
                  if ai_check else 'No application database, AI calls or background worker.')
     (PUBLIC / 'index.html').write_text(
@@ -79,7 +81,7 @@ def publish_status(source_passed=False, diagnostic_only=False, models12=False, a
 
 def main():
     mode = os.environ.get('HOVER_CHECK_MODE', 'prepare')
-    if mode not in ('prepare', 'source', 'model3-diagnostic', 'models12', 'gpt-check'):
+    if mode not in ('prepare', 'source', 'model3-diagnostic', 'models12', 'gpt-check', 'focused'):
         raise RuntimeError('Invalid HOVER_CHECK_MODE')
     source_env = child_environment(source=True, ai=(mode == 'gpt-check'))
     if mode != 'prepare' and not has_session(source_env):
@@ -100,12 +102,14 @@ def main():
         publish_status(ai_check=True)
         print('ISOLATED_GPT_CHECK passed=true max_ai_calls=3 database_writes=0 worker_started=false', flush=True)
         return
-    if mode in ('model3-diagnostic','models12'):
+    if mode in ('model3-diagnostic','models12','focused'):
         command=[sys.executable, str(HERE / 'model3_hover_diagnostic.py'),
                         '--output', str(HERE / (mode+'-private'))]
         if mode=='models12':command.append('--models12')
+        if mode=='focused':command.append('--focused')
         subprocess.run(command,cwd=HERE.parent,env=source_env,check=True,timeout=1200 if mode=='models12' else 600)
-        if mode=='models12':publish_status(diagnostic_only=True,models12=True)
+        if mode=='focused':publish_status(focused=True)
+        elif mode=='models12':publish_status(diagnostic_only=True,models12=True)
         else:publish_status(diagnostic_only=True)
         return
     if mode == 'source':

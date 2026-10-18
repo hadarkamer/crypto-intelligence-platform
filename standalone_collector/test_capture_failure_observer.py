@@ -156,6 +156,8 @@ class ObserverTests(unittest.TestCase):
     def test_success_has_zero_observer_calls_and_one_original_image(self):
         page=self.page();page.evaluate.return_value=False;driver=self.capture_mocks(page)
         page.get_by_role.return_value.count.return_value=0  # No settings drawer in this successful fixture.
+        page.get_by_text.return_value.count.return_value=0  # No cookie banner.
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
         with tempfile.TemporaryDirectory() as directory,self.patches(page,driver),patch.object(capture,'HEATMAP_MODEL',3),patch.object(capture,'_select_timeframe') as selector,patch('model1_legend.prepare_legend_for_capture'),patch.object(capture,'wait_for_render',return_value={'ready':True,'reason':'render-checks-passed','label':'24 hour'}),patch.object(capture,'verify_saved_render'),patch.object(capture,'observe_capture_failure') as watch,patch('heatmap_hover.capture_column',return_value={'version':'displayed-hover.v1'}):
             selector.__name__='_select_timeframe'
             result=capture.capture_heatmaps(directory,timeframes=('24h',),url=MODEL3)

@@ -11,6 +11,18 @@ import render_hover_check as check
 
 
 class IsolationTests(unittest.TestCase):
+    def test_focused_repairs_only_two_cases_and_never_receive_ai_or_db(self):
+        import model3_hover_diagnostic as diagnostic
+        self.assertEqual(diagnostic.FOCUSED_CASES,((2,'12H'),(3,'48H')))
+        with patch.dict(os.environ, {'HOVER_CHECK_MODE':'focused','COINGLASS_COOKIE_HEADER':'synthetic=session',
+                'OPENAI_API_KEY':'synthetic-ai','DATABASE_URL':'synthetic-db'},clear=True), \
+                patch.object(check.subprocess,'run') as run,patch.object(check,'publish_status') as publish:
+            check.main()
+            self.assertIn('--focused',run.call_args.args[0])
+            self.assertEqual(run.call_args.kwargs['env']['OPENAI_API_KEY'],'')
+            self.assertEqual(run.call_args.kwargs['env']['DATABASE_URL'],'')
+            publish.assert_called_once_with(focused=True)
+
     def test_ai_key_reaches_only_explicit_ai_child(self):
         with patch.dict(os.environ, {'HOVER_CHECK_MODE':'gpt-check',
                 'COINGLASS_COOKIE_HEADER':'synthetic=session','OPENAI_API_KEY':'synthetic-ai',

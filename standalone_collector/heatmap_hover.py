@@ -221,6 +221,29 @@ def close_heatmap_settings(page):
             raise
 
 
+def require_cookie_banner_hidden(page):
+    # Observed CoinGlass/Termly banner copy, not the permanent footer link.
+    banner = page.get_by_text(re.compile(r'We use essential cookies to make our site work'))
+    if any(banner.nth(i).is_visible() for i in range(min(banner.count(), 3))):
+        raise HoverError('hover_cookie_overlay')
+
+
+def dismiss_cookie_banner(page):
+    """Use the consent UI once, and verify its result at evidence capture time."""
+    decline = page.locator('#termly-code-snippet-support').get_by_role('button', name='Decline', exact=True)
+    if decline.count() == 1 and decline.is_visible():
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        try:
+            decline.click(timeout=3000)
+            decline.wait_for(state='hidden', timeout=1500)
+        except BrowserTimeout:
+            # The action may have completed despite an actionability timeout.
+            # Never click a second time or accept a still-obscured screenshot.
+            if decline.is_visible():
+                raise HoverError('hover_cookie_overlay') from None
+    require_cookie_banner_hidden(page)
+
+
 def capture_column(page, image_path, geometry, *, model, timeframe):
     started = time.monotonic()
     # Model 3's live DOM/mouse operations cost about 0.3 s each on the
@@ -340,6 +363,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
         if row['price'] != bottom_row['price']:
             if abs(row['price']-bottom_row['price']-initial_step) > max(.025,initial_step*.002):
                 raise HoverError('hover_price_grid_gap')
+            last_inner = row
             last_boundary = (previous_y+target)/2
             break
         if any(row[k] != bottom_row[k] for k in ('value','unit','source_time')):
@@ -349,12 +373,18 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     height = (last_boundary-transitions[0])/(count-2)
     if height < 2 or any(abs(t-(transitions[0]+i*height))>1.1 for i,t in enumerate(transitions)):
         raise HoverError('hover_resolution_insufficient')
-    price_step = (top_row['price']-bottom_row['price'])/(count-1)
+    # Edge tooltip prices need not be exact points on the interior grid.
+    # Live Model 2/12H: 89264.50, 89070.97, 88877.24, 88683.51.
+    # Interpolating from 89264.50 shifted the already-verified second row.
+    # Use the first/last INTERIOR observations instead. Preserve both edge
+    # values verbatim and retain the existing gap and 0.025 price checks.
+    price_step = (calibration[1]['price']-last_inner['price'])/(count-3)
     rows = []
     positions = []
     for i in range(count):
         target = top_y if i==0 else bottom_y if i==count-1 else transitions[0]+(i-.5)*height
-        expected = top_row['price']-i*price_step
+        expected = (top_row['price'] if i==0 else bottom_row['price'] if i==count-1
+                    else calibration[1]['price']-(i-1)*price_step)
         row = calibration[i] if i<len(calibration) else bottom_row if i==count-1 else read(target,expected)
         if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))

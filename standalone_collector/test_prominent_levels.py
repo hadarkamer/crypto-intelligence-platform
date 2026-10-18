@@ -143,6 +143,13 @@ class ProminentTests(unittest.TestCase):
     def test_comma_formatted_exact_evidence(self):
         from prominent_levels import evidence
         self.assertEqual(evidence('Row: $77,420.50', [77420.5]),'Row: $77,420.50')
+    def test_sentence_period_is_punctuation_not_a_missing_axis_number(self):
+        from prominent_levels import evidence
+        text='Visible y-axis ticks: 78000 and 85000.'
+        self.assertEqual(evidence(text,[78000,85000]),text)
+        self.assertEqual(evidence('Price 80,567.54.',[80567.54]),'Price 80,567.54.')
+        for text,price in [('85000.5',85000),('85000.5.6',85000.5),('185000.',85000)]:
+            with self.assertRaises(StageFailure):evidence(text,[price])
     def test_estimate_requires_positive_covering_uncertainty(self):
         for changes in ({'uncertainty_usd':0},{'uncertainty_usd':.1},{'price_precision':'verified_label'},
             {'prices':[109]},{'price_low':110,'price_high':110}):

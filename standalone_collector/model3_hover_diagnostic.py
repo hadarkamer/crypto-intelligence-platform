@@ -1,5 +1,7 @@
 """Test-only source timing and resource sampling; no AI, database or worker."""
 import argparse
+import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import sys
 import time
 import threading
 HERE=Path(__file__).resolve().parent
+FOCUSED_CASES=((2,'12H'),(3,'48H'))
 
 def emit(kind,value):
     print(json.dumps({'diagnostic':kind,**value},separators=(',',':')),flush=True)
@@ -18,6 +21,18 @@ def install_observer():
     import heatmap_hover as hover
     from capture_failure_observer import STATE_SCRIPT
     original,original_close=hover.capture_column,hover.close_heatmap_settings
+    original_cookie=hover.dismiss_cookie_banner
+    def observed_cookie(page):
+        start=time.monotonic()
+        control=page.locator('#termly-code-snippet-support').get_by_role('button',name='Decline',exact=True)
+        before=control.count()==1 and control.is_visible()
+        try:
+            original_cookie(page)
+            emit('cookie_gate',{'visible_before':before,'hidden_after':True,'seconds':round(time.monotonic()-start,3)})
+        except hover.HoverError:
+            emit('cookie_gate',{'visible_before':before,'hidden_after':False})
+            raise
+    hover.dismiss_cookie_banner=observed_cookie
     def cpu_state():
         for path in ('/sys/fs/cgroup/cpu.stat','/sys/fs/cgroup/cpu/cpu.stat'):
             try:return {k:int(v) for k,v in (line.split() for line in Path(path).read_text().splitlines())}
@@ -89,6 +104,16 @@ def install_observer():
         emit('before_reader',{'model':kwargs['model'],'timeframe':kwargs['timeframe'],'state':page.evaluate(STATE_SCRIPT,kwargs['model'])})
         try:
             result=original(probe,image,geometry,**kwargs)
+            # Keep evidence only in private build logs; never serve it publicly.
+            from PIL import Image
+            with Image.open(image) as source:
+                picture=source.convert('RGB');picture.thumbnail((1400,1400));buffer=io.BytesIO()
+                picture.save(buffer,format='JPEG',quality=80);picture.close()
+            for name,data in (('map.jpg',buffer.getvalue()),('input-hover.json',json.dumps(result).encode())):
+                if len(data)>262144:raise ValueError('Diagnostic evidence too large')
+                encoded=base64.b64encode(data).decode();chunks=[encoded[i:i+6000] for i in range(0,len(encoded),6000)]
+                for index,chunk in enumerate(chunks):
+                    emit('source_artifact',{'model':kwargs['model'],'timeframe':kwargs['timeframe'],'name':name,'index':index,'count':len(chunks),'data':chunk})
             emit('reader_completed',{'timeframe':kwargs['timeframe'],'rows':len(result['rows']),
                 'top_price':result['rows'][0]['price'],'bottom_price':result['rows'][-1]['price'],
                 'price_step':result['price_step'],'bounds':result['plot_bounds']})
@@ -100,6 +125,8 @@ def install_observer():
                     scope=trace.tb_frame.f_locals
                     progress={'read_count':scope.get('read_count'),'rows_collected':len(scope.get('rows',[])),
                         'grid_count':scope.get('count'),'calibration_prices':[r['price'] for r in scope.get('calibration',[])],
+                        'top_price':(scope.get('top_row') or {}).get('price'),'bottom_price':(scope.get('bottom_row') or {}).get('price'),
+                        'inner_bottom_price':(scope.get('last_inner') or {}).get('price'),'expected_price':scope.get('expected'),
                         'calibration_times':[r['source_time'] for r in scope.get('calibration',[])]}
                     del scope
                 trace=trace.tb_next
@@ -149,6 +176,7 @@ def main():
     parser.add_argument('--single',choices=('12H','24H','48H'))
     parser.add_argument('--model',type=int,choices=(1,2,3),default=3)
     parser.add_argument('--models12',action='store_true',help='Only the six still-pending Model 1/2 cases')
+    parser.add_argument('--focused',action='store_true',help='Only Model 2/12H and Model 3/48H repair acceptance')
     args=parser.parse_args()
     from hover_source_check import single,run_probe
     if args.single:
@@ -156,7 +184,7 @@ def main():
         install_observer()
         single(args.model,args.single,args.output);return 0
     args.output.mkdir(parents=True,exist_ok=False);reports=[]
-    cases=[(m,t) for m in (1,2) for t in ('12H','24H','48H')] if args.models12 else [(3,'48H'),(3,'12H'),(3,'24H')]
+    cases=FOCUSED_CASES if args.focused else [(m,t) for m in (1,2) for t in ('12H','24H','48H')] if args.models12 else [(3,'48H'),(3,'12H'),(3,'24H')]
     for model,tf in cases:
         dest=args.output/f'model{model}-{tf}'
         env={**os.environ,'COLLECTION_HEATMAP_MODEL':str(model),'OPENAI_API_KEY':'','DATABASE_URL':'','COLLECTION_BRIDGE_ENABLED':'0'}

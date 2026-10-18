@@ -23,6 +23,8 @@ class CaptureDiagnosticsTests(unittest.TestCase):
         browser=driver.chromium.launch.return_value
         context=browser.new_context.return_value
         page=context.new_page.return_value
+        page.get_by_text.return_value.count.return_value=0  # No cookie banner.
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
         page.evaluate.return_value={'x':0,'y':20,'width':800,'height':600,'page_width':1000}
         return driver,browser,context,page
     def failure(self,operation):
