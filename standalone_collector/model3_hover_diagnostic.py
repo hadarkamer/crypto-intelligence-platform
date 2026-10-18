@@ -84,7 +84,20 @@ def install_observer():
                 'state': page.evaluate(STATE_SCRIPT, 3)})
             return result
         except hover.HoverError as exc:
-            if exc.reason != 'hover_update_timeout' or not probe.events:
+            trace = exc.__traceback__
+            progress = {}
+            while trace is not None:
+                if trace.tb_frame.f_code.co_name == 'capture_column':
+                    scope = trace.tb_frame.f_locals
+                    progress = {'read_count': scope.get('read_count'),
+                        'calibration_prices': [r['price'] for r in scope.get('calibration', [])],
+                        'rows_collected': len(scope.get('rows', [])),
+                        'bounds': scope.get('bounds'), 'grid_count': scope.get('count')}
+                    del scope
+                trace = trace.tb_next
+            emit('reader_failure', {'timeframe': kwargs['timeframe'],
+                'reason': exc.reason, 'timed_out_waits': len(probe.events), **progress})
+            if not probe.events:
                 raise
             event = probe.events[-1]
             emit('reader_timeout', {'timeframe': kwargs['timeframe'],
@@ -114,6 +127,8 @@ def install_observer():
                 raise
             # Diagnostic observations only. Preserve the original failure;
             # neither these samples nor any timeout can become acceptance data.
+            if exc.reason != 'hover_update_timeout':
+                raise
             for label, px, py in [('same', x, y), ('left3', x-3, y),
                                   ('left10', x-10, y), ('down2', x, y+2),
                                   ('up2', x, y-2)]:
@@ -153,7 +168,8 @@ def main():
         return 0
     args.output.mkdir(parents=True, exist_ok=False)
     reports = []
-    for tf in ('12H', '24H', '48H'):
+    # This follow-up diagnoses only the remaining 48H case; no repeat of 12H/24H.
+    for tf in ('48H',):
         dest = args.output / tf
         env = {**os.environ, 'COLLECTION_HEATMAP_MODEL': '3',
                'OPENAI_API_KEY': '', 'DATABASE_URL': '', 'COLLECTION_BRIDGE_ENABLED': '0'}
