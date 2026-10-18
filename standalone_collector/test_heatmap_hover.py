@@ -222,7 +222,9 @@ class HoverTests(unittest.TestCase):
                         # DOM updates continue while animation-frame callbacks
                         # never run. Timer polling must still read every row.
                         fixture=fixture.replace('<script>', '<script>window.requestAnimationFrame=()=>0;')
-                        fixture=fixture.replace("t.style.display='none';};", "setTimeout(()=>t.style.display='none',80);};")
+                        fixture=fixture.replace('let pending;', 'let pending,hidePending;')
+                        fixture=fixture.replace('c.onmousemove=e=>{', 'c.onmousemove=e=>{clearTimeout(hidePending);')
+                        fixture=fixture.replace("t.style.display='none';};", "hidePending=setTimeout(()=>t.style.display='none',80);};")
                     if mode=='changed-time':
                         fixture=fixture.replace("t.innerText='"+stamp+" Price '",
                             "t.innerText=(row===14?'2020-01-01 00:00':'"+stamp+"')+' Price '")
