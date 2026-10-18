@@ -7,7 +7,17 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
-    attach_measurements, model_content, plot_bounds, capture_column, HoverError)
+    attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
+    READ_TOOLTIP, HoverError)
+
+REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
+           'confidence':'high','basis':'last_candle_axis_bracket'}
+
+def proposed(levels):
+    return {'scans':[{'current_price_range':REFERENCE,'prominent_levels':levels}]}
+
+def candidate(ids, identifier='c0'):
+    return {'id':identifier,'source_row_ids':ids,'row_colour':'green','shape':'range','intensity':'normal'}
 
 
 def rows():
@@ -50,13 +60,14 @@ class HoverTests(unittest.TestCase):
             with self.assertRaises(HoverError):validate_rows(value)
 
     def test_pool_sum_matches_site_merge_and_does_not_trust_ai_numbers(self):
-        snapshot={'rows':rows(),'total_value':7270000,'unit':'source_metric'}
-        level={'source_row_ids':['r1','r2'],'shape':'range','side':'above','confidence':'high',
+        snapshot={'rows':rows(),'total_value':7270000,'unit':'source_metric','candidates':[candidate(['r1','r2'])]}
+        level={'candidate_id':'c0','shape':'range','side':'below','confidence':'high','row_colour':'green','intensity':'normal',
                'price_low':1,'price_high':999999,'source_value':999999999}
-        raw={'scans':[{'prominent_levels':[level]}]}
+        raw=proposed([level])
         grounded=ground_analysis(raw,snapshot)
         p=grounded['scans'][0]['prominent_levels'][0]
         self.assertEqual((p['price_low'],p['price_high']),(82147.19,82236.48))
+        self.assertEqual(p['side'],'above')  # Code classifies using the validated reference.
         result={'zones':[dict(p)],'source_url':'https://www.coinglass.com/liquidation-heatmap-model3?coin=BTC&type=symbol',
                 'captured_at':'2026-10-17T12:06:00Z','run_id':'test','observed_price_range':{'low':81000,'high':81100}}
         result=attach_measurements(result,grounded,snapshot,image=b'image')
@@ -66,10 +77,12 @@ class HoverTests(unittest.TestCase):
         self.assertEqual(raw['scans'][0]['prominent_levels'][0]['price_low'],1)
 
     def test_pool_cannot_overlap_skip_rows_or_upgrade_uncertain_selection(self):
-        base={'shape':'range','side':'above','confidence':'high','source_row_ids':['r0','r1']}
-        for levels in [[base,base], [{**base,'source_row_ids':['r0','r2']}],
-                       [{**base,'source_row_ids':['r9']}], [{**base,'confidence':'medium'}]]:
-            with self.assertRaises(HoverError):ground_analysis({'scans':[{'prominent_levels':levels}]},{'rows':rows()})
+        base={'candidate_id':'c0','shape':'range','side':'above','confidence':'high','row_colour':'green','intensity':'normal'}
+        for ids,levels in [(['r0','r1'],[base,base]), (['r0','r2'],[base]),
+                          (['r9'],[base]), (['r0','r1'],[{**base,'confidence':'medium'}]),
+                          (['r0','r1'],[{**base,'row_colour':'yellow'}]), (['r0','r1'],[])]:
+            with self.assertRaises(HoverError):
+                ground_analysis(proposed(levels),{'rows':rows(),'candidates':[candidate(ids)]})
 
     def test_plot_finder_ignores_legend_and_white_page(self):
         from PIL import Image,ImageDraw
@@ -89,6 +102,7 @@ class HoverTests(unittest.TestCase):
         self.assertLess(capture.index('hover_snapshot = capture_column'),capture.index('context.close()'))
         task=(runtime/'collection_model1_task.py').read_text()
         self.assertEqual(task.count('raw = analyze_heatmap_images('),1)
+        self.assertLess(task.index('prepare_candidates(images)'),task.index('raw = analyze_heatmap_images('))
         self.assertIn('attach_measurements(result, raw',task)
         bridge=(runtime/'collection_bridge.py').read_text()
         self.assertIn("result->'hover_snapshot'->>'version'='displayed-hover.v1'",bridge)
@@ -98,7 +112,7 @@ class HoverTests(unittest.TestCase):
         from playwright.sync_api import sync_playwright
         stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
         html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
-        <div id="tip" style="position:absolute;left:630px;top:50px;display:none"></div>
+        <div id="tip" class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
         <script>
         const canvas=document.querySelector('canvas'),tip=document.querySelector('#tip');
         const ctx=canvas.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
@@ -116,6 +130,67 @@ class HoverTests(unittest.TestCase):
                 self.assertEqual(snap['total_value'],465000000)
                 self.assertEqual([r['price'] for r in snap['rows']],list(range(1000,970,-1)))
                 self.assertLess(snap['duration_seconds'],55)
+                self.assertLess(snap['tooltip_reads'],85)  # 300 pixels, only 30 native rows.
+            finally:browser.close()
+
+    def test_complete_observed_tooltip_keeps_timestamp_and_ignores_hidden_ancestors(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page()
+                # Actual Model 1/2 DOM shape: the old leaf-div selector lost the timestamp.
+                page.set_content('''<div class="cg-toolti-box"><div>18 Oct 2026, 16:30</div>
+                    <div><div>Price</div><div>83037.18</div><div>Liquidation Leverage</div><div>37.84M</div></div></div>
+                    <div style="opacity:0"><div class="cg-toolti-box">2026-10-18 16:30 Price 1 Liquidation Leverage 2M</div></div>''')
+                text=page.evaluate(READ_TOOLTIP)
+                self.assertEqual(parse_tooltip(text)['value'],37840000)
+                self.assertEqual(parse_tooltip(text)['source_time'],'2026-10-18T16:30:00Z')
+            finally:browser.close()
+
+    def test_colour_candidates_split_gaps_and_use_source_arithmetic(self):
+        from PIL import Image,ImageDraw
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'bands.png';im=Image.new('RGB',(500,240),(68,1,84));draw=ImageDraw.Draw(im)
+            data=[]
+            for i in range(12):
+                row=parse_tooltip(f'2026-10-18 16:30 Price {1000-i} Liquidation Leverage {i+1}.00M')
+                row.update(id=f'r{i}',time_text='2026-10-18 16:30',y_fraction=(i*20+10)/239);data.append(row)
+            for i in (1,2,4):draw.rectangle((0,i*20,499,i*20+19),fill=(253,231,37))
+            for i in (6,7,8):draw.rectangle((0,i*20,499,i*20+19),fill=(53,183,121))
+            im.save(path)
+            snapshot={'rows':data,'plot_bounds':{'left':0,'right':499,'top':0,'bottom':239},
+                      'row_height_pixels':20,'total_value':78e6}
+            pools=candidate_pools(snapshot,path)
+            self.assertEqual([p['source_row_ids'] for p in pools],[['r1','r2'],['r4'],['r6','r7','r8']])
+            self.assertEqual([p['source_value'] for p in pools],[5e6,5e6,24e6])
+            self.assertAlmostEqual(pools[0]['percent'],5/78*100)
+
+    def test_direct_sweep_waits_for_changed_price_and_rejects_stuck_tooltip(self):
+        from playwright.sync_api import sync_playwright
+        stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
+        <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
+        <script>(()=>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box');let pending;
+        const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
+        c.onmousemove=e=>{clearTimeout(pending);const row=Math.min(29,Math.floor(e.offsetY/10));
+          if(STUCK && row===14)return;
+          pending=setTimeout(()=>{t.style.display='block';t.innerText='STAMP Price '+(1000-row)+' Liquidation Leverage 1.00M';},45);};
+        c.onmouseleave=()=>{clearTimeout(pending);t.style.display='none';};})();</script>'''.replace('STAMP',stamp)
+        with sync_playwright() as pw,tempfile.TemporaryDirectory() as temp:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
+                for stuck in (False,True):
+                    page.set_content(html.replace('STUCK',str(stuck).lower()))
+                    path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
+                    if stuck:
+                        with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
+                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
+                    else:
+                        snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
+                        self.assertEqual(len(snapshot['rows']),30)
+                        self.assertEqual(snapshot['total_value'],30000000)
             finally:browser.close()
 
 

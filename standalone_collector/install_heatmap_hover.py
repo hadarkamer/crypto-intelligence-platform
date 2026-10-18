@@ -23,22 +23,24 @@ def install(runtime: Path):
         '        content.extend(model_content(image))')
     text += '''
 _hover_level = HEATMAP_SCHEMA['properties']['scans']['items']['properties']['prominent_levels']['items']
-_hover_level['properties']['source_row_ids'] = {'type':'array','minItems':1,'maxItems':1600,'items':{'type':'string','pattern':'^r[0-9]+$'}}
-_hover_level['required'].append('source_row_ids')
+_hover_level['properties']['candidate_id'] = {'type':'string','pattern':'^c[0-9]+$'}
+_hover_level['required'].append('candidate_id')
 SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
     'Never fabricate a tooltip or row label absent from the PNG.',
-    'Use numeric tooltip evidence only from the supplied verified hover table; never invent it.')
+    'Use numeric tooltip evidence only from the supplied computed candidate table; never invent it.')
 SYSTEM_PROMPT += """
-The verified hover row table supplements the same screenshot. For each selected
-visual pool, return source_row_ids matching its location in the image, using
-y_fraction (0=plot top, 1=bottom) and exact displayed prices. Select every row
-inside a continuous pool; do not skip intervening rows or reuse rows across pools.
-A thin yellow point selects one row. A continuous range selects two or more.
-Never widen a visual pool to collect more value. Existing colour rules remain:
-yellow=many, green=normal; arithmetic never upgrades green to yellow.
-Tooltip table prices are valid numeric source evidence even when not printed in
-the screenshot. They supersede axis interpolation for selected rows. The code
-will replace selected pool prices and calculate values from their source IDs.
+Candidate pools were located in the same screenshot and calculated from a
+complete current-column DOM hover sweep. Return exactly one prominent_levels
+entry for EVERY candidate_id. Visually verify its y_top/y_bottom (0=plot top,
+1=bottom), colour and continuity. If any candidate is not supported by the image,
+mark confidence=low; never silently omit it or widen its boundaries. The code
+will reject disagreement rather than present uncertain quantities as verified.
+Keep the supplied shape, intensity and prices for confirmed candidates. Existing
+colour rules remain: yellow=many, green=normal. Arithmetic never upgrades green
+to yellow. The source_row_ids, sums, percentages and exact prices are calculated
+by code before this request. Do not recalculate, invent or replace them.
+The current price reference is still an honest visual range from the last candle;
+never substitute a candidate price, hover price or convenient midpoint for it.
 Liquidation Leverage in source_metric units is NOT a verified dollar amount.
 Do not call the displayed column total all market liquidity, a historical sum,
 or actual realized liquidations. Do not invent dollar totals or percentages.
@@ -48,6 +50,10 @@ or actual realized liquidations. Do not invent dollar totals or percentages.
 
     path = runtime/'collection_model1_task.py'
     text = path.read_text()
+    text = once(text, "    stage('analysis')\n",
+        "    from heatmap_hover import prepare_candidates\n"
+        "    prepare_candidates(images)\n"
+        "    stage('analysis')\n")
     text = once(text, '    remember_analysis(raw)',
         "    from heatmap_hover import ground_analysis, attach_measurements\n"
         "    raw = ground_analysis(raw, images[0]['hover_snapshot'])\n"

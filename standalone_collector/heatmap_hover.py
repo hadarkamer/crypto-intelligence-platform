@@ -1,10 +1,11 @@
 """Read displayed tooltips in the existing browser; never infer money from pixels.
 
-Pixels locate the plot only. Prices and quantities come from rendered DOM text.
+Pixels locate the plot and candidate bands. Numbers come from rendered DOM text.
 One vertical sweep covers the displayed latest column, not historical columns.
 """
 from __future__ import annotations
 import copy
+import colorsys
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -59,13 +60,27 @@ def parse_tooltip(text):
 
 # Only visible DOM content. No framework state, canvas internals or private API.
 READ_TOOLTIP = r'''() => {
-  const candidates = [...document.querySelectorAll('div')].filter(e => {
-    const t=e.innerText || ''; if(t.length>220 || !t.includes('Liquidation Leverage') || !/\bPrice\b/.test(t))return false;
-    const r=e.getBoundingClientRect(),s=getComputedStyle(e);
-    return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden' && Number(s.opacity)>0;
+  const candidates = [...document.querySelectorAll('.cg-toolti-box')].filter(e => {
+    const r=e.getBoundingClientRect();
+    if(!r.width || !r.height || r.bottom<=0 || r.top>=innerHeight)return false;
+    for(let n=e;n;n=n.parentElement){
+      const s=getComputedStyle(n);
+      if(s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0)return false;
+    }
+    return true;
   });
-  const leaves=candidates.filter(e=>!candidates.some(other=>other!==e && e.contains(other)));
-  return leaves.length===1 ? leaves[0].innerText : null;
+  // Models 1/2 put the timestamp outside the inner Price/Leverage wrapper.
+  // Read the complete observed tooltip, never its innermost matching div.
+  if(candidates.length!==1)return null;
+  const text=candidates[0].innerText;
+  return text.length<=220 && text.includes('Liquidation Leverage') ? text : null;
+}'''
+
+READ_EXPECTED_TOOLTIP = r'''expected => {
+  const text = (''' + READ_TOOLTIP + r''')();
+  if(!text)return false;
+  const price=/\bPrice\s+(\d[\d,.]*)/.exec(text);
+  return price && Math.abs(Number(price[1].replaceAll(',',''))-expected)<0.025 ? text : false;
 }'''
 
 
@@ -152,67 +167,161 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
     page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
     x = bounds['right']-.25
-    rows = []
-    first = None
-    step = 1
-    last_change_y = None
-    pixel_spans = []
-    def read(y):
+    read_count = 0
+    def read(y, expected=None):
+        nonlocal read_count
         if time.monotonic()-started > MAX_SECONDS:
             raise HoverError('hover_deadline')
-        # Force the previous tooltip to leave before reading the next one.
-        page.mouse.move(0, 0)
-        page.wait_for_function('() => ('+READ_TOOLTIP+')() === null', timeout=450)
-        page.mouse.move(x, y-scroll_y)
-        handle = page.wait_for_function(READ_TOOLTIP, timeout=700, polling='raf')
-        text = handle.json_value(); handle.dispose()
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        try:
+            if expected is None:
+                # Only calibration clears the tooltip. Row centres below have an
+                # expected price, so a stale previous tooltip cannot pass.
+                page.mouse.move(0, 0)
+                page.wait_for_function('() => ('+READ_TOOLTIP+')() === null', timeout=450)
+            page.mouse.move(x, y-scroll_y)
+            handle = page.wait_for_function(
+                READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
+                arg=expected, timeout=700, polling='raf')
+            text = handle.json_value(); handle.dispose()
+        except BrowserTimeout:
+            raise HoverError('hover_update_timeout') from None
+        read_count += 1
         row = parse_tooltip(text)
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]
         return row
-    y = bounds['top']+.25
-    while y <= bounds['bottom']:
-        row = read(y)
-        if rows and row['price'] == rows[-1]['price']:
-            if any(row[k] != rows[-1][k] for k in ('value','source_time','unit')):
-                raise HoverError('hover_snapshot_changed')
-        else:
-            if rows and row['price'] >= rows[-1]['price']:
-                raise HoverError('hover_row_order')
-            if last_change_y is not None:
-                pixel_spans.append(y-last_change_y)
-                # The first row may be clipped at the upper plot boundary.
-                # Subsequent rows must span at least two screen pixels; otherwise
-                # regular skipped subpixel rows could masquerade as a complete grid.
-                if len(pixel_spans)>1 and pixel_spans[-1]<2:
-                    raise HoverError('hover_resolution_insufficient')
-            last_change_y = y
-            row.update(id=f'r{len(rows)}', y_fraction=round((y-bounds['top'])/(bounds['bottom']-bounds['top']),6))
-            rows.append(row)
-            if first is None: first = (y, row.copy())
-            if len(rows) > MAX_ROWS: raise HoverError('hover_row_count')
-            if len(pixel_spans) >= 4:
-                step = max(1, min(4, math.floor(min(pixel_spans)/2)))
-        next_y = min(y+step, float(bounds['bottom']))
-        if next_y == y: break
+
+    top_y, bottom_y = bounds['top']+.25, float(bounds['bottom'])
+    top_row = read(top_y)
+    calibration = [top_row]
+    transitions = []
+    y = top_y
+    # Establish the native price step without skipping any screen pixel. Stop
+    # after three complete transitions; do not sweep the whole plot this way.
+    while len(calibration) < 4:
+        next_y = y+1
+        if next_y >= bottom_y or next_y-top_y > 120:
+            raise HoverError('hover_resolution_insufficient')
+        row = read(next_y)
+        if row['price'] != calibration[-1]['price']:
+            transitions.append((y+next_y)/2)
+            calibration.append(row)
+        elif any(row[k] != calibration[-1][k] for k in ('value','unit','source_time')):
+            raise HoverError('hover_snapshot_changed')
         y = next_y
-    price_step = validate_rows(rows)
-    # Subpixel source rows cannot be exhaustively sampled using screen positions.
-    if (bounds['bottom']-bounds['top'])/(len(rows)-1) < 1:
+    for i,row in enumerate(calibration):row['id']=f'r{i}'
+    initial_step = validate_rows(calibration)
+    if min(b-a for a,b in zip(transitions,transitions[1:])) < 2:
         raise HoverError('hover_resolution_insufficient')
-    final_anchor = read(first[0])
-    if any(final_anchor[k] != first[1][k] for k in ('price','value','source_time','unit')):
-        raise HoverError('hover_snapshot_changed')
+
+    bottom_row = read(bottom_y)
+    count = round((top_row['price']-bottom_row['price'])/initial_step)+1
+    if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
+    # Locate the last boundary too. This prevents a one-pixel calibration error
+    # from accumulating across the whole height of the chart.
+    previous_y = bottom_y
+    last_boundary = None
+    for offset in range(1,122):
+        target = bottom_y-offset
+        if target <= top_y:break
+        row = read(target)
+        if row['price'] != bottom_row['price']:
+            if abs(row['price']-bottom_row['price']-initial_step) > max(.025,initial_step*.002):
+                raise HoverError('hover_price_grid_gap')
+            last_boundary = (previous_y+target)/2
+            break
+        if any(row[k] != bottom_row[k] for k in ('value','unit','source_time')):
+            raise HoverError('hover_snapshot_changed')
+        previous_y = target
+    if last_boundary is None:raise HoverError('hover_resolution_insufficient')
+    height = (last_boundary-transitions[0])/(count-2)
+    if height < 2 or any(abs(t-(transitions[0]+i*height))>1.1 for i,t in enumerate(transitions)):
+        raise HoverError('hover_resolution_insufficient')
+    price_step = (top_row['price']-bottom_row['price'])/(count-1)
+    rows = []
+    positions = []
+    for i in range(count):
+        target = top_y if i==0 else bottom_y if i==count-1 else transitions[0]+(i-.5)*height
+        expected = top_row['price']-i*price_step
+        row = calibration[i] if i<len(calibration) else bottom_row if i==count-1 else read(target,expected)
+        if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
+        row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
+        rows.append(row);positions.append(target)
+    price_step = validate_rows(rows)
+    # Recheck distributed anchors after the sweep. A refresh must fail this
+    # observation rather than combine values from different source moments.
+    for i in (0,len(rows)//2,len(rows)-1):
+        anchor = read(positions[i],rows[i]['price'])
+        if any(anchor[k] != rows[i][k] for k in ('price','value','source_time','unit')):
+            raise HoverError('hover_snapshot_changed')
     observed = datetime.fromisoformat(rows[0]['source_time'].replace('Z','+00:00'))
     age = (datetime.now(timezone.utc)-observed).total_seconds()
-    if not -120 <= age <= 1200: raise HoverError('hover_source_stale')
-    page.mouse.move(0, 0)
-    return {'version': VERSION, 'metric': METRIC, 'unit': rows[0]['unit'],
-            'scope': 'displayed_latest_column', 'heatmap_model': model,
-            'timeframe': timeframe.upper(), 'source_time': rows[0]['source_time'],
-            'complete': True, 'price_step': price_step, 'rows': rows,
-            'total_value': float(sum(Decimal(str(r['value'])) for r in rows)),
-            'rounding_error': float(sum(Decimal(str(r['rounding_error'])) for r in rows)),
-            'duration_seconds': round(time.monotonic()-started,3)}
+    if not -120 <= age <= 1200:raise HoverError('hover_source_stale')
+    page.mouse.move(0,0)
+    return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
+            'scope':'displayed_latest_column','heatmap_model':model,
+            'timeframe':timeframe.upper(),'source_time':rows[0]['source_time'],
+            'complete':True,'price_step':price_step,'rows':rows,
+            'total_value':float(sum(Decimal(str(r['value'])) for r in rows)),
+            'rounding_error':float(sum(Decimal(str(r['rounding_error'])) for r in rows)),
+            'tooltip_reads':read_count,'row_height_pixels':round(height,3),'plot_bounds':bounds,
+            'duration_seconds':round(time.monotonic()-started,3)}
+
+
+def candidate_pools(snapshot, image_path):
+    """Locate classic-palette bands; calculate only from the verified rows.
+
+    Candidates still require visual confirmation in the existing single GPT call.
+    Three samples within each row reduce boundary/candlestick pixel noise. A gap
+    or colour change always splits a band; no interpolation creates quantities.
+    """
+    from PIL import Image
+    validate_rows(snapshot['rows'])
+    bounds = snapshot['plot_bounds']
+    x = math.floor(bounds['right']-.25)
+    height = snapshot['row_height_pixels']
+    def colour(rgb):
+        h,s,v=colorsys.rgb_to_hsv(*(c/255 for c in rgb))
+        if .13 <= h < .24 and s >= .45 and v >= .55:return 'yellow'
+        if .24 <= h < .48 and s >= .45 and v >= .4:return 'green'
+        if .48 <= h < .66 and s >= .45 and v >= .35:return 'blue'
+        return None
+    groups=[]
+    with Image.open(image_path) as original:
+        image=original.convert('RGB')
+        try:
+            for row in snapshot['rows']:
+                y=bounds['top']+row['y_fraction']*(bounds['bottom']-bounds['top'])
+                samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*height))))))
+                         for d in (-.2,0,.2)]
+                label=next((c for c in ('yellow','green','blue') if samples.count(c)>=2),None)
+                if row['value']==0:label=None
+                if groups and groups[-1][0]==label:groups[-1][1].append(row)
+                else:groups.append((label,[row]))
+        finally:image.close()
+    prominent=any(label=='yellow' or (label=='green' and len(members)>1) for label,members in groups)
+    pools=[]
+    for label,members in groups:
+        if label is None or (label=='green' and len(members)<2) or (label=='blue' and prominent):continue
+        value=float(sum(Decimal(str(r['value'])) for r in members))
+        pools.append({'id':f'c{len(pools)}','row_colour':label,
+            'shape':'point' if len(members)==1 else 'range',
+            'intensity':{'yellow':'many','green':'normal','blue':'few'}[label],
+            'source_row_ids':[r['id'] for r in members],
+            'price_low':members[-1]['price'],'price_high':members[0]['price'],
+            'y_top':members[0]['y_fraction'],'y_bottom':members[-1]['y_fraction'],
+            'source_value':value,
+            'rounding_error':float(sum(Decimal(str(r['rounding_error'])) for r in members)),
+            'percent':value/snapshot['total_value']*100 if snapshot['total_value'] else None})
+    if not 1 <= len(pools) <= 40:raise HoverError('hover_candidates_unresolved')
+    return pools
+
+
+def prepare_candidates(images):
+    # Called after capture_heatmaps returns and its browser is closed.
+    for image in images:
+        snapshot=image['hover_snapshot']
+        snapshot['candidates']=candidate_pools(snapshot,image['image'])
 
 
 def model_content(image):
@@ -220,9 +329,10 @@ def model_content(image):
     if not snapshot: return []
     validate_rows(snapshot['rows'])
     payload = {k: snapshot[k] for k in ('version','metric','unit','scope','source_time','total_value')}
-    payload['rows'] = [{k:r[k] for k in ('id','price','value','y_fraction')} for r in snapshot['rows']]
-    return [{'type':'input_text','text':'Verified displayed hover rows from this same map. '
-             'Select source_row_ids for each visual pool. Prices and arithmetic will be enforced by code. '
+    payload['candidates'] = snapshot['candidates']
+    return [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
+             'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
+             'If any boundary, colour or continuity is wrong, mark that candidate confidence=low. '
              'source_metric is NOT verified USD. Total covers the displayed current column only.\n'+json.dumps(payload)}]
 
 
@@ -231,12 +341,23 @@ def ground_analysis(raw, snapshot):
     result = copy.deepcopy(raw)
     scans = result.get('scans')
     if not isinstance(scans,list) or len(scans)!=1: raise HoverError('hover_analysis_shape')
+    from model1_price_range import validate_price_range
+    current=validate_price_range(scans[0].get('current_price_range'))
+    candidates={p['id']:p for p in snapshot['candidates']}
+    selected=scans[0].get('prominent_levels')
+    if (not isinstance(selected,list) or len(selected)!=len(candidates)
+        or {p.get('candidate_id') for p in selected}!=set(candidates)):
+        raise HoverError('hover_candidate_missing')
     used = set()
     by_id = {r['id']:r for r in snapshot['rows']}
-    for level in scans[0].get('prominent_levels',[]):
+    for level in selected:
         if level.get('confidence') != 'high':
             raise HoverError('hover_pool_uncertain')
-        ids = level.get('source_row_ids')
+        candidate=candidates[level['candidate_id']]
+        if any(level.get(k)!=candidate[k] for k in ('row_colour','shape','intensity')):
+            raise HoverError('hover_candidate_disagreement')
+        ids = candidate['source_row_ids']
+        level['source_row_ids']=ids
         if not isinstance(ids,list) or not ids or len(ids)!=len(set(ids)) or any(i not in by_id for i in ids):
             raise HoverError('hover_pool_rows_invalid')
         members = sorted((by_id[i] for i in ids), key=lambda r:r['price'])
@@ -256,6 +377,10 @@ def ground_analysis(raw, snapshot):
             prices=[low] if len(members)==1 else [],
             price_precision='verified_label',evidence_basis='tooltip',uncertainty_usd=0,
             confidence='high',price_evidence=f"Price {low} — Price {high}; displayed tooltip rows {ids[0]} to {ids[-1]}")
+        # Classification is arithmetic against the fully validated reference
+        # range. The normalizer still omits pools intersecting that range.
+        if low>current['high']:level['side']='above'
+        elif high<current['low']:level['side']='below'
     return result
 
 

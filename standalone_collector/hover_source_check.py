@@ -39,10 +39,13 @@ def single(model,timeframe,directory):
     report={'model':model,'timeframe':timeframe,'ai_calls':0,'database_writes':0}
     try:
         images=capture_heatmaps(directory,timeframes=(timeframe.lower(),))
+        from heatmap_hover import prepare_candidates
+        prepare_candidates(images)
         snapshot=images[0]['hover_snapshot']
         report.update(status='captured',rows=len(snapshot['rows']),unit=snapshot['unit'],
             total_value=snapshot['total_value'],source_time=snapshot['source_time'],
-            hover_seconds=snapshot['duration_seconds'],coverage=snapshot['scope'])
+            hover_seconds=snapshot['duration_seconds'],coverage=snapshot['scope'],
+            tooltip_reads=snapshot['tooltip_reads'],candidate_pools=len(snapshot['candidates']))
         (directory/'hover.json').write_text(json.dumps(snapshot))
     except Exception as exc:
         report.update(status='failed',code=classify(exc),**failure_detail(exc))

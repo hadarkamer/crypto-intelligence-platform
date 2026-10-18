@@ -114,7 +114,7 @@ def prepare():
         'numeric_reader':'displayed-hover.v1',
         'quantity_scope':'displayed latest column; explicit units only; rounded source values',
         'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
-        'analysis':'one bounded model request per new observation',
+        'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
         'identity':'strict model-specific source, schema, screenshot label and job',
         'price_reference':'explicit visual range or validated legacy point; no fake midpoint',
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
