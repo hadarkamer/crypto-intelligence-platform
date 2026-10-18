@@ -44,6 +44,12 @@ def install(runtime: Path):
     path = runtime/'market_vision/coinglass_heatmap_capture.py'
     text = path.read_text()
     text = once(text, "'locale': 'en-US',", "'locale': 'en-US', 'timezone_id': 'UTC',")
+    text = once(text, "                with capture_operation('chart_geometry'):\n",
+        "                if HEATMAP_MODEL == 3:\n"
+        "                    from heatmap_hover import close_heatmap_settings\n"
+        "                    with capture_operation('overlay_dismissal'):\n"
+        "                        close_heatmap_settings(page)\n"
+        "                with capture_operation('chart_geometry'):\n")
     anchor = '                    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)\n'
     text = once(text, anchor, anchor+
         "                from heatmap_hover import capture_column\n"

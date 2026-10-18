@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
-    READ_TOOLTIP, HoverError, price_overlay_point)
+    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -99,6 +99,7 @@ class HoverTests(unittest.TestCase):
         capture=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
         self.assertEqual(capture.count('page.screenshot('),1)
         self.assertIn("'timezone_id': 'UTC'",capture)
+        self.assertLess(capture.index('close_heatmap_settings(page)'),capture.index('chart_rect = page.evaluate'))
         self.assertLess(capture.index('hover_snapshot = capture_column'),capture.index('context.close()'))
         task=(runtime/'collection_model1_task.py').read_text()
         self.assertEqual(task.count('raw = analyze_heatmap_images('),1)
@@ -106,6 +107,28 @@ class HoverTests(unittest.TestCase):
         self.assertIn('attach_measurements(result, raw',task)
         bridge=(runtime/'collection_bridge.py').read_text()
         self.assertIn("result->'hover_snapshot'->>'version'='displayed-hover.v1'",bridge)
+
+    def test_settings_close_preserves_inputs_and_other_dialogs(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page()
+                page.set_content('''<section role="dialog" aria-label="Heatmap settings">
+                    <input aria-label="Merge Y ticks" type="number" value="1">
+                    <button aria-label="Close heatmap settings" onclick="this.parentElement.style.display='none'">X</button>
+                    </section><section role="dialog" aria-label="Log in">Log in to unlock full data</section>''')
+                page.get_by_label('Merge Y ticks').fill('2')
+                with self.assertRaisesRegex(HoverError,'hover_rows_merged'):
+                    close_heatmap_settings(page)
+                self.assertTrue(page.get_by_role('dialog',name='Heatmap settings').is_visible())
+                page.get_by_label('Merge Y ticks').fill('1')
+                close_heatmap_settings(page)
+                self.assertFalse(page.get_by_role('dialog',name='Heatmap settings').is_visible())
+                self.assertEqual(page.get_by_label('Merge Y ticks').input_value(),'1')
+                self.assertTrue(page.get_by_role('dialog',name='Log in').is_visible())
+                close_heatmap_settings(page)  # Already closed: no further action.
+            finally:browser.close()
 
     def test_plot_finder_excludes_time_navigator_in_same_canvas(self):
         # Live Model 1/12H observation: the plot ended at y=674, but the
