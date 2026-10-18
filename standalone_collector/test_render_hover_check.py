@@ -5,12 +5,87 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import render_hover_check as check
 
 
 class IsolationTests(unittest.TestCase):
+    def test_ai_key_reaches_only_explicit_ai_child(self):
+        with patch.dict(os.environ, {'HOVER_CHECK_MODE':'gpt-check',
+                'COINGLASS_COOKIE_HEADER':'synthetic=session','OPENAI_API_KEY':'synthetic-ai',
+                'OPENAI_MARKET_SCANNER_MODEL':'test-model','DATABASE_URL':'synthetic-db',
+                'SUPABASE_SERVICE_ROLE_KEY':'synthetic-secret'}, clear=True), \
+                patch.object(check.subprocess,'run') as run, patch.object(check,'publish_status') as publish:
+            check.main()
+            self.assertEqual(run.call_count,3)
+            for call in run.call_args_list[:2]:
+                self.assertEqual(call.kwargs['env']['OPENAI_API_KEY'],'')
+                self.assertNotIn('COINGLASS_COOKIE_HEADER',call.kwargs['env'])
+            env=run.call_args.kwargs['env']
+            self.assertEqual(env['OPENAI_API_KEY'],'synthetic-ai')
+            self.assertEqual(env['OPENAI_MARKET_SCANNER_MODEL'],'test-model')
+            self.assertEqual(env['DATABASE_URL'],'')
+            self.assertNotIn('SUPABASE_SERVICE_ROLE_KEY',env)
+            self.assertIn('hover_ai_check.py',str(run.call_args.args[0]))
+            publish.assert_called_once_with(ai_check=True)
+
+    def test_ai_missing_key_stops_before_source_or_build(self):
+        with patch.dict(os.environ, {'HOVER_CHECK_MODE':'gpt-check','COINGLASS_COOKIE_HEADER':'x=y'}, clear=True), \
+                patch.object(check.subprocess,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'key missing'):check.main()
+            run.assert_not_called()
+
+    def test_api_transport_blocks_other_destinations_redirects_and_retries(self):
+        from hover_ai_check import OneRequest, ENDPOINT
+        post=Mock(return_value=Mock(status_code=200));guard=OneRequest(post)
+        with self.assertRaises(RuntimeError):guard('https://example.invalid',allow_redirects=False)
+        with self.assertRaises(RuntimeError):guard(ENDPOINT)
+        self.assertEqual(guard.calls,0)
+        guard(ENDPOINT,allow_redirects=False)
+        with self.assertRaises(RuntimeError):guard(ENDPOINT,allow_redirects=False)
+        self.assertEqual(guard.calls,1);post.assert_called_once()
+
+    def test_transport_failure_still_consumes_one_request_budget(self):
+        from hover_ai_check import OneRequest, ENDPOINT
+        post=Mock(side_effect=OSError('synthetic'));guard=OneRequest(post)
+        with self.assertRaises(OSError):guard(ENDPOINT,allow_redirects=False)
+        with self.assertRaises(RuntimeError):guard(ENDPOINT,allow_redirects=False)
+        post.assert_called_once()
+
+    def test_ai_runner_exact_cases_continues_after_timeout_without_retry(self):
+        import hover_ai_check as ai
+        calls=[]
+        def probe(command,env,timeout):
+            index=command.index('--single');calls.append((int(command[index+1]),command[index+2]))
+            self.assertEqual(timeout,300);self.assertEqual(env['DATABASE_URL'],'')
+            if len(calls)==1:raise subprocess.TimeoutExpired(command,timeout)
+            dest=Path(command[-1]);dest.mkdir(parents=True)
+            (dest/'report.json').write_text(json.dumps({'status':'validated','ai_calls':1}))
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('sys.argv',['check','--output',temp+'/cases']), \
+                patch('hover_source_check.run_probe',side_effect=probe),patch.object(ai,'emit'):
+            self.assertEqual(ai.main(),1)
+        self.assertEqual(calls,[(1,'12H'),(2,'24H'),(3,'48H')])
+
+    def test_ai_runner_stops_on_auth_error(self):
+        import hover_ai_check as ai
+        def probe(command,env,timeout):
+            dest=Path(command[-1]);dest.mkdir(parents=True)
+            (dest/'report.json').write_text(json.dumps({'status':'failed','code':'analysis_unauthorized'}))
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('sys.argv',['check','--output',temp+'/cases']), \
+                patch('hover_source_check.run_probe',side_effect=probe) as run,patch.object(ai,'emit'):
+            self.assertEqual(ai.main(),1);run.assert_called_once()
+
+    def test_ai_public_status_is_accurate_and_contains_no_results(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(check,'PUBLIC',Path(temp)/'public'):
+            check.publish_status(ai_check=True)
+            page=(check.PUBLIC/'index.html').read_text()
+            self.assertIn('At most three AI requests',page)
+            self.assertNotIn('No application database, AI calls',page)
+            self.assertEqual([p.name for p in check.PUBLIC.iterdir()],['index.html'])
+
     def test_models12_runs_six_distinct_cases_and_continues_after_one_failure(self):
         import model3_hover_diagnostic as diagnostic
         calls=[]

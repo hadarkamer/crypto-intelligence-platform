@@ -20,7 +20,7 @@ OS_KEYS = ('PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ',
 AUTH_KEYS = ('COINGLASS_COOKIE_HEADER', 'COINGLASS_STORAGE_STATE_JSON')
 
 
-def child_environment(source=False):
+def child_environment(source=False, ai=False):
     # An allowlist prevents accidentally inheriting production or AI credentials.
     env = {key: os.environ[key] for key in OS_KEYS if key in os.environ}
     env.update(PYTHONUNBUFFERED='1', COLLECTION_BRIDGE_ENABLED='0',
@@ -28,6 +28,12 @@ def child_environment(source=False):
                MODEL1_NETWORK_DIAGNOSTICS='0')
     if source:
         env.update({key: os.environ[key] for key in AUTH_KEYS if key in os.environ})
+    if ai:
+        if not source or not os.environ.get('OPENAI_API_KEY', '').strip():
+            raise RuntimeError('Authorized AI key missing; no request was started')
+        env['OPENAI_API_KEY'] = os.environ['OPENAI_API_KEY']
+        if os.environ.get('OPENAI_MARKET_SCANNER_MODEL'):
+            env['OPENAI_MARKET_SCANNER_MODEL'] = os.environ['OPENAI_MARKET_SCANNER_MODEL']
     return env
 
 
@@ -45,7 +51,7 @@ def has_session(env):
         return False
 
 
-def publish_status(source_passed=False, diagnostic_only=False, models12=False):
+def publish_status(source_passed=False, diagnostic_only=False, models12=False, ai_check=False):
     if PUBLIC.is_symlink():
         raise RuntimeError('Public output must not be a symlink')
     if PUBLIC.exists():
@@ -56,12 +62,16 @@ def publish_status(source_passed=False, diagnostic_only=False, models12=False):
                'Preparation passed. No source scans have been run by this build.')
     if diagnostic_only:
         message = ('Models 1/2 source check completed.' if models12 else 'Model 3 diagnostic completed.') + ' See private build logs; full acceptance remains pending.'
+    if ai_check:
+        message = 'Three bounded GPT checks completed. See private build logs; full acceptance remains pending.'
+    isolation = ('No application database or background worker. At most three AI requests.'
+                 if ai_check else 'No application database, AI calls or background worker.')
     (PUBLIC / 'index.html').write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="robots" content="noindex,nofollow">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>Isolated hover check</title><main><h1>Isolated hover check</h1>'
-        f'<p>{message}</p><p>No application database, AI calls or background worker.</p>'
+        f'<p>{message}</p><p>{isolation}</p>'
         '<p>Build resources differ from the production collector. '
         'This does not establish production memory limits or full application readiness.</p>'
         '</main></html>', encoding='utf-8')
@@ -69,9 +79,9 @@ def publish_status(source_passed=False, diagnostic_only=False, models12=False):
 
 def main():
     mode = os.environ.get('HOVER_CHECK_MODE', 'prepare')
-    if mode not in ('prepare', 'source', 'model3-diagnostic', 'models12'):
+    if mode not in ('prepare', 'source', 'model3-diagnostic', 'models12', 'gpt-check'):
         raise RuntimeError('Invalid HOVER_CHECK_MODE')
-    source_env = child_environment(source=True)
+    source_env = child_environment(source=True, ai=(mode == 'gpt-check'))
     if mode != 'prepare' and not has_session(source_env):
         raise RuntimeError('Source session missing; no source scan was started')
     if mode == 'source' and (PRIVATE.exists() or PRIVATE.is_symlink()):
@@ -81,6 +91,15 @@ def main():
                    env=build_env, check=True, timeout=900)
     subprocess.run([sys.executable, '-m', 'unittest', 'test_render_hover_check', '-q'],
                    cwd=HERE, env=build_env, check=True, timeout=60)
+    if mode == 'gpt-check':
+        subprocess.run([sys.executable, str(HERE / 'hover_ai_check.py'),
+                        '--output', str(HERE / 'gpt-check-private')],
+                       cwd=HERE.parent, env=source_env, check=True, timeout=960)
+        # Even when successful, GPT artifacts stay private. Do not reuse the
+        # source-only public success message, which asserts zero AI calls.
+        publish_status(ai_check=True)
+        print('ISOLATED_GPT_CHECK passed=true max_ai_calls=3 database_writes=0 worker_started=false', flush=True)
+        return
     if mode in ('model3-diagnostic','models12'):
         command=[sys.executable, str(HERE / 'model3_hover_diagnostic.py'),
                         '--output', str(HERE / (mode+'-private'))]
