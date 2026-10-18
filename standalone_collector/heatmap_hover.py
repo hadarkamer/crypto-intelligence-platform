@@ -198,6 +198,8 @@ def close_heatmap_settings(page):
     """Close only the observed Model 3 settings drawer before image/geometry.
 
     Its normal Close button preserves settings while restoring the plot width.
+    Keyboard activation does not depend on two rendered frames for mouse
+    stability; Model 3 can render too slowly on the one-CPU collector.
     Account, consent and other dialogs are outside this function's scope.
     """
     panel = page.get_by_role('dialog', name='Heatmap settings', exact=True)
@@ -210,13 +212,16 @@ def close_heatmap_settings(page):
     if merged.count() and merged.input_value() != '1':
         raise HoverError('hover_rows_merged')
     from playwright.sync_api import TimeoutError as BrowserTimeout
+    close = panel.get_by_role('button', name='Close heatmap settings', exact=True)
+    if not close.is_visible() or not close.is_enabled():
+        raise HoverError('hover_geometry_invalid')
     try:
-        panel.get_by_role('button', name='Close heatmap settings', exact=True).click(timeout=3000)
+        close.press('Enter', timeout=3000)
         if panel.is_visible():
             panel.wait_for(state='hidden', timeout=1500)
     except BrowserTimeout:
         # The isolated source closed the drawer but its action wait timed out.
-        # Check the resulting state; never click again or ignore an open panel.
+        # Check the resulting state; never activate again or ignore an open panel.
         if panel.is_visible():
             raise
 
@@ -232,9 +237,12 @@ def dismiss_cookie_banner(page):
     """Use the consent UI once, and verify its result at evidence capture time."""
     decline = page.locator('#termly-code-snippet-support').get_by_role('button', name='Decline', exact=True)
     if decline.count() == 1 and decline.is_visible():
+        if not decline.is_enabled():
+            raise HoverError('hover_cookie_overlay')
         from playwright.sync_api import TimeoutError as BrowserTimeout
         try:
-            decline.click(timeout=3000)
+            # The same ordinary UI action without frame-dependent mouse waits.
+            decline.press('Enter', timeout=3000)
             decline.wait_for(state='hidden', timeout=1500)
         except BrowserTimeout:
             # The action may have completed despite an actionability timeout.

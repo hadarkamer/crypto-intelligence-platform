@@ -140,13 +140,41 @@ class HoverTests(unittest.TestCase):
             page=Mock();panel=page.get_by_role.return_value
             panel.count.return_value=1
             merged=Mock();merged.count.return_value=0
-            close=Mock();close.click.side_effect=BrowserTimeout('synthetic delayed action')
+            close=Mock();close.is_visible.return_value=True;close.is_enabled.return_value=True
+            close.press.side_effect=BrowserTimeout('synthetic delayed action')
             panel.get_by_role.side_effect=lambda role,**kwargs: merged if role=='spinbutton' else close
             panel.is_visible.side_effect=[True,still_visible]
             if still_visible:
                 with self.assertRaises(BrowserTimeout):close_heatmap_settings(page)
             else:close_heatmap_settings(page)
-            close.click.assert_called_once()
+            close.press.assert_called_once_with('Enter',timeout=3000)
+            close.click.assert_not_called()
+
+    def test_settings_close_refuses_hidden_or_disabled_control(self):
+        for visible,enabled in ((False,True),(True,False)):
+            page=Mock();panel=page.get_by_role.return_value
+            panel.count.return_value=1;panel.is_visible.return_value=True
+            merged=Mock();merged.count.return_value=0
+            close=Mock();close.is_visible.return_value=visible;close.is_enabled.return_value=enabled
+            panel.get_by_role.side_effect=lambda role,**kwargs:merged if role=='spinbutton' else close
+            with self.assertRaisesRegex(HoverError,'hover_geometry_invalid'):
+                close_heatmap_settings(page)
+            close.press.assert_not_called()
+
+    def test_settings_keyboard_activation_preserves_source_click_handler(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page()
+                page.set_content('''<section role="dialog" aria-label="Heatmap settings">
+                    <input aria-label="Merge Y ticks" type="number" value="1">
+                    <button aria-label="Close heatmap settings" onclick="window.activation={trusted:event.isTrusted,key:document.activeElement===this};this.parentElement.remove()">X</button>
+                    </section>''')
+                close_heatmap_settings(page)
+                self.assertEqual(page.evaluate('window.activation'),{'trusted':True,'key':True})
+                self.assertEqual(page.get_by_role('dialog',name='Heatmap settings').count(),0)
+            finally:browser.close()
 
     def test_plot_finder_excludes_time_navigator_in_same_canvas(self):
         # Live Model 1/12H observation: the plot ended at y=674, but the
@@ -249,14 +277,19 @@ class HoverTests(unittest.TestCase):
                 for sticky in (False,True):
                     page.set_content('''<button id="other" onclick="this.textContent='WRONG'">Accept</button>
                     <div id="termly-code-snippet-support"><p>We use essential cookies to make our site work.</p>
-                    <button onclick="this.dataset.clicks=Number(this.dataset.clicks||0)+1;CLOSE">Decline</button></div>'''
+                    <button onclick="window.cookieTrusted=event.isTrusted;this.dataset.clicks=Number(this.dataset.clicks||0)+1;CLOSE">Decline</button></div>'''
                         .replace('CLOSE','' if sticky else "setTimeout(()=>this.parentElement.remove(),60)"))
                     if sticky:
                         with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page)
                         self.assertEqual(page.get_by_role('button',name='Decline').get_attribute('data-clicks'),'1')
                     else:
                         dismiss_cookie_banner(page);require_cookie_banner_hidden(page)
+                    self.assertTrue(page.evaluate('window.cookieTrusted'))
                     self.assertEqual(page.locator('#other').inner_text(),'Accept')
+                page.set_content('''<div id="termly-code-snippet-support"><p>We use essential cookies to make our site work.</p>
+                    <button disabled onclick="window.wrongActivation=true">Decline</button></div>''')
+                with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page)
+                self.assertIsNone(page.evaluate('window.wrongActivation'))
                 page.set_content('<p>We use essential cookies to make our site work.</p>')
                 with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):require_cookie_banner_hidden(page)
                 page.set_content('<a>Cookie Preferences</a>');dismiss_cookie_banner(page)

@@ -21,7 +21,7 @@ def install():
 
         def __getattr__(self, name):
             method = getattr(self.actual, name)
-            if name not in ('count', 'is_visible', 'click', 'wait_for'):
+            if name not in ('count', 'is_visible', 'is_enabled', 'click', 'press', 'wait_for'):
                 return method
 
             def observe(*args, **kwargs):

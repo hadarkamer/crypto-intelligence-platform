@@ -1,0 +1,781 @@
+{
+  "collector_fix_commit": "0b6ab49a71d1238ff91b12d640bc7accaa742b02",
+  "production_commit": "cf2413f6a34ff9cac33e27e957990eeab2c3c0f7",
+  "production_service": "decision-hub-model1-collector",
+  "runtime": {
+    "cpu": 1,
+    "memory_gib": 2
+  },
+  "source_cases_this_session": 4,
+  "models12_started": false,
+  "ai_calls": 0,
+  "application_writes": 0,
+  "deploys": 0,
+  "facts": {
+    "model3-close-facts-20261019.json": {
+      "status": "failed",
+      "code": "source_timeout",
+      "capture_phase": "overlay_dismissal",
+      "total_seconds": 55.293,
+      "guard_reason": null,
+      "peak_mib": {
+        "anon": 468.01,
+        "file": 534.15,
+        "kernel": 34.05,
+        "sock": 0.32,
+        "current": 1034.73
+      },
+      "control_state": {
+        "phase": "close_control_state",
+        "control": {
+          "panel": {
+            "connected": true,
+            "rect": {
+              "x": 1280,
+              "y": 326,
+              "width": 299,
+              "height": 844
+            },
+            "style": {
+              "display": "block",
+              "visibility": "visible",
+              "opacity": "1",
+              "pointerEvents": "auto",
+              "position": "absolute",
+              "transform": "none"
+            }
+          },
+          "closeCount": 1,
+          "close": [
+            {
+              "tag": "BUTTON",
+              "label": "Close heatmap settings",
+              "title": null,
+              "connected": true,
+              "disabled": false,
+              "ariaDisabled": null,
+              "rect": {
+                "x": 1531,
+                "y": 343,
+                "width": 32,
+                "height": 32
+              },
+              "style": {
+                "display": "flex",
+                "visibility": "visible",
+                "opacity": "1",
+                "pointerEvents": "auto",
+                "position": "relative",
+                "transform": "none"
+              },
+              "hitTarget": true,
+              "hitWithinPanel": true,
+              "hitWithinCookieBanner": false,
+              "animations": [],
+              "ancestors": [
+                {
+                  "tag": "DIV",
+                  "rect": {
+                    "x": 1296,
+                    "y": 342,
+                    "width": 267,
+                    "height": 34
+                  },
+                  "style": {
+                    "display": "flex",
+                    "visibility": "visible",
+                    "opacity": "1",
+                    "pointerEvents": "auto",
+                    "position": "static",
+                    "transform": "none"
+                  }
+                },
+                {
+                  "tag": "DIV",
+                  "rect": {
+                    "x": 1280,
+                    "y": 326,
+                    "width": 299,
+                    "height": 844
+                  },
+                  "style": {
+                    "display": "block",
+                    "visibility": "visible",
+                    "opacity": "1",
+                    "pointerEvents": "auto",
+                    "position": "absolute",
+                    "transform": "none"
+                  }
+                },
+                {
+                  "tag": "DIV",
+                  "rect": {
+                    "x": 1279,
+                    "y": 326,
+                    "width": 300,
+                    "height": 844
+                  },
+                  "style": {
+                    "display": "block",
+                    "visibility": "visible",
+                    "opacity": "1",
+                    "pointerEvents": "auto",
+                    "position": "relative",
+                    "transform": "none"
+                  }
+                },
+                {
+                  "tag": "DIV",
+                  "rect": {
+                    "x": 20,
+                    "y": 325,
+                    "width": 1560,
+                    "height": 846
+                  },
+                  "style": {
+                    "display": "flex",
+                    "visibility": "visible",
+                    "opacity": "1",
+                    "pointerEvents": "auto",
+                    "position": "static",
+                    "transform": "none"
+                  }
+                },
+                {
+                  "tag": "DIV",
+                  "rect": {
+                    "x": 20,
+                    "y": 225,
+                    "width": 1560,
+                    "height": 946
+                  },
+                  "style": {
+                    "display": "block",
+                    "visibility": "visible",
+                    "opacity": "1",
+                    "pointerEvents": "auto",
+                    "position": "static",
+                    "transform": "none"
+                  }
+                }
+              ]
+            }
+          ],
+          "buttonLabels": [
+            {
+              "tag": "BUTTON",
+              "label": "Close heatmap settings",
+              "title": null
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Classic",
+              "title": "Classic"
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Warm",
+              "title": "Warm"
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Ocean",
+              "title": "Ocean"
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Rose / Mint",
+              "title": "Rose / Mint"
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Amber / Azure",
+              "title": "Amber / Azure"
+            },
+            {
+              "tag": "BUTTON",
+              "label": "Violet / Lime",
+              "title": "Violet / Lime"
+            },
+            {
+              "tag": "BUTTON",
+              "label": null,
+              "title": null
+            },
+            {
+              "tag": "BUTTON",
+              "label": null,
+              "title": null
+            },
+            {
+              "tag": "BUTTON",
+              "label": null,
+              "title": null
+            },
+            {
+              "tag": "BUTTON",
+              "label": null,
+              "title": null
+            }
+          ],
+          "scrollY": 0,
+          "viewport": {
+            "width": 1600,
+            "height": 1000
+          },
+          "visibilityState": "visible"
+        },
+        "frame_sample": {
+          "frames": 1,
+          "elapsed_ms": 782.0999994277954,
+          "visibilityState": "visible"
+        },
+        "seconds": 2.9935
+      },
+      "finished": true
+    },
+    "model3-keyboard-facts-20261019.json": {
+      "status": "failed",
+      "code": "source_capture_failed",
+      "validation_reason": "hover_cookie_overlay",
+      "capture_phase": "screenshot",
+      "total_seconds": 60.925,
+      "guard_reason": null,
+      "peak_mib": {
+        "anon": 476.94,
+        "file": 508.12,
+        "kernel": 33.21,
+        "sock": 0.93,
+        "current": 986.69
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "finished": true,
+      "events": [
+        {
+          "phase": "settings_close",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.1109
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.6911
+        },
+        {
+          "phase": "settings_close",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.6972
+        },
+        {
+          "phase": "settings_close",
+          "operation": "input_value",
+          "status": "completed",
+          "seconds": 0.7829
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.7061
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_enabled",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.0097
+        },
+        {
+          "phase": "settings_close",
+          "operation": "press",
+          "status": "failed",
+          "seconds": 3.0822,
+          "exception_class": "TimeoutError"
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": false,
+          "seconds": 0.0186
+        },
+        {
+          "phase": "settings_close",
+          "operation": "finished"
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.8149
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.0037
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "click",
+          "status": "failed",
+          "seconds": 3.0834,
+          "exception_class": "TimeoutError"
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.2091
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "finished"
+        }
+      ]
+    },
+    "model3-keyboard-flags-20261019.json": [
+      {
+        "phase": "settings_close",
+        "role": "button",
+        "operation": "press",
+        "status": "failed",
+        "exception_class": "TimeoutError",
+        "click_failure": "action_timeout",
+        "call_log_flags": {
+          "click_action_started": false,
+          "click_action_done": false,
+          "waiting_navigation": false,
+          "waiting_visible": false,
+          "waiting_locator": false
+        },
+        "seconds": 3.0822
+      },
+      {
+        "phase": "cookie_dismissal",
+        "role": "button",
+        "operation": "click",
+        "status": "failed",
+        "exception_class": "TimeoutError",
+        "click_failure": "action_timeout",
+        "call_log_flags": {
+          "click_action_started": false,
+          "click_action_done": false,
+          "waiting_navigation": false,
+          "waiting_visible": true,
+          "waiting_locator": true
+        },
+        "seconds": 3.0834
+      }
+    ],
+    "model3-controls-facts-20261019.json": {
+      "status": "failed",
+      "total_seconds": 180.163,
+      "guard_reason": "bounded_runtime_timeout",
+      "peak_mib": {
+        "anon": 467.98,
+        "file": 545.97,
+        "kernel": 34.73,
+        "sock": 0.05,
+        "current": 1019.72
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "finished": true,
+      "events": [
+        {
+          "phase": "settings_close",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.3065
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 1.0944
+        },
+        {
+          "phase": "settings_close",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.6989
+        },
+        {
+          "phase": "settings_close",
+          "operation": "input_value",
+          "status": "completed",
+          "seconds": 0.707
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.7049
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_enabled",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.0064
+        },
+        {
+          "phase": "settings_close",
+          "operation": "press",
+          "status": "completed",
+          "seconds": 2.3012
+        },
+        {
+          "phase": "settings_close",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": false,
+          "seconds": 0.0824
+        },
+        {
+          "phase": "settings_close",
+          "operation": "finished"
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "count",
+          "status": "completed",
+          "value": 1,
+          "seconds": 0.0043
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.0077
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "is_enabled",
+          "status": "completed",
+          "value": true,
+          "seconds": 0.7916
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "press",
+          "status": "completed",
+          "seconds": 1.6004
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "wait_for",
+          "status": "failed",
+          "seconds": 1.5819,
+          "exception_class": "TimeoutError"
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "is_visible",
+          "status": "completed",
+          "value": false,
+          "seconds": 0.1228
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "count",
+          "status": "completed",
+          "value": 0,
+          "seconds": 0.8975
+        },
+        {
+          "phase": "cookie_dismissal",
+          "operation": "finished"
+        }
+      ]
+    },
+    "model3-controls-resource-facts-20261019.json": {
+      "cpu_delta": {
+        "usage_usec": 179496218,
+        "user_usec": 160065059,
+        "system_usec": 19431159,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 1802,
+        "nr_throttled": 1796,
+        "throttled_usec": 610423174,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "phase": {
+        "format_version": "execution-progress.v1",
+        "stage": "capture",
+        "elapsed_seconds": 62.83,
+        "capture_phase": "hover_collection",
+        "capture_operations": [
+          {
+            "phase": "browser_launch",
+            "status": "completed",
+            "duration_seconds": 0.19
+          },
+          {
+            "phase": "browser_context",
+            "status": "completed",
+            "duration_seconds": 0.02
+          },
+          {
+            "phase": "source_session_setup",
+            "status": "completed",
+            "duration_seconds": 0.07
+          },
+          {
+            "phase": "page_creation",
+            "status": "completed",
+            "duration_seconds": 0.04
+          },
+          {
+            "phase": "navigation",
+            "status": "completed",
+            "duration_seconds": 1.27
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 1.79
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.11
+          },
+          {
+            "phase": "model_selection",
+            "status": "completed",
+            "duration_seconds": 2.48
+          },
+          {
+            "phase": "symbol_selection",
+            "status": "completed",
+            "duration_seconds": 3.01
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 3.5
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 1.49
+          },
+          {
+            "phase": "timeframe_selection",
+            "status": "completed",
+            "duration_seconds": 1.49
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.71
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 4.31
+          },
+          {
+            "phase": "render_settle",
+            "status": "completed",
+            "duration_seconds": 0.58
+          },
+          {
+            "phase": "legend_preparation",
+            "status": "completed",
+            "duration_seconds": 11.61
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 5.99
+          },
+          {
+            "phase": "chart_geometry",
+            "status": "completed",
+            "duration_seconds": 0.72
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.9
+          },
+          {
+            "phase": "screenshot",
+            "status": "completed",
+            "duration_seconds": 11.67
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.85
+          }
+        ],
+        "heatmap_model": 3,
+        "timeframe": "48H"
+      },
+      "health_ok": true,
+      "store_ready": true
+    },
+    "model3-profile-facts-20261019.json": {
+      "status": "failed",
+      "code": "source_capture_failed",
+      "validation_reason": "hover_deadline",
+      "capture_phase": "hover_collection",
+      "total_seconds": 192.97,
+      "guard_reason": null,
+      "peak_mib": {
+        "anon": 471.09,
+        "file": 566.16,
+        "kernel": 35.36,
+        "sock": 3.65,
+        "current": 1042.43
+      },
+      "cpu_delta": {
+        "usage_usec": 191624344,
+        "user_usec": 170606137,
+        "system_usec": 21018207,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 1930,
+        "nr_throttled": 1912,
+        "throttled_usec": 658817366,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "source_capture_state": {
+        "observation_status": "unavailable",
+        "source_identity": "canonical",
+        "reason": "unverified"
+      },
+      "finished": true,
+      "hover_final": [
+        {
+          "phase": "hover",
+          "operations": {
+            "evaluate": {
+              "count": 3,
+              "seconds": 1.3155,
+              "max_seconds": 0.8074
+            },
+            "mouse.move": {
+              "count": 75,
+              "seconds": 57.1286,
+              "max_seconds": 0.911
+            },
+            "tooltip_clear": {
+              "count": 33,
+              "seconds": 27.6237,
+              "max_seconds": 1.6784
+            },
+            "tooltip_show": {
+              "count": 33,
+              "seconds": 26.2969,
+              "max_seconds": 0.8985
+            },
+            "tooltip_expected": {
+              "count": 8,
+              "seconds": 6.239,
+              "max_seconds": 0.8134
+            }
+          }
+        }
+      ],
+      "hover_last_progress": [
+        {
+          "phase": "hover_progress",
+          "elapsed": 115.405,
+          "next_operation": "mouse.move",
+          "tooltip_returns": 38,
+          "operations": {
+            "evaluate": {
+              "count": 3,
+              "seconds": 1.3155,
+              "max_seconds": 0.8074
+            },
+            "mouse.move": {
+              "count": 71,
+              "seconds": 54.7472,
+              "max_seconds": 0.911
+            },
+            "tooltip_clear": {
+              "count": 33,
+              "seconds": 27.6237,
+              "max_seconds": 1.6784
+            },
+            "tooltip_show": {
+              "count": 33,
+              "seconds": 26.2969,
+              "max_seconds": 0.8985
+            },
+            "tooltip_expected": {
+              "count": 5,
+              "seconds": 3.9336,
+              "max_seconds": 0.8134
+            }
+          }
+        }
+      ],
+      "ui_completed": [
+        "settings_close",
+        "cookie_dismissal"
+      ]
+    },
+    "model3-cleanup-facts-20261019.json": {
+      "removed_own_roots": 4,
+      "own_active_processes": 0,
+      "chromium_processes": 0,
+      "worker_lock_available": true,
+      "queued_or_running_jobs": 0,
+      "health_ok": true,
+      "store_ready": true,
+      "memory_current_mib": 368.85,
+      "ai_calls": 0,
+      "data_writes": 0,
+      "deploys": 0
+    }
+  }
+}

@@ -25,7 +25,7 @@ def install():
 
         def __getattr__(self, name):
             method = getattr(self.actual, name)
-            if name not in ('count', 'is_visible', 'input_value', 'click', 'wait_for'):
+            if name not in ('count', 'is_visible', 'is_enabled', 'input_value', 'click', 'press', 'wait_for'):
                 return method
 
             def observe(*args, **kwargs):
@@ -69,6 +69,8 @@ def install():
         def __init__(self, page):
             self.page = page
             self.measurements = {}
+            self.started = self.last_emit = time.monotonic()
+            self.tooltip_returns = 0
             parent = self
             class Mouse:
                 def __getattr__(self, name):
@@ -78,10 +80,24 @@ def install():
         def wrap(self, name, function):
             def measured(*args, **kwargs):
                 started = time.monotonic()
-                try:return function(*args, **kwargs)
+                operation = name
+                if name == 'evaluate' and args and 'new Promise' in args[0]:
+                    operation = ('tooltip_clear' if '=== null' in args[0] else
+                                 'tooltip_expected' if 'replaceAll' in args[0] else 'tooltip_show')
+                if started-self.last_emit >= 5:
+                    emit({'phase':'hover_progress','elapsed':round(started-self.started,3),
+                          'next_operation':operation,'tooltip_returns':self.tooltip_returns,
+                          'operations':{n:{k:round(v,4) for k,v in r.items()}
+                                        for n,r in self.measurements.items()}})
+                    self.last_emit = started
+                try:
+                    value = function(*args, **kwargs)
+                    if operation.startswith('tooltip_') and isinstance(value,str):
+                        self.tooltip_returns += 1
+                    return value
                 finally:
                     seconds = time.monotonic()-started
-                    row=self.measurements.setdefault(name,{'count':0,'seconds':0,'max_seconds':0})
+                    row=self.measurements.setdefault(operation,{'count':0,'seconds':0,'max_seconds':0})
                     row['count']+=1; row['seconds']+=seconds
                     row['max_seconds']=max(row['max_seconds'],seconds)
             return measured
