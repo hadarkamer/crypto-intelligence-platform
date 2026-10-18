@@ -1,0 +1,557 @@
+{
+  "date_israel": "2026-10-19",
+  "service": "decision-hub-model1-collector",
+  "service_id": "srv-dakhacou01pc73f58aug",
+  "plan": "1c-2g",
+  "source_commit": "b62bce2ed6aa32282efcd9084cee1c7685897ab1",
+  "runner_commit": "52b129a36ba2fdadea43f1369bcc01301dfc4e45",
+  "cases": [
+    {
+      "model": 2,
+      "timeframe": "12H",
+      "status": "captured",
+      "ai_calls": 0,
+      "database_writes": 0,
+      "rows": 79,
+      "unit": "source_metric",
+      "total_value": 620876600.0,
+      "source_time": "2026-10-18T22:50:00Z",
+      "hover_seconds": 15.265,
+      "coverage": "displayed_latest_column",
+      "tooltip_reads": 109,
+      "candidate_pools": 3,
+      "elapsed_seconds": 41.98,
+      "execution_progress": {
+        "format_version": "execution-progress.v1",
+        "stage": "capture",
+        "elapsed_seconds": 42.15,
+        "capture_phase": null,
+        "capture_operations": [
+          {
+            "phase": "navigation",
+            "status": "completed",
+            "duration_seconds": 2.18
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 4.8
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.11
+          },
+          {
+            "phase": "model_selection",
+            "status": "completed",
+            "duration_seconds": 1.28
+          },
+          {
+            "phase": "symbol_selection",
+            "status": "completed",
+            "duration_seconds": 0.03
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 0.39
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "timeframe_open",
+            "status": "completed",
+            "duration_seconds": 0.08
+          },
+          {
+            "phase": "timeframe_option_lookup",
+            "status": "completed",
+            "duration_seconds": 0.02
+          },
+          {
+            "phase": "timeframe_select",
+            "status": "completed",
+            "duration_seconds": 0.05
+          },
+          {
+            "phase": "timeframe_confirmation",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "timeframe_selection",
+            "status": "completed",
+            "duration_seconds": 2.3
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.02
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "render_settle",
+            "status": "completed",
+            "duration_seconds": 0.5
+          },
+          {
+            "phase": "legend_preparation",
+            "status": "completed",
+            "duration_seconds": 0.19
+          },
+          {
+            "phase": "chart_geometry",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.05
+          },
+          {
+            "phase": "screenshot",
+            "status": "completed",
+            "duration_seconds": 0.52
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.03
+          },
+          {
+            "phase": "hover_collection",
+            "status": "completed",
+            "duration_seconds": 15.27
+          },
+          {
+            "phase": "context_close",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "browser_close",
+            "status": "completed",
+            "duration_seconds": 0.22
+          }
+        ],
+        "heatmap_model": 2,
+        "timeframe": "12H"
+      },
+      "kind": "PAID_RUNTIME_RESULT",
+      "exit_code": 0,
+      "guard_reason": null,
+      "total_seconds": 42.433,
+      "peak_mib": {
+        "anon": 507.79,
+        "file": 572.62,
+        "kernel": 36.15,
+        "sock": 0.47,
+        "current": 1108.13
+      },
+      "cpu_delta": {
+        "usage_usec": 26613937,
+        "user_usec": 20680940,
+        "system_usec": 5932997,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 425,
+        "nr_throttled": 128,
+        "throttled_usec": 16873079,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "data_writes": 0
+    },
+    {
+      "model": 3,
+      "timeframe": "48H",
+      "status": "failed",
+      "ai_calls": 0,
+      "database_writes": 0,
+      "code": "source_timeout",
+      "exception_kind": "TimeoutError",
+      "capture_phase": "overlay_dismissal",
+      "source_capture_state": {
+        "observation_status": "unavailable",
+        "source_identity": "canonical",
+        "reason": "unverified"
+      },
+      "click_failure": "action_timeout",
+      "source_network": {
+        "http_errors": [
+          {
+            "host_group": "other",
+            "count": 2,
+            "status": 429
+          }
+        ],
+        "network_errors": [],
+        "page_error_count": 0
+      },
+      "selector_issue": "action_timeout",
+      "elapsed_seconds": 49.37,
+      "execution_progress": {
+        "format_version": "execution-progress.v1",
+        "stage": "capture",
+        "elapsed_seconds": 47.68,
+        "capture_phase": null,
+        "capture_operations": [
+          {
+            "phase": "browser_launch",
+            "status": "completed",
+            "duration_seconds": 0.22
+          },
+          {
+            "phase": "browser_context",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "source_session_setup",
+            "status": "completed",
+            "duration_seconds": 0.0
+          },
+          {
+            "phase": "page_creation",
+            "status": "completed",
+            "duration_seconds": 0.1
+          },
+          {
+            "phase": "navigation",
+            "status": "completed",
+            "duration_seconds": 1.31
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 1.75
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.11
+          },
+          {
+            "phase": "model_selection",
+            "status": "completed",
+            "duration_seconds": 3.19
+          },
+          {
+            "phase": "symbol_selection",
+            "status": "completed",
+            "duration_seconds": 1.51
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 5.2
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 0.8
+          },
+          {
+            "phase": "timeframe_selection",
+            "status": "completed",
+            "duration_seconds": 0.81
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 6.48
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 3.32
+          },
+          {
+            "phase": "render_settle",
+            "status": "completed",
+            "duration_seconds": 0.57
+          },
+          {
+            "phase": "legend_preparation",
+            "status": "completed",
+            "duration_seconds": 11.8
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "failed",
+            "duration_seconds": 5.6
+          }
+        ],
+        "heatmap_model": 3,
+        "timeframe": "48H"
+      },
+      "kind": "PAID_RUNTIME_RESULT",
+      "exit_code": 0,
+      "guard_reason": null,
+      "total_seconds": 49.6,
+      "peak_mib": {
+        "anon": 471.7,
+        "file": 527.98,
+        "kernel": 33.76,
+        "sock": 0.51,
+        "current": 1027.94
+      },
+      "cpu_delta": {
+        "usage_usec": 48661655,
+        "user_usec": 42228698,
+        "system_usec": 6432957,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 496,
+        "nr_throttled": 473,
+        "throttled_usec": 155418322,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "data_writes": 0
+    },
+    {
+      "model": 1,
+      "timeframe": "12H",
+      "status": "captured",
+      "ai_calls": 0,
+      "database_writes": 0,
+      "rows": 129,
+      "unit": "source_metric",
+      "total_value": 1115430000.0,
+      "source_time": "2026-10-18T22:55:00Z",
+      "hover_seconds": 13.156,
+      "coverage": "displayed_latest_column",
+      "tooltip_reads": 148,
+      "candidate_pools": 7,
+      "elapsed_seconds": 38.46,
+      "execution_progress": {
+        "format_version": "execution-progress.v1",
+        "stage": "capture",
+        "elapsed_seconds": 38.44,
+        "capture_phase": null,
+        "capture_operations": [
+          {
+            "phase": "navigation",
+            "status": "completed",
+            "duration_seconds": 1.45
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 4.99
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.02
+          },
+          {
+            "phase": "model_selection",
+            "status": "completed",
+            "duration_seconds": 2.18
+          },
+          {
+            "phase": "symbol_selection",
+            "status": "completed",
+            "duration_seconds": 0.03
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 0.41
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "timeframe_trigger_lookup",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "timeframe_open",
+            "status": "completed",
+            "duration_seconds": 0.09
+          },
+          {
+            "phase": "timeframe_option_lookup",
+            "status": "completed",
+            "duration_seconds": 0.02
+          },
+          {
+            "phase": "timeframe_select",
+            "status": "completed",
+            "duration_seconds": 0.13
+          },
+          {
+            "phase": "timeframe_confirmation",
+            "status": "completed",
+            "duration_seconds": 0.39
+          },
+          {
+            "phase": "timeframe_selection",
+            "status": "completed",
+            "duration_seconds": 2.68
+          },
+          {
+            "phase": "wait_for_chart",
+            "status": "completed",
+            "duration_seconds": 5.18
+          },
+          {
+            "phase": "overlay_dismissal",
+            "status": "completed",
+            "duration_seconds": 0.02
+          },
+          {
+            "phase": "render_settle",
+            "status": "completed",
+            "duration_seconds": 0.5
+          },
+          {
+            "phase": "legend_preparation",
+            "status": "completed",
+            "duration_seconds": 0.13
+          },
+          {
+            "phase": "chart_geometry",
+            "status": "completed",
+            "duration_seconds": 0.01
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.03
+          },
+          {
+            "phase": "screenshot",
+            "status": "completed",
+            "duration_seconds": 0.5
+          },
+          {
+            "phase": "render_readiness",
+            "status": "completed",
+            "duration_seconds": 0.02
+          },
+          {
+            "phase": "hover_collection",
+            "status": "completed",
+            "duration_seconds": 13.16
+          },
+          {
+            "phase": "context_close",
+            "status": "completed",
+            "duration_seconds": 0.94
+          },
+          {
+            "phase": "browser_close",
+            "status": "completed",
+            "duration_seconds": 0.19
+          }
+        ],
+        "heatmap_model": 1,
+        "timeframe": "12H"
+      },
+      "kind": "PAID_RUNTIME_RESULT",
+      "exit_code": 0,
+      "guard_reason": null,
+      "total_seconds": 38.688,
+      "peak_mib": {
+        "anon": 521.89,
+        "file": 583.68,
+        "kernel": 35.78,
+        "sock": 0.3,
+        "current": 1135.43
+      },
+      "cpu_delta": {
+        "usage_usec": 26837988,
+        "user_usec": 21147532,
+        "system_usec": 5690456,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 387,
+        "nr_throttled": 160,
+        "throttled_usec": 20082777,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "memory_events_delta": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      },
+      "data_writes": 0
+    }
+  ],
+  "postcheck": {
+    "numeric_checks": [
+      {
+        "model": 2,
+        "rows": 79,
+        "candidate_pools": 3,
+        "arithmetic": "passed",
+        "unit": "source_metric",
+        "scope": "displayed_latest_column"
+      },
+      {
+        "model": 1,
+        "rows": 129,
+        "candidate_pools": 7,
+        "arithmetic": "passed",
+        "unit": "source_metric",
+        "scope": "displayed_latest_column"
+      }
+    ],
+    "remaining_processes": [],
+    "worker_lock_available": true,
+    "queued_or_running_jobs": 0,
+    "health_ok": true,
+    "store_ready": true,
+    "memory_current_mib": 367.32,
+    "profiles": []
+  },
+  "ai_calls": 0,
+  "production_data_writes": 0,
+  "deployments": 0,
+  "source_cases": 3,
+  "temporary_directory_removed": true
+}
