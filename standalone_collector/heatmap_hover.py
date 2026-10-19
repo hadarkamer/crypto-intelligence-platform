@@ -216,7 +216,7 @@ def close_heatmap_settings(page):
     if not close.is_visible() or not close.is_enabled():
         raise HoverError('hover_geometry_invalid')
     try:
-        close.press('Enter', timeout=3000)
+        close.press('Enter', timeout=6000)
         if panel.is_visible():
             panel.wait_for(state='hidden', timeout=1500)
     except BrowserTimeout:
@@ -233,7 +233,7 @@ def require_cookie_banner_hidden(page):
         raise HoverError('hover_cookie_overlay')
 
 
-def dismiss_cookie_banner(page):
+def dismiss_cookie_banner(page, *, model=1):
     """Use the consent UI once, and verify its result at evidence capture time."""
     decline = page.locator('#termly-code-snippet-support').get_by_role('button', name='Decline', exact=True)
     if decline.count() == 1 and decline.is_visible():
@@ -242,7 +242,7 @@ def dismiss_cookie_banner(page):
         from playwright.sync_api import TimeoutError as BrowserTimeout
         try:
             # The same ordinary UI action without frame-dependent mouse waits.
-            decline.press('Enter', timeout=3000)
+            decline.press('Enter', timeout=6000 if model == 3 else 3000)
             decline.wait_for(state='hidden', timeout=1500)
         except BrowserTimeout:
             # The action may have completed despite an actionability timeout.
@@ -252,13 +252,25 @@ def dismiss_cookie_banner(page):
     require_cookie_banner_hidden(page)
 
 
-def capture_column(page, image_path, geometry, *, model, timeframe):
+def verify_source_axis(page, ticks, rows=None):
+    from capture_readiness import MODEL3_AXIS_SCRIPT, safe_readiness
+    initial=safe_readiness({'price_axis_ticks':ticks}).get('price_axis_ticks')
+    if initial is None or page.evaluate(MODEL3_AXIS_SCRIPT)!=initial:
+        raise HoverError('hover_price_axis_changed')
+    if rows:
+        low,high=min(r['price'] for r in rows),max(r['price'] for r in rows)
+        step=abs(rows[0]['price']-rows[1]['price'])
+        if initial[0]<low-step or initial[-1]>high+step:
+            raise HoverError('hover_price_axis_mismatch')
+
+
+def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=None):
     started = time.monotonic()
-    # Model 3's live DOM/mouse operations cost about 0.3 s each on the
-    # isolated source. 55 s truncated a valid, still-progressing sweep.
-    # Allow its complete grid and final anchors within a bounded budget;
-    # individual tooltip waits and the other models remain unchanged.
-    max_seconds = 120 if model == 3 else MAX_SECONDS
+    # A complete 127-row Model 3 sweep measured 120 s on the intended 1-CPU
+    # service. Leave bounded headroom for those native events and final anchors;
+    # do not add retries or extend individual waits/the other models.
+    max_seconds = 180 if model == 3 else MAX_SECONDS
+    if model==3 and source_axis is not None:verify_source_axis(page,source_axis)
     bounds = plot_bounds(image_path, geometry)
     # UTC makes both visible tooltip timestamp formats unambiguous.
     if page.evaluate('() => Intl.DateTimeFormat().resolvedOptions().timeZone') != 'UTC':
@@ -274,8 +286,11 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
         if marker is not None:
             page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
             page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
-    page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
+    if model!=3:
+        page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
+    if model==3 and (bounds['top']<scroll_y or bounds['bottom']>=scroll_y+viewport['height']):
+        raise HoverError('hover_plot_clipped')
     x = bounds['right']-.25
     read_count = 0
     def wait_for_tooltip(expression, *, arg=None, timeout_ms):
@@ -398,6 +413,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe):
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
         rows.append(row);positions.append(target)
     price_step = validate_rows(rows)
+    if model==3 and source_axis is not None:verify_source_axis(page,source_axis,rows)
     # Recheck distributed anchors after the sweep. A refresh must fail this
     # observation rather than combine values from different source moments.
     for i in (0,len(rows)//2,len(rows)-1):
@@ -491,6 +507,9 @@ def ground_analysis(raw, snapshot):
     result = copy.deepcopy(raw)
     scans = result.get('scans')
     if not isinstance(scans,list) or len(scans)!=1: raise HoverError('hover_analysis_shape')
+    if scans[0].get('readable') is False or scans[0].get('blocking_condition','none')!='none':
+        from model1_execution import StageFailure
+        raise StageFailure('source_not_readable')
     from model1_price_range import validate_price_range
     current=validate_price_range(scans[0].get('current_price_range'))
     candidates={p['id']:p for p in snapshot['candidates']}

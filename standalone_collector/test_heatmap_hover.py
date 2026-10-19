@@ -85,6 +85,24 @@ class HoverTests(unittest.TestCase):
             with self.assertRaises(HoverError):
                 ground_analysis(proposed(levels),{'rows':rows(),'candidates':[candidate(ids)]})
 
+    def test_unreadable_analysis_keeps_source_failure_before_price_validation(self):
+        from model1_execution import StageFailure
+        with self.assertRaises(StageFailure) as error:
+            ground_analysis({'scans':[{'readable':False,'blocking_condition':'blur','current_price_range':None}]},
+                {'rows':rows(),'candidates':[]})
+        self.assertEqual(error.exception.code,'source_not_readable')
+
+    def test_source_axis_must_stay_stable_and_match_hover_coverage(self):
+        from heatmap_hover import verify_source_axis
+        page=Mock();page.evaluate.return_value=[82150,82300]
+        verify_source_axis(page,[82150,82300],rows())
+        for ticks in (None,[81000,82000]):
+            with self.assertRaisesRegex(HoverError,'hover_price_axis_changed'):
+                verify_source_axis(page,ticks,rows())
+        page.evaluate.return_value=[77000,87000]
+        with self.assertRaisesRegex(HoverError,'hover_price_axis_mismatch'):
+            verify_source_axis(page,[77000,87000],rows())
+
     def test_plot_finder_ignores_legend_and_white_page(self):
         from PIL import Image,ImageDraw
         with tempfile.TemporaryDirectory() as temp:
@@ -99,7 +117,9 @@ class HoverTests(unittest.TestCase):
         if not runtime.exists():self.skipTest('prepare creates the installed runtime')
         capture=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
         self.assertEqual(capture.count('page.screenshot('),1)
-        self.assertLess(capture.index('dismiss_cookie_banner(page)'),capture.index('page.screenshot('))
+        self.assertIn("'height': 1300 if HEATMAP_MODEL == 3 else 1000",capture)
+        self.assertIn('full_page=HEATMAP_MODEL != 3',capture)
+        self.assertLess(capture.index('dismiss_cookie_banner(page, model=HEATMAP_MODEL)'),capture.index('page.screenshot('))
         self.assertLess(capture.index('page.screenshot('),capture.index('require_cookie_banner_hidden(page)'))
         self.assertLess(capture.index('require_cookie_banner_hidden(page)'),capture.index('hover_snapshot = capture_column'))
         self.assertIn("'timezone_id': 'UTC'",capture)
@@ -109,6 +129,7 @@ class HoverTests(unittest.TestCase):
         self.assertEqual(task.count('raw = analyze_heatmap_images('),1)
         self.assertLess(task.index('prepare_candidates(images)'),task.index('raw = analyze_heatmap_images('))
         self.assertIn('attach_measurements(result, raw',task)
+        self.assertLess(task.index('save_analysis_snapshot(raw'),task.index('raw = ground_analysis'))
         bridge=(runtime/'collection_bridge.py').read_text()
         self.assertIn("result->'hover_snapshot'->>'version'='displayed-hover.v1'",bridge)
 
@@ -147,7 +168,7 @@ class HoverTests(unittest.TestCase):
             if still_visible:
                 with self.assertRaises(BrowserTimeout):close_heatmap_settings(page)
             else:close_heatmap_settings(page)
-            close.press.assert_called_once_with('Enter',timeout=3000)
+            close.press.assert_called_once_with('Enter',timeout=6000)
             close.click.assert_not_called()
 
     def test_settings_close_refuses_hidden_or_disabled_control(self):
@@ -274,25 +295,25 @@ class HoverTests(unittest.TestCase):
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page()
-                for sticky in (False,True):
+                for model,sticky in ((1,False),(1,True),(3,False),(3,True)):
                     page.set_content('''<button id="other" onclick="this.textContent='WRONG'">Accept</button>
                     <div id="termly-code-snippet-support"><p>We use essential cookies to make our site work.</p>
                     <button onclick="window.cookieTrusted=event.isTrusted;this.dataset.clicks=Number(this.dataset.clicks||0)+1;CLOSE">Decline</button></div>'''
                         .replace('CLOSE','' if sticky else "setTimeout(()=>this.parentElement.remove(),60)"))
                     if sticky:
-                        with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page)
+                        with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page, model=model)
                         self.assertEqual(page.get_by_role('button',name='Decline').get_attribute('data-clicks'),'1')
                     else:
-                        dismiss_cookie_banner(page);require_cookie_banner_hidden(page)
+                        dismiss_cookie_banner(page, model=model);require_cookie_banner_hidden(page)
                     self.assertTrue(page.evaluate('window.cookieTrusted'))
                     self.assertEqual(page.locator('#other').inner_text(),'Accept')
                 page.set_content('''<div id="termly-code-snippet-support"><p>We use essential cookies to make our site work.</p>
                     <button disabled onclick="window.wrongActivation=true">Decline</button></div>''')
-                with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page)
+                with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):dismiss_cookie_banner(page, model=model)
                 self.assertIsNone(page.evaluate('window.wrongActivation'))
                 page.set_content('<p>We use essential cookies to make our site work.</p>')
                 with self.assertRaisesRegex(HoverError,'hover_cookie_overlay'):require_cookie_banner_hidden(page)
-                page.set_content('<a>Cookie Preferences</a>');dismiss_cookie_banner(page)
+                page.set_content('<a>Cookie Preferences</a>');dismiss_cookie_banner(page, model=model)
             finally:browser.close()
 
     def test_cookie_failure_reason_survives_safe_failure_report(self):
@@ -365,7 +386,7 @@ class HoverTests(unittest.TestCase):
                     path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
                     if mode=='expired-model3':
                         with patch('heatmap_hover.time') as clock:
-                            clock.monotonic.side_effect=iter([0]+[121]*100)
+                            clock.monotonic.side_effect=iter([0]+[181]*100)
                             with self.assertRaisesRegex(HoverError,'hover_deadline'):
                                 capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
                     elif mode in ('stuck','changed-time'):
