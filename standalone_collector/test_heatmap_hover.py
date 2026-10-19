@@ -221,6 +221,17 @@ class HoverTests(unittest.TestCase):
             with self.assertRaisesRegex(HoverError,'hover_geometry_invalid'):
                 candidate_pools(invalid,image['image_path'])
 
+    def test_context_failures_keep_fixed_reason_and_bounded_candidate_identity(self):
+        from model1_execution import failure_detail
+        from model1_evidence_format import safe_scan
+        for reason in ('hover_image_evidence_missing','hover_image_changed',
+                       'hover_candidate_evidence_mismatch','hover_pool_not_visible'):
+            self.assertEqual(failure_detail(HoverError(reason))['validation_reason'],reason)
+        for identifier in ('c0','c39','c999','untrusted page text'):
+            safe=safe_scan({'prominent_levels':[{**self.context_level(),'candidate_id':identifier}]})
+            self.assertEqual(safe['prominent_levels'][0].get('candidate_id'),
+                identifier if identifier in ('c0','c39') else None)
+
     def test_observed_model2_edge_anchors_do_not_relax_interior_geometry(self):
         from PIL import Image
         path=Path(self.temp.name)/'edge-anchors.png'
