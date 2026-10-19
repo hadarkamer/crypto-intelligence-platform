@@ -59,7 +59,7 @@ def parse_tooltip(text):
 
 
 # Only visible DOM content. No framework state, canvas internals or private API.
-READ_TOOLTIP = r'''() => {
+READ_TOOLTIP = r'''mode => {
   const candidates = [...document.querySelectorAll('.cg-toolti-box')].filter(e => {
     const r=e.getBoundingClientRect();
     if(!r.width || !r.height || r.bottom<=0 || r.top>=innerHeight)return false;
@@ -73,7 +73,22 @@ READ_TOOLTIP = r'''() => {
   // Read the complete observed tooltip, never its innermost matching div.
   if(candidates.length!==1)return null;
   const text=candidates[0].innerText;
-  return text.length<=220 && text.includes('Liquidation Leverage') ? text : null;
+  if(text.length>220 || !text.includes('Liquidation Leverage'))return null;
+  if(mode==='state'){
+    const r=candidates[0].getBoundingClientRect();
+    return {text,position:[r.x,r.y,r.width,r.height]};
+  }
+  return text;
+}'''
+
+READ_UPDATED_TOOLTIP = r'''previous => {
+  const current = (''' + READ_TOOLTIP + r''')('state');
+  if(!current)return false;
+  // CoinGlass may keep its tooltip visible after the pointer leaves the plot.
+  // Require rendered evidence of an update; never accept an unchanged old tip.
+  return !previous || current.text!==previous.text ||
+    current.position.some((value,index)=>Math.abs(value-previous.position[index])>.1)
+    ? current.text : false;
 }'''
 
 READ_EXPECTED_TOOLTIP = r'''expected => {
@@ -324,15 +339,16 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         nonlocal read_count
         if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
+        previous = None
         if expected is None or native:
-            # Calibration must observe disappearance before another pointer move.
-            # Row centres have an expected price, so they need no leave/re-enter.
+            # Some source tooltips persist outside the plot. Observe their text
+            # and position instead of requiring them to disappear within 450ms.
             page.mouse.move(0, 0)
-            wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+            previous = page.evaluate(READ_TOOLTIP, 'state')
         page.mouse.move(x, y-scroll_y)
         text = wait_for_tooltip(
-            READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
-            arg=expected, timeout_ms=700)
+            READ_UPDATED_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
+            arg=previous if expected is None else expected, timeout_ms=700)
         read_count += 1
         row = parse_tooltip(text)
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]

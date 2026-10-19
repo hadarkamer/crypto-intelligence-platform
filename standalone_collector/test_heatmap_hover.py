@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
-    READ_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,
+    READ_TOOLTIP, READ_UPDATED_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,
     dismiss_cookie_banner, require_cookie_banner_hidden)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
@@ -32,6 +32,29 @@ def rows():
 
 
 class HoverTests(unittest.TestCase):
+    def test_persistent_tooltip_requires_visible_update_before_reusing_numbers(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page()
+                page.set_content('''<div class="cg-toolti-box" style="position:absolute;left:100px;top:100px">
+                    2026-10-19 11:35 Price 90167.75 Liquidation Leverage 1.52M</div>''')
+                previous=page.evaluate(READ_TOOLTIP,'state')
+                self.assertFalse(page.evaluate(READ_UPDATED_TOOLTIP,previous))
+                # The value may legitimately stay the same inside one price row;
+                # movement of the rendered tooltip proves that the point updated.
+                page.locator('.cg-toolti-box').evaluate("e=>e.style.top='101px'")
+                self.assertIn('90167.75',page.evaluate(READ_UPDATED_TOOLTIP,previous))
+                previous=page.evaluate(READ_TOOLTIP,'state')
+                self.assertFalse(page.evaluate(READ_UPDATED_TOOLTIP,previous))
+                page.locator('.cg-toolti-box').evaluate("e=>e.innerText=e.innerText.replace('90167.75','90029.80')")
+                self.assertIn('90029.80',page.evaluate(READ_UPDATED_TOOLTIP,previous))
+                page.locator('.cg-toolti-box').evaluate("e=>e.style.display='none'")
+                self.assertIsNone(page.evaluate(READ_TOOLTIP,'state'))
+                self.assertFalse(page.evaluate(READ_UPDATED_TOOLTIP,previous))
+            finally:browser.close()
+
     def test_live_model_formats_and_rounding(self):
         cases=[('17 Oct 2026, 12:00 Price 82768.78 Liquidation Leverage 120.13M',82768.78,120130000),
             ('17 Oct 2026, 12:05 Price 82602.4 Liquidation Leverage 36.07M',82602.4,36070000),
