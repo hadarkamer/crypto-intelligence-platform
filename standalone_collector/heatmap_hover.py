@@ -266,9 +266,8 @@ def verify_source_axis(page, ticks, rows=None):
 
 def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=None):
     started = time.monotonic()
-    # A complete 127-row Model 3 sweep measured 120 s on the intended 1-CPU
-    # service. Leave bounded headroom for those native events and final anchors;
-    # do not add retries or extend individual waits/the other models.
+    # Keep a bounded full-column budget within the existing worker timeout.
+    # Model 3 uses an expensive WebGL renderer on the intended 1-CPU service.
     max_seconds = 180 if model == 3 else MAX_SECONDS
     if model==3 and source_axis is not None:verify_source_axis(page,source_axis)
     bounds = plot_bounds(image_path, geometry)
@@ -321,11 +320,11 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             raise HoverError('hover_update_timeout')
         return result
 
-    def read(y, expected=None):
+    def read(y, expected=None, *, native=False):
         nonlocal read_count
         if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
-        if expected is None:
+        if expected is None or native:
             # Calibration must observe disappearance before another pointer move.
             # Row centres have an expected price, so they need no leave/re-enter.
             page.mouse.move(0, 0)
@@ -354,19 +353,26 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     calibration = [top_row]
     transitions = []
     y = top_y
-    # Establish the native price step without skipping any screen pixel. Stop
-    # after three complete transitions; do not sweep the whole plot this way.
-    while len(calibration) < 4:
-        next_y = y+1
+    # Calibrate native price steps and pixel boundaries. Model 3 needs two
+    # transitions here; the complete sweep and native anchors verify every row.
+    while len(calibration) < (3 if model == 3 else 4):
+        next_y = y+(2 if model == 3 else 1)
         if next_y >= bottom_y or next_y-top_y > 120:
             raise HoverError('hover_resolution_insufficient')
         row = read(next_y)
-        if row['price'] != calibration[-1]['price']:
-            transitions.append((y+next_y)/2)
-            calibration.append(row)
-        elif any(row[k] != calibration[-1][k] for k in ('value','unit','source_time')):
-            raise HoverError('hover_snapshot_changed')
-        y = next_y
+        samples = [(next_y, row)]
+        if model == 3 and row['price'] != calibration[-1]['price']:
+            # Refine every changed two-pixel interval at its middle pixel.
+            # This retains the original half-pixel boundary accuracy, detects
+            # sub-two-pixel rows, and avoids re-reading every unchanged pixel.
+            samples.insert(0, (y+1, read(y+1)))
+        for sample_y, row in samples:
+            if row['price'] != calibration[-1]['price']:
+                transitions.append((y+sample_y)/2)
+                calibration.append(row)
+            elif any(row[k] != calibration[-1][k] for k in ('value','unit','source_time')):
+                raise HoverError('hover_snapshot_changed')
+            y = sample_y
     for i,row in enumerate(calibration):row['id']=f'r{i}'
     initial_step = validate_rows(calibration)
     if min(b-a for a,b in zip(transitions,transitions[1:])) < 2:
@@ -402,13 +408,53 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     # Use the first/last INTERIOR observations instead. Preserve both edge
     # values verbatim and retain the existing gap and 0.025 price checks.
     price_step = (calibration[1]['price']-last_inner['price'])/(count-3)
+    direct_rows = {}
+    if model == 3:
+        # Run the same bounded event/read sequence in the page, avoiding a
+        # renderer protocol round-trip between each of the already-known rows.
+        remaining = max_seconds-(time.monotonic()-started)
+        if remaining <= 0:raise HoverError('hover_deadline')
+        points=[{'index':i,'y':transitions[0]+(i-.5)*height-scroll_y,
+                 'expected':calibration[1]['price']-(i-1)*price_step}
+                for i in range(len(calibration),count-1)]
+        texts=page.evaluate(r"""async arg=>{
+            const read=("""+READ_EXPECTED_TOOLTIP+r""");
+            const end=performance.now()+arg.remaining;
+            const values=[];
+            for(const point of arg.points){
+                if(performance.now()>=end)return {deadline:true};
+                const target=document.elementFromPoint(arg.x,point.y);
+                if(!target||target.tagName!=='CANVAS')return null;
+                target.dispatchEvent(new PointerEvent('pointermove',{
+                    bubbles:true,clientX:arg.x,clientY:point.y,view:window,
+                    pointerId:1,pointerType:'mouse',isPrimary:true,buttons:0}));
+                const text=await new Promise(resolve=>{
+                    const until=Math.min(end,performance.now()+700);
+                    const check=()=>{const value=read(point.expected);
+                        if(value||performance.now()>=until)resolve(value);
+                        else setTimeout(check,25)};
+                    check();
+                });
+                if(!text)return null;
+                values.push(text);
+            }
+            return values;
+        }""",{'points':points,'x':x,'remaining':remaining*1000})
+        if time.monotonic()-started>max_seconds or (isinstance(texts,dict) and texts.get('deadline')):
+            raise HoverError('hover_deadline')
+        if not isinstance(texts,list) or len(texts)!=len(points):raise HoverError('hover_update_timeout')
+        for point,text in zip(points,texts):
+            row=parse_tooltip(text)
+            row['time_text']=' '.join(text.split()).split(' Price ')[0]
+            direct_rows[point['index']]=row
+        read_count+=len(texts)
     rows = []
     positions = []
     for i in range(count):
         target = top_y if i==0 else bottom_y if i==count-1 else transitions[0]+(i-.5)*height
         expected = (top_row['price'] if i==0 else bottom_row['price'] if i==count-1
                     else calibration[1]['price']-(i-1)*price_step)
-        row = calibration[i] if i<len(calibration) else bottom_row if i==count-1 else read(target,expected)
+        row = calibration[i] if i<len(calibration) else bottom_row if i==count-1 else direct_rows[i] if model==3 else read(target,expected)
         if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
         rows.append(row);positions.append(target)
@@ -417,7 +463,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     # Recheck distributed anchors after the sweep. A refresh must fail this
     # observation rather than combine values from different source moments.
     for i in (0,len(rows)//2,len(rows)-1):
-        anchor = read(positions[i],rows[i]['price'])
+        anchor = read(positions[i],rows[i]['price'],native=model==3)
         if any(anchor[k] != rows[i][k] for k in ('price','value','source_time','unit')):
             raise HoverError('hover_snapshot_changed')
     observed = datetime.fromisoformat(rows[0]['source_time'].replace('Z','+00:00'))

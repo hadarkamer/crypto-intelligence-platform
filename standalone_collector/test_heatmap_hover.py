@@ -268,25 +268,26 @@ class HoverTests(unittest.TestCase):
         <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
         <script>(()=>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box'),prices=PRICES;
         const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
-        c.onmousemove=e=>{const row=Math.min(29,Math.floor(e.offsetY/10));
+        c.onpointermove=e=>{const row=Math.min(29,Math.floor(e.offsetY/10));
           t.style.display='block';t.innerText='STAMP Price '+prices[row]+' Liquidation Leverage '+(row+1)+'.00M';};
         c.onmouseleave=()=>t.style.display='none';})();</script>'''.replace('STAMP',stamp)
         with sync_playwright() as pw,tempfile.TemporaryDirectory() as temp:
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
-                for missing in (False,True):
-                    values=prices.copy()
-                    if missing:values[14]=values[15]
-                    page.set_content(html.replace('PRICES',json.dumps(values)))
-                    path=Path(temp)/'grid.png';page.screenshot(path=str(path),full_page=True)
-                    if missing:
-                        with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
-                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='12h')
-                    else:
-                        result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='12h')
-                        self.assertEqual([r['price'] for r in result['rows']],prices)
-                        self.assertEqual(result['total_value'],465000000)
+                for model in (2,3):
+                    for missing in (False,True):
+                        values=prices.copy()
+                        if missing:values[14]=values[15]
+                        page.set_content(html.replace('PRICES',json.dumps(values)))
+                        path=Path(temp)/'grid.png';page.screenshot(path=str(path),full_page=True)
+                        if missing:
+                            with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
+                                capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
+                        else:
+                            result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
+                            self.assertEqual([r['price'] for r in result['rows']],prices)
+                            self.assertEqual(result['total_value'],465000000)
             finally:browser.close()
 
     def test_cookie_banner_is_closed_once_and_sticky_or_late_banner_is_rejected(self):
@@ -362,7 +363,7 @@ class HoverTests(unittest.TestCase):
         <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
         <script>(()=>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box');let pending;
         const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
-        c.onmousemove=e=>{clearTimeout(pending);const row=Math.min(29,Math.floor(e.offsetY/10));
+        c.onpointermove=e=>{clearTimeout(pending);const row=Math.min(29,Math.floor(e.offsetY/10));
           if(STUCK && row===14)return;
           pending=setTimeout(()=>{t.style.display='block';t.innerText='STAMP Price '+(1000-row)+' Liquidation Leverage 1.00M';},45);};
         c.onmouseleave=()=>{clearTimeout(pending);t.style.display='none';};})();</script>'''.replace('STAMP',stamp)
@@ -370,18 +371,22 @@ class HoverTests(unittest.TestCase):
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
-                for mode in ('normal','stuck','no-animation-frame','changed-time','expired-model3'):
+                for model,mode in ([(2,m) for m in ('normal','stuck','changed-time')] +
+                                   [(3,m) for m in ('normal','stuck','no-animation-frame','changed-time','synthetic-different','expired-model3')]):
                     fixture=html.replace('STUCK',str(mode=='stuck').lower())
                     if mode=='no-animation-frame':
                         # DOM updates continue while animation-frame callbacks
                         # never run. Timer polling must still read every row.
                         fixture=fixture.replace('<script>', '<script>window.requestAnimationFrame=()=>0;')
                         fixture=fixture.replace('let pending;', 'let pending,hidePending;')
-                        fixture=fixture.replace('c.onmousemove=e=>{', 'c.onmousemove=e=>{clearTimeout(hidePending);')
+                        fixture=fixture.replace('c.onpointermove=e=>{', 'c.onpointermove=e=>{clearTimeout(hidePending);')
                         fixture=fixture.replace("t.style.display='none';};", "hidePending=setTimeout(()=>t.style.display='none',80);};")
                     if mode=='changed-time':
                         fixture=fixture.replace("t.innerText='"+stamp+" Price '",
                             "t.innerText=(row===14?'2020-01-01 00:00':'"+stamp+"')+' Price '")
+                    if mode=='synthetic-different':
+                        fixture=fixture.replace("+' Liquidation Leverage 1.00M'",
+                            "+' Liquidation Leverage '+(e.isTrusted?'1.00M':'2.00M')")
                     page.set_content(fixture)
                     path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
                     if mode=='expired-model3':
@@ -389,10 +394,10 @@ class HoverTests(unittest.TestCase):
                             clock.monotonic.side_effect=iter([0]+[181]*100)
                             with self.assertRaisesRegex(HoverError,'hover_deadline'):
                                 capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
-                    elif mode in ('stuck','changed-time'):
+                    elif mode in ('stuck','changed-time','synthetic-different'):
                         reason='hover_update_timeout' if mode=='stuck' else 'hover_snapshot_changed'
                         with self.assertRaisesRegex(HoverError,reason):
-                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
+                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='24h')
                     else:
                         if mode=='no-animation-frame':
                             # A valid Model 3 sweep must survive the former
@@ -402,9 +407,38 @@ class HoverTests(unittest.TestCase):
                                 snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
                             self.assertEqual(snapshot['duration_seconds'],60)
                         else:
-                            snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=2,timeframe='24h')
+                            snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='24h')
                         self.assertEqual(len(snapshot['rows']),30)
                         self.assertEqual(snapshot['total_value'],30000000)
+            finally:browser.close()
+
+
+    def test_model3_adaptive_calibration_preserves_rows_and_rejects_subpixel_aliases(self):
+        from playwright.sync_api import sync_playwright
+        import math
+        stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
+        <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
+        <script>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box');
+        const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
+        c.onpointermove=e=>{const row=Math.floor(e.offsetY/HEIGHT);t.style.display='block';
+          t.innerText='STAMP Price '+(1000-row)+' Liquidation Leverage '+(row+1)+'.00M'};
+        c.onmouseleave=()=>t.style.display='none';}</script>'''.replace('STAMP',stamp)
+        with sync_playwright() as pw,tempfile.TemporaryDirectory() as temp:
+            browser=pw.chromium.launch(headless=True)
+            try:
+                page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
+                for height in (1,1.5,3,5.71,10):
+                    page.set_content(html.replace('HEIGHT',str(height)))
+                    image=Path(temp)/'grid.png';page.screenshot(path=str(image))
+                    if height<2:
+                        with self.assertRaisesRegex(HoverError,'hover_resolution_insufficient'):
+                            capture_column(page,image,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='48H')
+                    else:
+                        result=capture_column(page,image,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='48H')
+                        count=math.floor(299/height)+1
+                        self.assertEqual([x['price'] for x in result['rows']],list(range(1000,1000-count,-1)))
+                        self.assertEqual(result['total_value'],sum(range(1,count+1))*1e6)
             finally:browser.close()
 
 
