@@ -1,0 +1,85 @@
+{
+  "status": "acceptance_complete_released",
+  "collector_merge": "0a6066949f44cffbe39a69c3bfb58de63ffc9145",
+  "app_merge": "e5416ec4b694a8a3e9a3a75195d833cb463304b4",
+  "render_deploy": {
+    "id": "dep-dbatpjgm7kps73a98oe0",
+    "status": "live",
+    "finished_at": "2026-10-19T09:06:05.231195Z"
+  },
+  "lovable_publish": {
+    "id": "beb58cc4-eea7-404d-aed2-e703385aeacf",
+    "url": "https://trade-plan-pad.lovable.app",
+    "authenticated_live_display_verified": true
+  },
+  "migration": {
+    "version": "20261017103906",
+    "applied_once": true,
+    "function_hashes": [
+      "1cc4c036baab63db307b4c596b290f84",
+      "ca99c94065e2715d8a9fd208b103e928"
+    ]
+  },
+  "runtime": {
+    "cpu": 1,
+    "memory_mib": 2048,
+    "worker_concurrency": 1,
+    "peak_observed_cgroup_mib": 1403.51,
+    "oom_observed": false
+  },
+  "postdeploy_health": {
+    "http_status": 200,
+    "ok": true,
+    "mode": "collection",
+    "numeric_reader": "displayed-hover.v1",
+    "source_session_configured": true,
+    "new_capture_hourly_limit": 12,
+    "store_connectivity": {
+      "checked": true,
+      "ready": true
+    }
+  },
+  "cases": [
+    {
+      "timeframe": "12H",
+      "rows": 133,
+      "pools": 3,
+      "hover_seconds": 193.002,
+      "total_seconds": 286.251
+    },
+    {
+      "timeframe": "24H",
+      "rows": 141,
+      "pools": 5,
+      "hover_seconds": 135.11,
+      "total_seconds": 221.464,
+      "validation": "retained original source image, DOM labels, tooltip rows and GPT response replay; no additional inference/source request"
+    },
+    {
+      "timeframe": "48H",
+      "rows": 141,
+      "pools": 1,
+      "hover_seconds": 169.79,
+      "total_seconds": 249.96
+    }
+  ],
+  "live_acceptance": {
+    "session_id": "09d0cf0c-d22b-4435-b0f9-bafc7d4b186b",
+    "status": "archived",
+    "template_active": false,
+    "timeframes": 3,
+    "audit_rows": 3,
+    "authenticated_rpc_save": true,
+    "reread_evidence_matches": true,
+    "preview_ui_verified": true,
+    "published_ui_verified": true,
+    "existing_worksheets_modified": false
+  },
+  "limits": {
+    "numeric_scope": "displayed_latest_column",
+    "units": "source_metric unless source currency explicit",
+    "future_source_change_guarantee": false
+  },
+  "no_duplicate_deployments": true,
+  "no_model1_or_model2_source_reruns": true
+}
