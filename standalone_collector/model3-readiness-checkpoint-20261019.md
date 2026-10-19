@@ -22,3 +22,21 @@ Local prepare checks before the final budget adjustment: 106 + 14 + 121 + 143 te
 One new guarded Model 3/48H acceptance is running under /tmp/hover-model3-readiness-acceptance-20261019-0b6ab49. Bundle SHA256: 2642c46f50208caa73fae0e5011530a26a11632b3553d3f079a6c6993c58f902. Maximum one API request, zero database writes. Do not relaunch this path.
 
 Remaining gates: paid-runtime 12H/24H/48H source + GPT validation, current app validators, coordinated migration/release once, actual save/read/display verification. Source amounts remain source_metric unless an explicit currency unit is present; percentages cover displayed latest column, not historical totals.
+
+## Root cause isolated after the initial checkpoint
+
+A passive before/after probe on the paid service proved that the full-page screenshot changes Model 3's displayed price range. Numeric axis ticks stayed 77000–87000 after cookie dismissal, then became 89000–99000 immediately after screenshot. The unchanged before/after cookie readings rule out cookie dismissal in this reproduced event. Evidence: model3-axis-transition-20261019.json. The price-axis equality gate prevented accepting mismatched image/hover data.
+
+Candidate fix under verification: keep viewport width 1600, use height 1300 for Model 3 so its observed 800px chart/header fit, and take a viewport screenshot. Models 1–2 retain their existing viewport and full-page capture. Check numeric axis equality around the retained frame and throughout hover. This changes the capture mechanism, not the source numbers or model confidence requirements.
+
+One earlier acceptance stopped in browser_launch with TargetClosedError, before source/API. Two separate launch-only checks, including the restricted child environment, passed afterward. Its exact process-exit cause was not retained; do not claim it is explained by the chart bug. A fixed-field launch observer was added to subsequent test bundles only.
+
+No production deployment or database write. API calls so far remain one, the rejected unfinished image.
+
+## Current continuation point
+
+- Collector PR175 candidate head: 73aeb29988006632f7237b4e3e8c57dd9713216b. App PR81 head: bd82e38d5c33781dda8e744ae5649e3b7479dabf. Both remain draft/unmerged.
+- Final local clean prepare: 106 + 14 + 121 + 143 tests passed. App focused hover/quantity/display checks: 24 passed. Collector GitHub workflow 39216317020 passed; app migration and RLS workflows passed; app build was still running at checkpoint.
+- One active serial guarded acceptance: /tmp/hover-model3-viewport-acceptance-20261019-0b6ab49, guard PID 3188, bundle SHA256 af7efad788bf06fdbee74e17f77d572cdc99b43de11a69676baddf35dbbe8e93. Cases: Model 3 48H -> 12H -> 24H. Stops on any failure; at most one API request per case; no database writes. Do not launch another. Last observed stage: 48H hover_collection, after the before/after screenshot axis gate passed.
+- Existing local disposable PGlite database review-data/hover-current-isolated-pg reopened successfully as legacy_transaction_test with both save functions; do not rebuild it unnecessarily. Its acceptance writes must be rolled back.
+- No production merge, deployment or database change.
