@@ -192,7 +192,7 @@ class ProminentTests(unittest.TestCase):
         hover_rows=[]
         for i,price in enumerate([110,100,90]):
             row=parse_tooltip(f'2026-01-01 00:00 Price {price} Liquidation Leverage 1.00M')
-            row.update(id=f'r{i}',time_text='2026-01-01 00:00',y_fraction=i/2)
+            row.update(id=f'r{i}',time_text='2026-01-01 00:00',y_fraction=(i*100+50)/299)
             hover_rows.append(row)
         snapshot={'version':'displayed-hover.v1','rows':hover_rows,'total_value':3000000,
             'metric':'Liquidation Leverage','unit':'source_metric','scope':'displayed_latest_column',
@@ -217,6 +217,9 @@ class ProminentTests(unittest.TestCase):
                 computed=images[0]['hover_snapshot']['candidates']
                 self.assertEqual([p['source_value'] for p in computed],[1000000,1000000])
                 self.assertEqual([p['source_row_ids'] for p in computed],[['r0'],['r2']])
+                raw['scans'][0]['prominent_levels']=[{
+                    'candidate_id':p['id'],'right_edge_visible':True,'strength_score':.8
+                } for p in computed]
             return raw
         capture_module=types.SimpleNamespace(capture_heatmaps=capture,COINGLASS_HEATMAP_URL=task.SOURCE)
         scanner_module=types.SimpleNamespace(analyze_heatmap_images=analyze)

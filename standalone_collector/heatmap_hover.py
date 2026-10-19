@@ -620,14 +620,13 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
 def candidate_pools(snapshot, image_path):
     """Locate classic-palette bands; calculate only from the verified rows.
 
-    Candidates still require visual confirmation in the existing single GPT call.
+    Code owns row membership; GPT checks map identity, readability and visibility.
     Three samples within each row reduce boundary/candlestick pixel noise. A gap
     or colour change always splits a band; no interpolation creates quantities.
     """
     from PIL import Image
     validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     bounds = snapshot['plot_bounds']
-    x = math.floor(bounds['right']-.25)
     height = snapshot['row_height_pixels']
     green_blue = MODEL2_GREEN_BLUE_HUE if snapshot.get('heatmap_model')==2 else .48
     def colour(rgb):
@@ -640,14 +639,32 @@ def candidate_pools(snapshot, image_path):
     with Image.open(image_path) as original:
         image=original.convert('RGB')
         try:
+            coordinates=[bounds.get(k) for k in ('left','right','top','bottom')]
+            if (any(type(v) not in (int,float) or not math.isfinite(v) for v in coordinates)
+                or not 0 <= bounds['left'] < bounds['right'] < image.width
+                or not 0 <= bounds['top'] < bounds['bottom'] < image.height
+                or type(height) not in (int,float) or not math.isfinite(height)
+                or not 0 < height <= bounds['bottom']-bounds['top']):
+                raise HoverError('hover_geometry_invalid')
+            x = math.floor(bounds['right']-.25)
+            previous_y=None
             for row in snapshot['rows']:
+                fraction=row.get('y_fraction')
+                if type(fraction) not in (int,float) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
+                    raise HoverError('hover_geometry_invalid')
                 y=bounds['top']+row['y_fraction']*(bounds['bottom']-bounds['top'])
+                if previous_y is not None and not 0 < y-previous_y <= height+1:
+                    raise HoverError('hover_geometry_invalid')
+                previous_y=y
                 samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*height))))))
                          for d in (-.2,0,.2)]
                 label=next((c for c in ('yellow','green','blue') if samples.count(c)>=2),None)
                 if row['value']==0:label=None
                 if groups and groups[-1][0]==label:groups[-1][1].append(row)
                 else:groups.append((label,[row]))
+            if (snapshot['rows'][0]['y_fraction']*(bounds['bottom']-bounds['top']) > height
+                or (1-snapshot['rows'][-1]['y_fraction'])*(bounds['bottom']-bounds['top']) > height):
+                raise HoverError('hover_geometry_invalid')
         finally:image.close()
     prominent=any(label=='yellow' or (label=='green' and len(members)>1) for label,members in groups)
     pools=[]
@@ -685,9 +702,10 @@ def model_content(image):
     if snapshot.get('heatmap_model')==2:
         validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
         payload['source_candle']=snapshot['source_candle']
-    content = [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
-             'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
-             'If any boundary, colour or continuity is wrong, mark that candidate confidence=low. '
+    content = [{'type':'input_text','text':'Code-computed bands from this same PNG and verified displayed hover rows. '
+             'Return every candidate_id with right_edge_visible and strength_score only. '
+             'Check map context and whether the candidate location is visible and unobstructed at the latest edge. '
+             'Code independently rechecks colour classes, row membership, continuity and all numbers against the original evidence. '
              'source_metric is NOT verified USD. Total covers the displayed current column only.\n'+json.dumps(payload)}]
     if snapshot.get('heatmap_model')==2:
         from price_detail_input import detail_provenance
@@ -700,12 +718,12 @@ def model_content(image):
     return content
 
 
-def ground_analysis(raw, snapshot):
+def ground_analysis(raw, snapshot, *, image_path=None, source_sha256=None):
     validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     result = copy.deepcopy(raw)
     scans = result.get('scans')
     if not isinstance(scans,list) or len(scans)!=1: raise HoverError('hover_analysis_shape')
-    if scans[0].get('readable') is False or scans[0].get('blocking_condition','none')!='none':
+    if scans[0].get('readable') is not True or scans[0].get('blocking_condition')!='none':
         from model1_execution import StageFailure
         raise StageFailure('source_not_readable')
     from model1_price_range import validate_price_range
@@ -732,19 +750,37 @@ def ground_analysis(raw, snapshot):
         scans[0]['price_axis_range']={
             'low':ticks[0],'high':ticks[-1],
             'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
-    candidates={p['id']:p for p in snapshot['candidates']}
+    # Do not turn an LLM confidence label into numeric verification. Recompute
+    # the complete selection from the SAME original PNG, including neighbouring
+    # rows, gaps and sums. A changed image or altered/omitted pool fails closed.
+    from pathlib import Path
+    if image_path is None or source_sha256 is None:
+        raise HoverError('hover_image_evidence_missing')
+    if hashlib.sha256(Path(image_path).read_bytes()).hexdigest()!=source_sha256:
+        raise HoverError('hover_image_changed')
+    if (snapshot.get('complete') is not True
+        or snapshot.get('total_value')!=float(sum(Decimal(str(r['value'])) for r in snapshot['rows']))
+        or snapshot.get('unit')!=snapshot['rows'][0]['unit']):
+        raise HoverError('hover_evidence_mismatch')
+    verified=candidate_pools(snapshot,image_path)
+    if snapshot.get('candidates')!=verified:
+        raise HoverError('hover_candidate_evidence_mismatch')
+    candidates={p['id']:p for p in verified}
     selected=scans[0].get('prominent_levels')
     if (not isinstance(selected,list) or len(selected)!=len(candidates)
+        or any(not isinstance(p,dict) for p in selected)
         or {p.get('candidate_id') for p in selected}!=set(candidates)):
         raise HoverError('hover_candidate_missing')
     used = set()
     by_id = {r['id']:r for r in snapshot['rows']}
     for level in selected:
-        if level.get('confidence') != 'high':
-            raise HoverError('hover_pool_uncertain')
+        if set(level)!={'candidate_id','right_edge_visible','strength_score'}:
+            raise HoverError('hover_analysis_shape')
+        if level['right_edge_visible'] is not True:
+            raise HoverError('hover_pool_not_visible')
         candidate=candidates[level['candidate_id']]
-        if any(level.get(k)!=candidate[k] for k in ('row_colour','shape','intensity')):
-            raise HoverError('hover_candidate_disagreement')
+        level.update({k:candidate[k] for k in ('row_colour','shape','intensity')})
+        level.update(continuous=True,weak_gap_present=False)
         ids = candidate['source_row_ids']
         level['source_row_ids']=ids
         if not isinstance(ids,list) or not ids or len(ids)!=len(set(ids)) or any(i not in by_id for i in ids):
@@ -765,11 +801,12 @@ def ground_analysis(raw, snapshot):
         level.update(price_low=low,price_high=high,
             prices=[low] if len(members)==1 else [],
             price_precision='verified_label',evidence_basis='tooltip',uncertainty_usd=0,
-            confidence='high',price_evidence=f"Price {low} — Price {high}; displayed tooltip rows {ids[0]} to {ids[-1]}")
+            confidence='high',price_evidence=f"Price {low} — Price {high}; displayed tooltip rows {ids[0]} to {ids[-1]}; membership verified from source pixels")
         # Classification is arithmetic against the fully validated reference
         # range. The normalizer still omits pools intersecting that range.
         if low>current['high']:level['side']='above'
         elif high<current['low']:level['side']='below'
+        else:level['side']='above'  # Intersecting pools are omitted by the normalizer.
     return result
 
 

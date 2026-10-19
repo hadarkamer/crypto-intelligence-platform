@@ -1,5 +1,6 @@
 """Source-grounded tooltip parsing, pool arithmetic and installed flow checks."""
 import copy
+import hashlib
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
 
 def proposed(levels):
-    return {'scans':[{'current_price_range':REFERENCE,'prominent_levels':levels}]}
+    return {'scans':[{'readable':True,'blocking_condition':'none','current_price_range':REFERENCE,'prominent_levels':levels}]}
 
 def candidate(ids, identifier='c0'):
     return {'id':identifier,'source_row_ids':ids,'row_colour':'green','shape':'range','intensity':'normal'}
@@ -32,6 +33,28 @@ def rows():
 
 
 class HoverTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def source_fixture(self, model=1):
+        from PIL import Image,ImageDraw
+        path=Path(self.temp.name)/'source.png'
+        data=rows()
+        for i,row in enumerate(data):row['y_fraction']=(i*20+10)/59
+        image=Image.new('RGB',(500,60),(68,1,84));draw=ImageDraw.Draw(image)
+        draw.rectangle((0,20,499,59),fill=(48,173,118));image.save(path)
+        snapshot={'rows':data,'heatmap_model':model,'complete':True,'total_value':7270000,'unit':'source_metric',
+            'plot_bounds':{'left':0,'right':499,'top':0,'bottom':59},'row_height_pixels':20}
+        snapshot['candidates']=candidate_pools(snapshot,path)
+        if model==2:
+            snapshot['source_candle']=parse_candle('2026-10-17 12:05 Open 82200 High 82300 Low 82100 Close 82250')
+            snapshot['source_time']=snapshot['source_candle']['source_time']
+        return snapshot,{'image_path':path,'source_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+
+    def context_level(self):
+        return {'candidate_id':'c0','right_edge_visible':True,'strength_score':.5}
+
     def test_model2_reasoning_keeps_one_request_and_other_models_unchanged(self):
         import sys
         runtime=Path(__file__).with_name('runtime')
@@ -48,6 +71,8 @@ class HoverTests(unittest.TestCase):
                 request=post.call_args.kwargs['json']
                 self.assertEqual(request['reasoning']['effort'],effort)
                 self.assertEqual(request['max_output_tokens'],12000)
+                properties=request['text']['format']['schema']['properties']['scans']['items']['properties']['prominent_levels']['items']['properties']
+                self.assertEqual(set(properties),{'candidate_id','right_edge_visible','strength_score'})
 
     def test_candle_parser_rejects_liquidity_values_bad_ohlc_and_time(self):
         tip='19 Oct 2026, 12:10 Open 82384.4 High 82441.6 Low 82333.8 Close 82432'
@@ -61,20 +86,16 @@ class HoverTests(unittest.TestCase):
         with self.assertRaisesRegex(HoverError,'hover_candle_evidence_mismatch'):
             validate_candle(dict(candle,close=82400),candle['source_time'])
 
-    def test_candle_close_overrides_wrong_visual_reference_without_weakening_pool_checks(self):
-        candle=parse_candle('2026-10-17 12:05 Open 82200 High 82300 Low 82100 Close 82250')
-        snap={'heatmap_model':2,'source_time':candle['source_time'],'source_candle':candle,
-              'rows':rows(),'candidates':[candidate(['r1','r2'])]}
-        level={'candidate_id':'c0','shape':'range','side':'above','confidence':'high','row_colour':'green','intensity':'normal'}
-        raw=proposed([level]);raw['scans'][0]['current_price_range']={'confidence':'low'}
-        grounded=ground_analysis(raw,snap)
-        self.assertEqual(grounded['scans'][0]['prominent_levels'][0]['side'],'below')
+    def test_candle_close_overrides_visual_reference_but_requires_pixel_and_context_evidence(self):
+        snap,image=self.source_fixture(2)
+        raw=proposed([self.context_level()]);raw['scans'][0]['current_price_range']={'confidence':'low'}
+        grounded=ground_analysis(raw,snap,**image)
+        self.assertEqual(grounded['scans'][0]['source_candle'],snap['source_candle'])
         self.assertNotIn('current_price_range',grounded['scans'][0])
-        self.assertEqual(grounded['scans'][0]['source_candle'],candle)
         for change in ({'source_time':'2026-10-17T12:10:00Z'},{'source_candle':None}):
-            with self.assertRaises(HoverError):ground_analysis(raw,{**snap,**change})
-        raw['scans'][0]['prominent_levels'][0]['confidence']='medium'
-        with self.assertRaisesRegex(HoverError,'hover_pool_uncertain'):ground_analysis(raw,snap)
+            with self.assertRaises(HoverError):ground_analysis(raw,{**snap,**change},**image)
+        raw['scans'][0]['prominent_levels'][0]['right_edge_visible']=False
+        with self.assertRaisesRegex(HoverError,'hover_pool_not_visible'):ground_analysis(raw,snap,**image)
 
     def test_persistent_tooltip_requires_visible_update_before_reusing_numbers(self):
         from playwright.sync_api import sync_playwright
@@ -142,30 +163,63 @@ class HoverTests(unittest.TestCase):
             with self.assertRaisesRegex(HoverError,'hover_price_grid_gap'):
                 validate_rows(bad,edge_prices=True)
 
-    def test_pool_sum_matches_site_merge_and_does_not_trust_ai_numbers(self):
-        snapshot={'rows':rows(),'total_value':7270000,'unit':'source_metric','candidates':[candidate(['r1','r2'])]}
-        level={'candidate_id':'c0','shape':'range','side':'below','confidence':'high','row_colour':'green','intensity':'normal',
-               'price_low':1,'price_high':999999,'source_value':999999999}
-        raw=proposed([level])
-        grounded=ground_analysis(raw,snapshot)
+    def test_pool_sum_matches_site_merge_and_provider_cannot_supply_computed_fields(self):
+        snapshot,image=self.source_fixture()
+        raw=proposed([self.context_level()])
+        grounded=ground_analysis(raw,snapshot,**image)
         p=grounded['scans'][0]['prominent_levels'][0]
         self.assertEqual((p['price_low'],p['price_high']),(82147.19,82236.48))
-        self.assertEqual(p['side'],'above')  # Code classifies using the validated reference.
+        self.assertEqual(p['side'],'above')
+        self.assertEqual((p['row_colour'],p['intensity'],p['continuous']),('green','normal',True))
         result={'zones':[dict(p)],'source_url':'https://www.coinglass.com/liquidation-heatmap-model3?coin=BTC&type=symbol',
                 'captured_at':'2026-10-17T12:06:00Z','run_id':'test','observed_price_range':{'low':81000,'high':81100}}
         result=attach_measurements(result,grounded,snapshot,image=b'image')
         self.assertEqual(result['zones'][0]['source_value'],4770000)
-        self.assertEqual(result['hover_snapshot']['unit'],'source_metric')
+        self.assertNotIn('price_low',raw['scans'][0]['prominent_levels'][0])
         self.assertNotIn('time_text',result['hover_snapshot']['rows'][0])
-        self.assertEqual(raw['scans'][0]['prominent_levels'][0]['price_low'],1)
+        for forbidden in ('confidence','row_colour','price_low','continuous'):
+            bad=copy.deepcopy(raw);bad['scans'][0]['prominent_levels'][0][forbidden]='high'
+            with self.assertRaisesRegex(HoverError,'hover_analysis_shape'):ground_analysis(bad,snapshot,**image)
 
-    def test_pool_cannot_overlap_skip_rows_or_upgrade_uncertain_selection(self):
-        base={'candidate_id':'c0','shape':'range','side':'above','confidence':'high','row_colour':'green','intensity':'normal'}
-        for ids,levels in [(['r0','r1'],[base,base]), (['r0','r2'],[base]),
-                          (['r9'],[base]), (['r0','r1'],[{**base,'confidence':'medium'}]),
-                          (['r0','r1'],[{**base,'row_colour':'yellow'}]), (['r0','r1'],[])]:
-            with self.assertRaises(HoverError):
-                ground_analysis(proposed(levels),{'rows':rows(),'candidates':[candidate(ids)]})
+    def test_pool_missing_duplicate_obstructed_or_source_membership_tampered_is_rejected(self):
+        snapshot,image=self.source_fixture()
+        for levels in ([],[self.context_level(),self.context_level()],
+                       [{**self.context_level(),'right_edge_visible':False}]):
+            with self.assertRaises(HoverError):ground_analysis(proposed(levels),snapshot,**image)
+        for field,value in [('source_row_ids',['r0','r2']),('source_row_ids',['r0','r1','r2']),
+                            ('row_colour','yellow'),('source_value',999999),('percent',100)]:
+            bad=copy.deepcopy(snapshot);bad['candidates'][0][field]=value
+            with self.assertRaisesRegex(HoverError,'hover_candidate_evidence_mismatch'):
+                ground_analysis(proposed([self.context_level()]),bad,**image)
+        for field,value in [('total_value',1),('unit','USD'),('complete',False)]:
+            with self.assertRaisesRegex(HoverError,'hover_evidence_mismatch'):
+                ground_analysis(proposed([self.context_level()]),{**snapshot,field:value},**image)
+        with self.assertRaisesRegex(HoverError,'hover_image_evidence_missing'):
+            ground_analysis(proposed([self.context_level()]),snapshot)
+        image['image_path'].write_bytes(b'changed source')
+        with self.assertRaisesRegex(HoverError,'hover_image_changed'):
+            ground_analysis(proposed([self.context_level()]),snapshot,**image)
+
+    def test_code_owned_validation_on_all_models_rejects_changed_colour_and_zero_gap(self):
+        from PIL import Image,ImageDraw
+        for model in (1,2,3):
+            snapshot,image=self.source_fixture(model)
+            ground_analysis(proposed([self.context_level()]),snapshot,**image)
+            with Image.open(image['image_path']) as source:
+                edited=source.copy();ImageDraw.Draw(edited).rectangle((0,20,499,39),fill=(35,140,137));edited.save(image['image_path'])
+            image['source_sha256']=hashlib.sha256(image['image_path'].read_bytes()).hexdigest()
+            with self.assertRaises(HoverError):ground_analysis(proposed([self.context_level()]),snapshot,**image)
+            snapshot,image=self.source_fixture(model)
+            zero=parse_tooltip('2026-10-17 12:05 Price 82236.48 Liquidation Leverage 0.00M')
+            snapshot['rows'][1].update(zero);snapshot['total_value']=4400000
+            with self.assertRaises(HoverError):ground_analysis(proposed([self.context_level()]),snapshot,**image)
+
+    def test_geometry_rejects_reordered_outside_or_missing_row_coordinates(self):
+        snapshot,image=self.source_fixture()
+        for fraction in (float('nan'),-1,2,0,None):
+            invalid=copy.deepcopy(snapshot);invalid['rows'][1]['y_fraction']=fraction
+            with self.assertRaisesRegex(HoverError,'hover_geometry_invalid'):
+                candidate_pools(invalid,image['image_path'])
 
     def test_unreadable_analysis_keeps_source_failure_before_price_validation(self):
         from model1_execution import StageFailure
@@ -176,10 +230,11 @@ class HoverTests(unittest.TestCase):
 
     def test_verified_dom_axis_supplies_numeric_evidence_but_never_repairs_conflicting_ai_bounds(self):
         from prominent_levels import evidence
-        snapshot={'rows':rows(),'candidates':[],'price_axis_ticks':[80000,82000,84000]}
-        raw=proposed([])
+        snapshot,image=self.source_fixture()
+        snapshot['price_axis_ticks']=[80000,82000,84000]
+        raw=proposed([self.context_level()])
         raw['scans'][0]['price_axis_range']={'low':80000,'high':84000,'price_evidence':'visible axis ticks'}
-        grounded=ground_analysis(raw,snapshot)
+        grounded=ground_analysis(raw,snapshot,**image)
         axis=grounded['scans'][0]['price_axis_range']
         evidence(axis['price_evidence'],(80000,84000))
         self.assertEqual(raw['scans'][0]['price_axis_range']['price_evidence'],'visible axis ticks')
@@ -187,9 +242,10 @@ class HoverTests(unittest.TestCase):
                              ([80000,82000,84000],(79000,84000)),([80000,82000,84000],(80000,85000))]:
             invalid=copy.deepcopy(raw);invalid['scans'][0]['price_axis_range'].update(low=bounds[0],high=bounds[1])
             with self.assertRaisesRegex(HoverError,'hover_price_axis_mismatch'):
-                ground_analysis(invalid,{**snapshot,'price_axis_ticks':ticks})
+                ground_analysis(invalid,{**snapshot,'price_axis_ticks':ticks},**image)
         # Legacy and Models 1–2 without a DOM axis keep strict text validation.
-        legacy=ground_analysis(raw,{'rows':rows(),'candidates':[]})
+        snapshot.pop('price_axis_ticks')
+        legacy=ground_analysis(raw,snapshot,**image)
         from model1_execution import StageFailure
         with self.assertRaises(StageFailure):
             evidence(legacy['scans'][0]['price_axis_range']['price_evidence'],(80000,84000))
