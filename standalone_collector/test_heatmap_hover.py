@@ -83,6 +83,21 @@ class HoverTests(unittest.TestCase):
         for value in variants:
             with self.assertRaises(HoverError):validate_rows(value)
 
+    def test_model2_clipped_edges_preserve_prices_without_allowing_missing_rows(self):
+        prices=[90305.7,90167.75,90029.30,89890.85,89752.40,89614.45]
+        observed=[]
+        for i,price in enumerate(prices):
+            row=parse_tooltip(f'2026-10-19 11:40 Price {price} Liquidation Leverage 1.00M')
+            observed.append(dict(row,id=f'r{i}',time_text='2026-10-19 11:40'))
+        self.assertAlmostEqual(validate_rows(observed,edge_prices=True),138.45)
+        self.assertEqual([r['price'] for r in observed],prices)
+        with self.assertRaisesRegex(HoverError,'hover_price_grid_gap'):
+            validate_rows(observed)  # Models 1/3 keep their prior rule.
+        for index,price in ((0,90445),(2,90029.8),(5,89475)):
+            bad=copy.deepcopy(observed);bad[index].update(price=price,raw_price=str(price))
+            with self.assertRaisesRegex(HoverError,'hover_price_grid_gap'):
+                validate_rows(bad,edge_prices=True)
+
     def test_pool_sum_matches_site_merge_and_does_not_trust_ai_numbers(self):
         snapshot={'rows':rows(),'total_value':7270000,'unit':'source_metric','candidates':[candidate(['r1','r2'])]}
         level={'candidate_id':'c0','shape':'range','side':'below','confidence':'high','row_colour':'green','intensity':'normal',
@@ -320,7 +335,11 @@ class HoverTests(unittest.TestCase):
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
                 for model in (2,3):
                     for missing in (False,True):
-                        values=prices.copy()
+                        expected=prices.copy()
+                        if model==2:
+                            expected=[round(90167.75-(i-1)*138.45,2) for i in range(30)]
+                            expected[0]=90305.7;expected[-1]=round(expected[-1]+.5,2)
+                        values=expected.copy()
                         if missing:values[14]=values[15]
                         page.set_content(html.replace('PRICES',json.dumps(values)))
                         path=Path(temp)/'grid.png';page.screenshot(path=str(path),full_page=True)
@@ -329,7 +348,7 @@ class HoverTests(unittest.TestCase):
                                 capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
                         else:
                             result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
-                            self.assertEqual([r['price'] for r in result['rows']],prices)
+                            self.assertEqual([r['price'] for r in result['rows']],expected)
                             self.assertEqual(result['total_value'],465000000)
             finally:browser.close()
 

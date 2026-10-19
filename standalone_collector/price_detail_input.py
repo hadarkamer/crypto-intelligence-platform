@@ -16,8 +16,9 @@ and the adjacent PRICE-axis ticks to estimate the current chart price. Do not
 confuse an axis extreme, a historical candle, a heatmap band or the monetary
 colour legend with the current price. Return ONE scan for the full/crop pair.
 Use the full image for symbol/model/timeframe verification. Keep uncertainty:
-do not assign high confidence unless the candle and bracketing price ticks are
+do not assign high current-price confidence unless the candle and bracketing price ticks are
 unambiguous. Enlargement alone is not new evidence and must not raise confidence.
+This current-price uncertainty is separate from verification of candidate pools.
 Do not invent digits or an exact price label absent from the image.'''
 
 

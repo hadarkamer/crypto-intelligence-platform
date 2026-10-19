@@ -11,8 +11,11 @@ minimum/maximum PRICE-axis ticks into price_axis_range with their numeric text.
 
 Candidate pools were located in the same screenshot and calculated from a
 complete current-column DOM hover sweep. Return exactly one prominent_levels
-entry for EVERY candidate_id. Visually verify its y_top/y_bottom (0=plot top,
-1=bottom), colour and continuity. If any candidate is not supported by the image,
+entry for EVERY candidate_id. y_top/y_bottom are the CENTRES of the first/last
+included price rows, not the outside boundaries of a band (0=plot top, 1=bottom).
+Use plot_bounds and row_height_pixels to locate these rows in the full screenshot;
+the enlarged detail uses the same pixels. Verify colour and continuity at the
+LATEST RIGHT EDGE, not earlier portions of the band. If any candidate is unsupported,
 mark confidence=low; never silently omit it or widen its boundaries. The code
 will reject disagreement rather than present uncertain quantities as verified.
 Do not add pools from historical columns or bridge a weak gap between bands.
@@ -27,6 +30,9 @@ printed in the PNG: use price_precision=verified_label, evidence_basis=tooltip,
 uncertainty_usd=0, and quote the supplied prices in price_evidence.
 The source_row_ids, sums, percentages and exact pool prices are calculated by
 code before this request. Do not recalculate, invent or replace them.
+Candidate confidence describes its visible colour, row membership and continuity.
+Assess it separately from confidence in the last-candle current-price range.
+An absent printed price label does not weaken verified DOM numeric evidence.
 
 The current-price reference is a visual range from the last candle; never use
 a candidate price or convenient midpoint as an exact current quote. Code assigns

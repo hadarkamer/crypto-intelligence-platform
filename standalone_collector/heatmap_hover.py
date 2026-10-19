@@ -185,7 +185,7 @@ def price_overlay_point(image_path, geometry, bounds):
     finally:region.close()
 
 
-def validate_rows(rows, *, complete=True):
+def validate_rows(rows, *, complete=True, edge_prices=False):
     if not isinstance(rows, list) or not 3 <= len(rows) <= MAX_ROWS:
         raise HoverError('hover_row_count')
     previous = None
@@ -201,10 +201,16 @@ def validate_rows(rows, *, complete=True):
             if gap <= 0: raise HoverError('hover_row_order')
             gaps.append(gap)
         previous = row['price']
-    step = statistics.median(gaps)
+    step = statistics.median(gaps[1:-1] if edge_prices and len(gaps)>2 else gaps)
     # Displayed prices are rounded to cents. A missing row must not pass as coverage.
-    if complete and any(abs(gap-step) > max(.025, step*.002) for gap in gaps):
-        raise HoverError('hover_price_grid_gap')
+    if complete:
+        tolerance=max(.025, step*.002)
+        for index,gap in enumerate(gaps):
+            # Model 2 clips the first/last displayed price to the plot edge.
+            # These intervals may be shorter, never longer than one native row.
+            clipped=edge_prices and len(gaps)>2 and index in (0,len(gaps)-1)
+            if (gap>step+tolerance if clipped else abs(gap-step)>tolerance):
+                raise HoverError('hover_price_grid_gap')
     return step
 
 
@@ -344,7 +350,11 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             # Some source tooltips persist outside the plot. Observe their text
             # and position instead of requiring them to disappear within 450ms.
             page.mouse.move(0, 0)
-            previous = page.evaluate(READ_TOOLTIP, 'state')
+            if model == 3:
+                # Keep the verified WebGL event/anchor path unchanged.
+                wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+            else:
+                previous = page.evaluate(READ_TOOLTIP, 'state')
         page.mouse.move(x, y-scroll_y)
         text = wait_for_tooltip(
             READ_UPDATED_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
@@ -390,13 +400,17 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
                 raise HoverError('hover_snapshot_changed')
             y = sample_y
     for i,row in enumerate(calibration):row['id']=f'r{i}'
-    initial_step = validate_rows(calibration)
+    if model==2:
+        validate_rows(calibration,complete=False)
+        initial_step=validate_rows([dict(row,id=f'r{i}') for i,row in enumerate(calibration[1:])])
+        if top_row['price']-calibration[1]['price']>initial_step+max(.025,initial_step*.002):
+            raise HoverError('hover_price_grid_gap')
+    else:
+        initial_step = validate_rows(calibration)
     if min(b-a for a,b in zip(transitions,transitions[1:])) < 2:
         raise HoverError('hover_resolution_insufficient')
 
     bottom_row, bottom_y = edge(bottom_y, -1)
-    count = round((top_row['price']-bottom_row['price'])/initial_step)+1
-    if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
     # Locate the last boundary too. This prevents a one-pixel calibration error
     # from accumulating across the whole height of the chart.
     previous_y = bottom_y
@@ -406,7 +420,9 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         if target <= top_y:break
         row = read(target)
         if row['price'] != bottom_row['price']:
-            if abs(row['price']-bottom_row['price']-initial_step) > max(.025,initial_step*.002):
+            gap=row['price']-bottom_row['price']
+            tolerance=max(.025,initial_step*.002)
+            if (not 0<gap<=initial_step+tolerance if model==2 else abs(gap-initial_step)>tolerance):
                 raise HoverError('hover_price_grid_gap')
             last_inner = row
             last_boundary = (previous_y+target)/2
@@ -415,6 +431,9 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             raise HoverError('hover_snapshot_changed')
         previous_y = target
     if last_boundary is None:raise HoverError('hover_resolution_insufficient')
+    count = (round((calibration[1]['price']-last_inner['price'])/initial_step)+3 if model==2
+             else round((top_row['price']-bottom_row['price'])/initial_step)+1)
+    if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
     height = (last_boundary-transitions[0])/(count-2)
     if height < 2 or any(abs(t-(transitions[0]+i*height))>1.1 for i,t in enumerate(transitions)):
         raise HoverError('hover_resolution_insufficient')
@@ -474,7 +493,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
         rows.append(row);positions.append(target)
-    price_step = validate_rows(rows)
+    price_step = validate_rows(rows,edge_prices=model==2)
     if model==3 and source_axis is not None:verify_source_axis(page,source_axis,rows)
     # Recheck distributed anchors after the sweep. A refresh must fail this
     # observation rather than combine values from different source moments.
@@ -505,7 +524,7 @@ def candidate_pools(snapshot, image_path):
     or colour change always splits a band; no interpolation creates quantities.
     """
     from PIL import Image
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     bounds = snapshot['plot_bounds']
     x = math.floor(bounds['right']-.25)
     height = snapshot['row_height_pixels']
@@ -556,8 +575,10 @@ def prepare_candidates(images):
 def model_content(image):
     snapshot = image.get('hover_snapshot')
     if not snapshot: return []
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     payload = {k: snapshot[k] for k in ('version','metric','unit','scope','source_time','total_value')}
+    payload['plot_bounds'] = snapshot['plot_bounds']
+    payload['row_height_pixels'] = snapshot['row_height_pixels']
     payload['candidates'] = snapshot['candidates']
     return [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
              'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
@@ -566,7 +587,7 @@ def model_content(image):
 
 
 def ground_analysis(raw, snapshot):
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     result = copy.deepcopy(raw)
     scans = result.get('scans')
     if not isinstance(scans,list) or len(scans)!=1: raise HoverError('hover_analysis_shape')
@@ -630,7 +651,7 @@ def ground_analysis(raw, snapshot):
 
 
 def attach_measurements(result, raw, snapshot, *, image):
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     output = copy.deepcopy(snapshot)
     output['rows'] = [{k:r[k] for k in ('id','price','value','raw_price','raw_value','rounding_error')}
                       for r in snapshot['rows']]
