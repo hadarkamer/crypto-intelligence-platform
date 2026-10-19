@@ -371,9 +371,9 @@ class HoverTests(unittest.TestCase):
                         fixture=html.replace('PRICES',json.dumps(values))
                         if model==2:
                             fixture=fixture.replace('height="300"','height="340"')
-                            fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,4,4);let shown=true;c.onclick=()=>shown=!shown;")
+                            fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,1,4);let shown=true;c.onclick=()=>shown=!shown;")
                             fixture=fixture.replace('e.offsetY/10','(e.offsetY-40)/10')
-                            fixture=fixture.replace("t.style.display='block';t.innerText=", "if(e.offsetY<40)return;t.style.display='block';if(shown&&e.offsetY>=180&&e.offsetY<=184){t.innerText='STAMP Open 88300 High 88500 Low 88200 Close 88400';return;}t.innerText=").replace('STAMP',stamp)
+                            fixture=fixture.replace("t.style.display='block';t.innerText=", "if(e.offsetY<40)return;t.style.display='block';if(shown&&e.offsetX>=596&&e.offsetX<597&&e.offsetY>=180&&e.offsetY<=184){t.innerText='STAMP Open 88300 High 88500 Low 88200 Close 88400';return;}t.innerText=").replace('STAMP',stamp)
                         if missing=="candle_changed":
                             fixture=fixture.replace('let shown=true;c.onclick=()=>shown=!shown;', 'let shown=true,toggles=0;c.onclick=()=>{shown=!shown;toggles++};')
                             fixture=fixture.replace("Close 88400'", "Close '+(toggles>1?'88401':'88400')")
@@ -474,9 +474,9 @@ class HoverTests(unittest.TestCase):
                     fixture=html.replace('STUCK',str(mode=='stuck').lower())
                     if model==2:
                         fixture=fixture.replace('height="300"','height="340"')
-                        fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,4,4);let shown=true;c.onclick=()=>shown=!shown;")
+                        fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,1,4);let shown=true;c.onclick=()=>shown=!shown;")
                         fixture=fixture.replace('e.offsetY/10','(e.offsetY-40)/10')
-                        fixture=fixture.replace("if("+str(mode=='stuck').lower()+" && row===14)return;", "if(e.offsetY<40)return;if(shown&&e.offsetY>=180&&e.offsetY<=184){t.style.display='block';t.innerText='"+stamp+" Open 986 High 987 Low 985 Close 986';return;}if("+str(mode=='stuck').lower()+" && row===14)return;")
+                        fixture=fixture.replace("if("+str(mode=='stuck').lower()+" && row===14)return;", "if(e.offsetY<40)return;if(shown&&e.offsetX>=596&&e.offsetX<597&&e.offsetY>=180&&e.offsetY<=184){t.style.display='block';t.innerText='"+stamp+" Open 986 High 987 Low 985 Close 986';return;}if("+str(mode=='stuck').lower()+" && row===14)return;")
                     if mode=='no-animation-frame':
                         # DOM updates continue while animation-frame callbacks
                         # never run. Timer polling must still read every row.

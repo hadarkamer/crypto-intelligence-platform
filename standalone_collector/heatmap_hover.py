@@ -120,18 +120,27 @@ def candle_points(image_path, bounds):
         image=original.convert('RGB')
     try:
         right=math.floor(bounds['right']-.25)
-        ys=[]
+        pixels=[]
         for y in range(bounds['top']+1,bounds['bottom']):
             for x in range(right-3,right+1):
                 r,g,b=image.getpixel((x,y))
                 if (r<35 and g>185 and 100<b<150) or (r>200 and g<110 and 40<b<150):
-                    ys.append(y);break
+                    pixels.append((x,y))
         groups=[]
-        for y in ys:
-            if not groups or y-groups[-1][-1]>2:groups.append([])
-            groups[-1].append(y)
+        for point in pixels:
+            if not groups or point[1]-groups[-1][-1][1]>2:groups.append([])
+            groups[-1].append(point)
         if not 1<=len(groups)<=8:raise HoverError('hover_candle_not_found')
-        return [(bounds['right']-.25,(g[0]+g[-1])/2) for g in groups]
+        points=[]
+        for group in groups:
+            # The candle can end before the heatmap edge (observed in 12H).
+            # Hover a painted pixel in the rightmost candle segment, not empty
+            # space at the heatmap boundary. Timestamp matching still proves
+            # that it belongs to the same latest column as the liquidity rows.
+            x=max(p[0] for p in group)
+            ys=[p[1] for p in group if p[0]==x]
+            points.append((x+.5,ys[len(ys)//2]+.5))
+        return points
     finally:image.close()
 
 READ_UPDATED_TOOLTIP = r'''previous => {
