@@ -245,6 +245,8 @@ class ProminentTests(unittest.TestCase):
         with patch.object(scanner.requests,'post',return_value=response) as post:
             scanner.analyze_heatmap_images([{'image':'data:image/png;base64,AAAA','timeframe':'12h'}],api_key='synthetic',model='synthetic')
         post.assert_called_once();self.assertEqual(post.call_args.kwargs['json']['max_output_tokens'],12000)
+        self.assertEqual(post.call_args.kwargs['json']['reasoning'],{'effort':'medium'})
+        self.assertEqual(post.call_args.kwargs['timeout'],(8,120))
         self.assertFalse(post.call_args.kwargs['allow_redirects'])
     def test_full_image_detail_pair_requires_one_scan_in_actual_request(self):
         from PIL import Image
