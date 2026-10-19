@@ -685,10 +685,19 @@ def model_content(image):
     if snapshot.get('heatmap_model')==2:
         validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
         payload['source_candle']=snapshot['source_candle']
-    return [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
+    content = [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
              'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
              'If any boundary, colour or continuity is wrong, mark that candidate confidence=low. '
              'source_metric is NOT verified USD. Total covers the displayed current column only.\n'+json.dumps(payload)}]
+    if snapshot.get('heatmap_model')==2:
+        from price_detail_input import detail_provenance
+        detail=detail_provenance(image)
+        if detail is not None:
+            x,y,_,_=detail['crop_box'];scale=detail['scale']
+            content[0]['text']+=(f'\nCoordinate mapping for the supplied detail: full-image origin {[x,y]}, '
+                f'enlargement {scale}. For a full-image point (X,Y), detail pixels are '
+                f'({scale}*(X-{x}), {scale}*(Y-{y})). This only locates existing pixels and adds no confidence.')
+    return content
 
 
 def ground_analysis(raw, snapshot):

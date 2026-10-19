@@ -47,6 +47,11 @@ colour or the legend. Keep short_summary concise and observational.
 """
 
 MODEL2_REFERENCE = f'''
+price_axis_range.price_evidence must quote BOTH low and high as full decimal
+numbers exactly matching those numeric fields. A generic phrase such as "visible
+axis ticks" is insufficient. Read the labels from the image; do not invent them
+or substitute hover-row prices for axis labels.
+
 The current-price reference is source_candle.close, read from the visible OHLC
 tooltip on this same map's latest column. Its source_time matches the liquidity
 rows and it was unchanged on a second read. It is the displayed candle Close,
