@@ -648,12 +648,17 @@ def candidate_pools(snapshot, image_path):
                 raise HoverError('hover_geometry_invalid')
             x = math.floor(bounds['right']-.25)
             previous_y=None
-            for row in snapshot['rows']:
+            for index,row in enumerate(snapshot['rows']):
                 fraction=row.get('y_fraction')
                 if type(fraction) not in (int,float) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
                     raise HoverError('hover_geometry_invalid')
                 y=bounds['top']+row['y_fraction']*(bounds['bottom']-bounds['top'])
-                if previous_y is not None and not 0 < y-previous_y <= height+1:
+                # The capture stores outer-row anchors at the visible plot
+                # edges, while interior rows use calibrated centres. Their
+                # first/last gap can therefore span 1.5 rows plus calibration
+                # rounding; interior gaps must still fit one native row.
+                max_gap=(1.5*height if index in (1,len(snapshot['rows'])-1) else height)+1
+                if previous_y is not None and not 0 < y-previous_y <= max_gap:
                     raise HoverError('hover_geometry_invalid')
                 previous_y=y
                 samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*height))))))

@@ -21,8 +21,9 @@ area or unreadable map prevents that context check. A difference in green shades
 is not an obstruction. Do not substitute subjective colour confidence for this
 visibility check. Report actual context problems in limitations; never omit a
 candidate. Code rejects missing, duplicate or obstructed candidates.
-y_top/y_bottom are the CENTRES of the first/last included rows, not the outside
-pixel boundaries. Use plot_bounds and row_height_pixels to locate them.
+y_top/y_bottom locate the sampled first/last included rows, not band boundaries.
+Interior samples are row centres; the outermost chart rows use visible edge
+anchors. Use plot_bounds and row_height_pixels to locate them.
 strength_score is relative visual prominence in 0..1, not money or probability.
 
 Interpret the supplied code-computed colours and values without changing them.

@@ -221,6 +221,26 @@ class HoverTests(unittest.TestCase):
             with self.assertRaisesRegex(HoverError,'hover_geometry_invalid'):
                 candidate_pools(invalid,image['image_path'])
 
+    def test_observed_model2_edge_anchors_do_not_relax_interior_geometry(self):
+        from PIL import Image
+        path=Path(self.temp.name)/'edge-anchors.png'
+        Image.new('RGB',(1600,1300),(48,173,118)).save(path)
+        data=[]
+        # Retained 24H/48H geometry: first two samples are 8.00756px apart
+        # although native row height is 5.015px. The first sample is an edge
+        # anchor, not a centre. Interior samples remain one native row apart.
+        for i in range(119):
+            price=90305.7 if i==0 else round(90167.75-(i-1)*138.45,2)
+            row=parse_tooltip(f'2026-10-19 12:10 Price {price} Liquidation Leverage 1.00M')
+            fraction=.000419 if i==0 else 1.0 if i==118 else (8.257704+(i-1)*5.015)/597
+            row.update(id=f'r{i}',time_text='2026-10-19 12:10',y_fraction=fraction)
+            data.append(row)
+        snapshot={'rows':data,'heatmap_model':2,'total_value':119000000,
+            'plot_bounds':{'left':372,'right':1494,'top':576,'bottom':1173},'row_height_pixels':5.015}
+        self.assertEqual(len(candidate_pools(snapshot,path)[0]['source_row_ids']),119)
+        bad=copy.deepcopy(snapshot);bad['rows'][60]['y_fraction']+=5.015/597
+        with self.assertRaisesRegex(HoverError,'hover_geometry_invalid'):candidate_pools(bad,path)
+
     def test_unreadable_analysis_keeps_source_failure_before_price_validation(self):
         from model1_execution import StageFailure
         with self.assertRaises(StageFailure) as error:
