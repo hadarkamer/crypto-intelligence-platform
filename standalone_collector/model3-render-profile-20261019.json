@@ -1,0 +1,67 @@
+[
+  {
+    "seconds": 8.798,
+    "cpu_seconds": {
+      "controller": 0.04
+    },
+    "samples": 1687,
+    "top": [
+      {
+        "function": "(program)",
+        "host": null,
+        "file": "",
+        "samples": 1661
+      },
+      {
+        "function": "(idle)",
+        "host": null,
+        "file": "",
+        "samples": 14
+      },
+      {
+        "function": "(garbage collector)",
+        "host": null,
+        "file": "",
+        "samples": 2
+      },
+      {
+        "function": "uniform4f",
+        "host": null,
+        "file": "",
+        "samples": 2
+      },
+      {
+        "function": "bindVertexArray",
+        "host": null,
+        "file": "",
+        "samples": 1
+      },
+      {
+        "function": "value",
+        "host": "s3.coinglass.com",
+        "file": "_app-5820290ea3a80dc0.js",
+        "samples": 1
+      },
+      {
+        "function": "send",
+        "host": null,
+        "file": "",
+        "samples": 1
+      },
+      {
+        "function": "drawElements",
+        "host": null,
+        "file": "",
+        "samples": 1
+      }
+    ],
+    "canvas": [
+      {
+        "width": 1428,
+        "height": 800,
+        "kind": "webgl",
+        "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)"
+      }
+    ]
+  }
+]
