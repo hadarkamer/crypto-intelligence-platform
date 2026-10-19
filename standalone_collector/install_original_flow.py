@@ -56,6 +56,7 @@ def install(runtime: Path):
     scanner_path=runtime/'market_vision/openai_heatmap_scanner.py';text=scanner_path.read_text()
     text=replace_once(text,'import requests','import requests\nfrom model1_execution import accept_model_response')
     text=replace_once(text,'"store": False,','"store": False,\n        "max_output_tokens": 3500,')
+    text=replace_once(text,'"reasoning": {"effort": "medium"}','"reasoning": {"effort": "low"}')
     text=replace_once(text,'Use the labels supplied before each image as authoritative metadata.',
         'Verify visible settings; supplied labels state the requested view only.')
     text=replace_once(text,'7. Keep 12h and 24h separate, then compare them only if both were supplied.',
