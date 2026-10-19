@@ -32,6 +32,23 @@ def rows():
 
 
 class HoverTests(unittest.TestCase):
+    def test_model2_reasoning_keeps_one_request_and_other_models_unchanged(self):
+        import sys
+        runtime=Path(__file__).with_name('runtime')
+        with patch.object(sys,'path',[str(runtime),*sys.path]):
+            from market_vision import openai_heatmap_scanner as scanner
+        response=Mock(ok=True)
+        response.json.return_value={'status':'completed','output_text':'{"scans":[]}','usage':{}}
+        for model,effort in ((1,'low'),(2,'medium'),(3,'low')):
+            with self.subTest(model=model),patch.object(scanner,'HEATMAP_MODEL',model),patch.object(
+                    scanner.requests,'post',return_value=response) as post:
+                scanner.analyze_heatmap_images([{'image':'data:image/png;base64,AAAA','timeframe':'24h'}],
+                    api_key='synthetic',model='synthetic')
+                post.assert_called_once()
+                request=post.call_args.kwargs['json']
+                self.assertEqual(request['reasoning']['effort'],effort)
+                self.assertEqual(request['max_output_tokens'],12000)
+
     def test_candle_parser_rejects_liquidity_values_bad_ohlc_and_time(self):
         tip='19 Oct 2026, 12:10 Open 82384.4 High 82441.6 Low 82333.8 Close 82432'
         candle=parse_candle(tip)

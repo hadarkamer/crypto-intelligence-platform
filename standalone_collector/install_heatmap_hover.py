@@ -101,6 +101,10 @@ def install(runtime: Path):
 
     path = runtime/'market_vision/openai_heatmap_scanner.py'
     text = path.read_text()
+    # Retained Model 2 / 24H and 48H bands failed at low reasoning but passed
+    # at medium with identical evidence and strict pool validation.
+    text = once(text, '"reasoning": {"effort": "low"},',
+        '"reasoning": {"effort": "medium" if HEATMAP_MODEL == 2 else "low"},')
     text = once(text, '        content.extend(detail_content(image))',
         '        content.extend(detail_content(image))\n'
         '        from heatmap_hover import model_content\n'
