@@ -268,7 +268,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     started = time.monotonic()
     # Keep a bounded full-column budget within the existing worker timeout.
     # Model 3 uses an expensive WebGL renderer on the intended 1-CPU service.
-    max_seconds = 180 if model == 3 else MAX_SECONDS
+    max_seconds = 240 if model == 3 else MAX_SECONDS
     if model==3 and source_axis is not None:verify_source_axis(page,source_axis)
     bounds = plot_bounds(image_path, geometry)
     # UTC makes both visible tooltip timestamp formats unambiguous.

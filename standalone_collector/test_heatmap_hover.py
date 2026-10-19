@@ -391,7 +391,7 @@ class HoverTests(unittest.TestCase):
                     path=Path(temp)/'fixture.png';page.screenshot(path=str(path),full_page=True)
                     if mode=='expired-model3':
                         with patch('heatmap_hover.time') as clock:
-                            clock.monotonic.side_effect=iter([0]+[181]*100)
+                            clock.monotonic.side_effect=iter([0]+[241]*100)
                             with self.assertRaisesRegex(HoverError,'hover_deadline'):
                                 capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
                     elif mode in ('stuck','changed-time','synthetic-different'):

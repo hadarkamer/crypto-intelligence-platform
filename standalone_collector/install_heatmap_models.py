@@ -113,6 +113,13 @@ def install(runtime:Path):
         "AND j.created_at > now()-interval '6 hours'\"\"\", (jid,self.heatmap_model)")
     text=once(text,'async def run_existing_scanner(tf: str, jid: str)',
         'async def run_existing_scanner(tf: str, jid: str, heatmap_model: int = 1)')
+    # The paid 1-CPU service measured a complete Model 3 hover sweep at 193s.
+    # Keep a finite whole-job allowance for capture plus the existing AI call;
+    # Models 1–2 retain their original deadline and no source is retried.
+    text=once(text,'await asyncio.wait_for(process.wait(), timeout=300)',
+        'await asyncio.wait_for(process.wait(), timeout=360 if heatmap_model == 3 else 300)')
+    text=once(text,'diagnostic["timeout_seconds"] = 300',
+        'diagnostic["timeout_seconds"] = 360 if heatmap_model == 3 else 300')
     text=once(text,'            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)',
         '            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, env=child_environment(heatmap_model))')
     text=once(text,'result.get("schema_version") != SCHEMA or result.get("run_id") != jid',
