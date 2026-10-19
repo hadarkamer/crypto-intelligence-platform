@@ -92,6 +92,26 @@ class HoverTests(unittest.TestCase):
                 {'rows':rows(),'candidates':[]})
         self.assertEqual(error.exception.code,'source_not_readable')
 
+    def test_verified_dom_axis_supplies_numeric_evidence_but_never_repairs_conflicting_ai_bounds(self):
+        from prominent_levels import evidence
+        snapshot={'rows':rows(),'candidates':[],'price_axis_ticks':[80000,82000,84000]}
+        raw=proposed([])
+        raw['scans'][0]['price_axis_range']={'low':80000,'high':84000,'price_evidence':'visible axis ticks'}
+        grounded=ground_analysis(raw,snapshot)
+        axis=grounded['scans'][0]['price_axis_range']
+        evidence(axis['price_evidence'],(80000,84000))
+        self.assertEqual(raw['scans'][0]['price_axis_range']['price_evidence'],'visible axis ticks')
+        for ticks,bounds in [([84000,80000],(80000,84000)),([], (80000,84000)),
+                             ([80000,82000,84000],(79000,84000)),([80000,82000,84000],(80000,85000))]:
+            invalid=copy.deepcopy(raw);invalid['scans'][0]['price_axis_range'].update(low=bounds[0],high=bounds[1])
+            with self.assertRaisesRegex(HoverError,'hover_price_axis_mismatch'):
+                ground_analysis(invalid,{**snapshot,'price_axis_ticks':ticks})
+        # Legacy and Models 1–2 without a DOM axis keep strict text validation.
+        legacy=ground_analysis(raw,{'rows':rows(),'candidates':[]})
+        from model1_execution import StageFailure
+        with self.assertRaises(StageFailure):
+            evidence(legacy['scans'][0]['price_axis_range']['price_evidence'],(80000,84000))
+
     def test_source_axis_must_stay_stable_and_match_hover_coverage(self):
         from heatmap_hover import verify_source_axis
         page=Mock();page.evaluate.return_value=[82150,82300]

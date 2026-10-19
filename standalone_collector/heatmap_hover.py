@@ -472,6 +472,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     page.mouse.move(0,0)
     return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
             'scope':'displayed_latest_column','heatmap_model':model,
+            **({'price_axis_ticks':list(source_axis)} if model==3 and source_axis is not None else {}),
             'timeframe':timeframe.upper(),'source_time':rows[0]['source_time'],
             'complete':True,'price_step':price_step,'rows':rows,
             'total_value':float(sum(Decimal(str(r['value'])) for r in rows)),
@@ -558,6 +559,19 @@ def ground_analysis(raw, snapshot):
         raise StageFailure('source_not_readable')
     from model1_price_range import validate_price_range
     current=validate_price_range(scans[0].get('current_price_range'))
+    if 'price_axis_ticks' in snapshot:
+        # These ticks were read from visible DOM and checked around the same
+        # screenshot and sweep. Use that evidence, not an LLM transcription.
+        # Never repair a conflicting axis or invent labels absent from source.
+        from capture_readiness import safe_readiness
+        ticks=safe_readiness(snapshot).get('price_axis_ticks')
+        axis=scans[0].get('price_axis_range')
+        if (ticks is None or not isinstance(axis,dict)
+            or axis.get('low')!=ticks[0] or axis.get('high')!=ticks[-1]):
+            raise HoverError('hover_price_axis_mismatch')
+        scans[0]['price_axis_range']={
+            'low':ticks[0],'high':ticks[-1],
+            'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
     candidates={p['id']:p for p in snapshot['candidates']}
     selected=scans[0].get('prominent_levels')
     if (not isinstance(selected,list) or len(selected)!=len(candidates)
