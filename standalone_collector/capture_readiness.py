@@ -9,7 +9,8 @@ LABELS={'12h':'12 hour','24h':'24 hour','48h':'48 hour'}
 # Models 1 and 2 still use their original routes; do not infer other aliases.
 SOURCE_PATH_ALIASES={3:frozenset({'/liquidation-heatmap-model3'})}
 REASONS=frozenset({'render-checks-passed','loading-indicator','blur','no-chart',
-    'visible-dialog','login-required','wrong-label','invalid-source','unverified'})
+    'visible-dialog','login-required','wrong-label','invalid-source','unverified',
+    'axis-not-ready','render-pending'})
 NETWORK_KINDS=frozenset({'timeout','connection','cancelled','blocked','other'})
 LOGIN_GATE_SCRIPT=r'''() => {
   const visible = el => {
@@ -73,6 +74,32 @@ STATE_SCRIPT=r'''() => {
   return state(true,'render-checks-passed');
 }'''
 
+# Model 3 exposes its price ticks as visible DOM text. A purple canvas without
+# those ticks is an unfinished chart, even when no spinner remains.
+MODEL3_AXIS_SCRIPT=r'''() => {
+  const axes=[...document.querySelectorAll('[data-axis="y"][role="button"]')].filter(e=>{
+    const r=e.getBoundingClientRect();
+    if(r.width<=0||r.height<=0)return false;
+    for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);
+      if(s.display==='none'||s.visibility==='hidden'||Number(s.opacity||1)===0)return false;
+    }return true;
+  });
+  if(axes.length!==1)return null;
+  const texts=axes[0].innerText.trim().split(/\s+/);
+  if(texts.length<2||texts.length>64||texts.some(t=>!/^\d+(?:,\d{3})*(?:\.\d+)?$/.test(t)))return null;
+  const ticks=texts.map(t=>Number(t.replaceAll(',',''))).sort((a,b)=>a-b);
+  return ticks.every((v,i)=>v>0&&v<1e12&&(!i||v>ticks[i-1]))?ticks:null;
+}'''
+
+MODEL3_PAINT_SCRIPT=r'''timeout => new Promise(resolve=>{
+  const read=('''+MODEL3_AXIS_SCRIPT+r''');let previous='',stable=0,frame;
+  const timer=setTimeout(()=>{cancelAnimationFrame(frame);resolve(false)},timeout);
+  const check=()=>{const ticks=read(),key=ticks?JSON.stringify(ticks):'';
+    stable=key&&key===previous?stable+1:0;previous=key;
+    if(stable>=2){clearTimeout(timer);resolve(true)}else frame=requestAnimationFrame(check);
+  };frame=requestAnimationFrame(check);
+})'''
+
 
 def valid_source(url,heatmap_model):
     from heatmap_models import source_url
@@ -97,6 +124,11 @@ def safe_readiness(value):
     if isinstance(label,str) and label in LABELS.values():out['label']=label
     for key in ('login_link_visible','account_link_present'):
         if type(value.get(key)) is bool:out[key]=value[key]
+    ticks=value.get('price_axis_ticks')
+    if (isinstance(ticks,list) and 2<=len(ticks)<=64
+        and all(type(v) in (int,float) and 0<v<1e12 for v in ticks)
+        and all(a<b for a,b in zip(ticks,ticks[1:]))):
+        out['price_axis_ticks']=ticks
     return out
 
 
@@ -107,6 +139,12 @@ def current_state(page,timeframe,heatmap_model):
     except Exception:return {'ready':False,'reason':'unverified'}
     if state['reason']!='login-required' and state.get('label')!=LABELS[timeframe]:
         state.update(ready=False,reason='wrong-label')
+    if heatmap_model==3 and state['ready']:
+        try:ticks=page.evaluate(MODEL3_AXIS_SCRIPT)
+        except Exception:ticks=None
+        checked=safe_readiness({**state,'price_axis_ticks':ticks})
+        if 'price_axis_ticks' not in checked:state.update(ready=False,reason='axis-not-ready')
+        else:state['price_axis_ticks']=checked['price_axis_ticks']
     return state
 
 
@@ -127,14 +165,21 @@ def require_unblocked_source(page,heatmap_model,*,phase):
 def wait_for_render(page,timeframe,heatmap_model,timeout_ms=60_000):
     """Poll only existing DOM; no navigation, refresh, requests, clicks or styling."""
     state=current_state(page,timeframe,heatmap_model)
-    if state['ready'] or state['reason'] in ('invalid-source','login-required'):return state
+    def painted(value):
+        if heatmap_model!=3 or not value['ready']:return value
+        try:ready=page.evaluate(MODEL3_PAINT_SCRIPT,6000) is True
+        except Exception:ready=False
+        return current_state(page,timeframe,heatmap_model) if ready else {**value,'ready':False,'reason':'render-pending'}
+    if state['ready'] or state['reason'] in ('invalid-source','login-required'):return painted(state)
     timeout=max(1,min(int(timeout_ms),60_000))
     predicate='expected => { const s=('+STATE_SCRIPT+')(); return s.reason === "login-required" || (s.ready === true && s.label === expected); }'
+    if heatmap_model==3:
+        predicate=predicate.replace('s.label === expected','s.label === expected && ('+MODEL3_AXIS_SCRIPT+')()')
     try:
         page.wait_for_function(predicate,arg=LABELS[timeframe],timeout=timeout,polling=1000)
         page.wait_for_timeout(1000)
     except Exception:pass
-    return current_state(page,timeframe,heatmap_model)
+    return painted(current_state(page,timeframe,heatmap_model))
 
 
 def safe_network(value):

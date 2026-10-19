@@ -53,14 +53,14 @@ def install(runtime: Path):
     anchor = "                    page.screenshot("
     text = once(text, anchor,
         "                    from heatmap_hover import dismiss_cookie_banner\n"
-        "                    dismiss_cookie_banner(page)\n" + anchor)
+        "                    dismiss_cookie_banner(page, model=HEATMAP_MODEL)\n" + anchor)
     anchor = '                    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)\n'
     text = once(text, anchor, anchor+
         "                from heatmap_hover import require_cookie_banner_hidden\n"
         "                require_cookie_banner_hidden(page)\n"
         "                from heatmap_hover import capture_column\n"
         "                with capture_operation('hover_collection'):\n"
-        "                    hover_snapshot = capture_column(page, path, chart_rect, model=HEATMAP_MODEL, timeframe=timeframe)\n")
+        "                    hover_snapshot = capture_column(page, path, chart_rect, model=HEATMAP_MODEL, timeframe=timeframe, source_axis=render_state.get('price_axis_ticks'))\n")
     text = once(text, "results.append({'image': str(path),", "results.append({'hover_snapshot': hover_snapshot, 'image': str(path),")
     compile(text,str(path),'exec'); path.write_text(text)
 
@@ -87,10 +87,10 @@ _hover_level['required'].append('candidate_id')
         "    from heatmap_hover import prepare_candidates\n"
         "    prepare_candidates(images)\n"
         "    stage('analysis')\n")
-    text = once(text, '    remember_analysis(raw)',
+    text = once(text, "    stage('validation')\n",
+        "    stage('validation')\n"
         "    from heatmap_hover import ground_analysis, attach_measurements\n"
-        "    raw = ground_analysis(raw, images[0]['hover_snapshot'])\n"
-        "    remember_analysis(raw)")
+        "    raw = ground_analysis(raw, images[0]['hover_snapshot'])\n")
     anchor = '    result = normalize(raw, timeframe=timeframe, run_id=run_id, captured_at=captured_at, image=image)'
     text = once(text, anchor, anchor+"\n    result = attach_measurements(result, raw, images[0]['hover_snapshot'], image=image)")
     compile(text,str(path),'exec'); path.write_text(text)

@@ -30,7 +30,9 @@ class SourceCompatibilityTests(unittest.TestCase):
         for model in (1,2):self.assertFalse(readiness.valid_source(MODEL3,model))
         for hours in (12,24,48):
             page=Mock(url=MODEL3)
-            page.evaluate.return_value={'ready':True,'reason':'render-checks-passed','label':f'{hours} hour'}
+            page.evaluate.side_effect=lambda script,*args: ([77000,87000] if script==readiness.MODEL3_AXIS_SCRIPT
+                else True if script==readiness.MODEL3_PAINT_SCRIPT
+                else {'ready':True,'reason':'render-checks-passed','label':f'{hours} hour'})
             self.assertTrue(readiness.wait_for_render(page,f'{hours}h',3)['ready'])
             page.wait_for_function.assert_not_called()
 
