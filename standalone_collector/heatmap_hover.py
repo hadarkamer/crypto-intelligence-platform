@@ -501,6 +501,12 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     for offset in range(1,122):
         target = bottom_y-offset
         if target <= top_y:break
+        if model==2:
+            # Near the viewport bottom the persistent tooltip can be clamped:
+            # both text and position stay identical within a native price row.
+            # Establish the already-verified top-row tooltip first, so the next
+            # observation must change PRICE even when its box cannot move.
+            read(top_y,top_row['price'])
         row = read(target)
         if row['price'] != bottom_row['price']:
             gap=row['price']-bottom_row['price']

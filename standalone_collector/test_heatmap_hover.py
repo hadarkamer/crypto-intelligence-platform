@@ -373,6 +373,8 @@ class HoverTests(unittest.TestCase):
                             fixture=fixture.replace('height="300"','height="340"')
                             fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,1,4);let shown=true;c.onclick=()=>shown=!shown;")
                             fixture=fixture.replace('e.offsetY/10','(e.offsetY-40)/10')
+                            fixture=fixture.replace("t.style.display='block';", "t.style.top=Math.min(e.clientY,300)+'px';t.style.display='block';")
+                            fixture=fixture.replace("c.onmouseleave=()=>t.style.display='none';", "c.onmouseleave=()=>{};")
                             fixture=fixture.replace("t.style.display='block';t.innerText=", "if(e.offsetY<40)return;t.style.display='block';if(shown&&e.offsetX>=596&&e.offsetX<597&&e.offsetY>=180&&e.offsetY<=184){t.innerText='STAMP Open 88300 High 88500 Low 88200 Close 88400';return;}t.innerText=").replace('STAMP',stamp)
                         if missing=="candle_changed":
                             fixture=fixture.replace('let shown=true;c.onclick=()=>shown=!shown;', 'let shown=true,toggles=0;c.onclick=()=>{shown=!shown;toggles++};')
