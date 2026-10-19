@@ -116,7 +116,7 @@ def prepare():
         'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
         'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
         'identity':'strict model-specific source, schema, screenshot label and job',
-        'price_reference':'explicit visual range or validated legacy point; no fake midpoint',
+        'price_reference':'verified tooltip Close for Models 1/2; source-row candle envelope for Model 3; no fake midpoint',
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
         'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',

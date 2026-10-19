@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
     READ_TOOLTIP, READ_UPDATED_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,
-    dismiss_cookie_banner, require_cookie_banner_hidden, parse_candle, validate_candle, candle_points)
+    dismiss_cookie_banner, require_cookie_banner_hidden, parse_candle, validate_candle, candle_points, source_price_range)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -43,13 +43,19 @@ class HoverTests(unittest.TestCase):
         data=rows()
         for i,row in enumerate(data):row['y_fraction']=(i*20+10)/59
         image=Image.new('RGB',(500,60),(68,1,84));draw=ImageDraw.Draw(image)
-        draw.rectangle((0,20,499,59),fill=(48,173,118));image.save(path)
+        draw.rectangle((0,20,499,59),fill=(48,173,118))
+        # The live 24H candle paints the inclusive rightmost column.
+        if model==3:draw.rectangle((499,15,499,16),fill=(234,51,35))
+        image.save(path)
         snapshot={'rows':data,'heatmap_model':model,'complete':True,'total_value':7270000,'unit':'source_metric',
             'plot_bounds':{'left':0,'right':499,'top':0,'bottom':59},'row_height_pixels':20}
         snapshot['candidates']=candidate_pools(snapshot,path)
-        if model==2:
+        snapshot['source_time']='2026-10-17T12:05:00Z'
+        if model==3:
+            snapshot['price_axis_ticks']=[82100,82200,82300,82400]
+            snapshot['source_price_range']=source_price_range(snapshot,path)
+        else:
             snapshot['source_candle']=parse_candle('2026-10-17 12:05 Open 82200 High 82300 Low 82100 Close 82250')
-            snapshot['source_time']=snapshot['source_candle']['source_time']
         return snapshot,{'image_path':path,'source_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 
     def context_level(self):
@@ -87,15 +93,38 @@ class HoverTests(unittest.TestCase):
             validate_candle(dict(candle,close=82400),candle['source_time'])
 
     def test_candle_close_overrides_visual_reference_but_requires_pixel_and_context_evidence(self):
-        snap,image=self.source_fixture(2)
-        raw=proposed([self.context_level()]);raw['scans'][0]['current_price_range']={'confidence':'low'}
-        grounded=ground_analysis(raw,snap,**image)
-        self.assertEqual(grounded['scans'][0]['source_candle'],snap['source_candle'])
-        self.assertNotIn('current_price_range',grounded['scans'][0])
-        for change in ({'source_time':'2026-10-17T12:10:00Z'},{'source_candle':None}):
-            with self.assertRaises(HoverError):ground_analysis(raw,{**snap,**change},**image)
-        raw['scans'][0]['prominent_levels'][0]['right_edge_visible']=False
-        with self.assertRaisesRegex(HoverError,'hover_pool_not_visible'):ground_analysis(raw,snap,**image)
+        for model in (1,2):
+            snap,image=self.source_fixture(model)
+            raw=proposed([self.context_level()]);raw['scans'][0]['current_price_range']={'confidence':'low'}
+            grounded=ground_analysis(raw,snap,**image)
+            self.assertEqual(grounded['scans'][0]['source_candle'],snap['source_candle'])
+            self.assertNotIn('current_price_range',grounded['scans'][0])
+            for change in ({'source_time':'2026-10-17T12:10:00Z'},{'source_candle':None}):
+                with self.assertRaises(HoverError):ground_analysis(raw,{**snap,**change},**image)
+            raw['scans'][0]['prominent_levels'][0]['right_edge_visible']=False
+            with self.assertRaisesRegex(HoverError,'hover_pool_not_visible'):ground_analysis(raw,snap,**image)
+
+    def test_model3_reference_uses_source_rows_and_axis_without_fabricating_close(self):
+        from PIL import Image,ImageDraw
+        snap,image=self.source_fixture(3)
+        raw=proposed([self.context_level()])
+        raw['scans'][0]['current_price_range']={'low':999999,'axis_low':2,'axis_high':1}
+        for colour in ((234,51,35),(55,126,34)):
+            with Image.open(image['image_path']) as source:
+                painted=source.copy();ImageDraw.Draw(painted).rectangle((499,15,499,16),fill=colour);painted.save(image['image_path'])
+            image['source_sha256']=hashlib.sha256(image['image_path'].read_bytes()).hexdigest()
+            grounded=ground_analysis(raw,snap,**image)['scans'][0]
+            self.assertNotIn('source_candle',grounded)
+            self.assertEqual(grounded['current_price_range'],{
+                'low':82236.48,'high':82325.77,'axis_low':82200,'axis_high':82400,
+                'confidence':'high','basis':'last_candle_axis_bracket'})
+        bad=copy.deepcopy(snap);bad['source_price_range']['low']=82200
+        with self.assertRaisesRegex(HoverError,'hover_evidence_mismatch'):
+            ground_analysis(raw,bad,**image)
+        with Image.open(image['image_path']) as source:
+            painted=source.copy();ImageDraw.Draw(painted).rectangle((499,15,499,16),fill=(68,1,84));painted.save(image['image_path'])
+        with self.assertRaisesRegex(HoverError,'hover_candle_not_found'):
+            source_price_range(snap,image['image_path'])
 
     def test_persistent_tooltip_requires_visible_update_before_reusing_numbers(self):
         from playwright.sync_api import sync_playwright
@@ -169,10 +198,11 @@ class HoverTests(unittest.TestCase):
         grounded=ground_analysis(raw,snapshot,**image)
         p=grounded['scans'][0]['prominent_levels'][0]
         self.assertEqual((p['price_low'],p['price_high']),(82147.19,82236.48))
-        self.assertEqual(p['side'],'above')
+        self.assertEqual(p['side'],'below')
         self.assertEqual((p['row_colour'],p['intensity'],p['continuous']),('green','normal',True))
         result={'zones':[dict(p)],'source_url':'https://www.coinglass.com/liquidation-heatmap-model3?coin=BTC&type=symbol',
-                'captured_at':'2026-10-17T12:06:00Z','run_id':'test','observed_price_range':{'low':81000,'high':81100}}
+                'captured_at':'2026-10-17T12:06:00Z','run_id':'test','observed_price_range':None,
+                'price_reference_type':'exact_point','observed_price':82250}
         result=attach_measurements(result,grounded,snapshot,image=b'image')
         self.assertEqual(result['zones'][0]['source_value'],4770000)
         self.assertNotIn('price_low',raw['scans'][0]['prominent_levels'][0])
@@ -259,23 +289,20 @@ class HoverTests(unittest.TestCase):
                 {'rows':rows(),'candidates':[]})
         self.assertEqual(error.exception.code,'source_not_readable')
 
-    def test_verified_dom_axis_supplies_numeric_evidence_but_never_repairs_conflicting_ai_bounds(self):
+    def test_verified_dom_axis_owns_model3_bounds_and_rejects_invalid_source_ticks(self):
         from prominent_levels import evidence
-        snapshot,image=self.source_fixture()
-        snapshot['price_axis_ticks']=[80000,82000,84000]
+        snapshot,image=self.source_fixture(3)
         raw=proposed([self.context_level()])
-        raw['scans'][0]['price_axis_range']={'low':80000,'high':84000,'price_evidence':'visible axis ticks'}
+        raw['scans'][0]['price_axis_range']={'low':84000,'high':80000,'price_evidence':'visible axis ticks'}
         grounded=ground_analysis(raw,snapshot,**image)
         axis=grounded['scans'][0]['price_axis_range']
-        evidence(axis['price_evidence'],(80000,84000))
+        evidence(axis['price_evidence'],(82100,82400))
         self.assertEqual(raw['scans'][0]['price_axis_range']['price_evidence'],'visible axis ticks')
-        for ticks,bounds in [([84000,80000],(80000,84000)),([], (80000,84000)),
-                             ([80000,82000,84000],(79000,84000)),([80000,82000,84000],(80000,85000))]:
-            invalid=copy.deepcopy(raw);invalid['scans'][0]['price_axis_range'].update(low=bounds[0],high=bounds[1])
-            with self.assertRaisesRegex(HoverError,'hover_price_axis_mismatch'):
-                ground_analysis(invalid,{**snapshot,'price_axis_ticks':ticks},**image)
+        for ticks in ([84000,80000],[],[81000,82000]):
+            with self.assertRaises(HoverError):
+                ground_analysis(raw,{**snapshot,'price_axis_ticks':ticks},**image)
         # Legacy and Models 1–2 without a DOM axis keep strict text validation.
-        snapshot.pop('price_axis_ticks')
+        snapshot,image=self.source_fixture(1)
         legacy=ground_analysis(raw,snapshot,**image)
         from model1_execution import StageFailure
         with self.assertRaises(StageFailure):
@@ -427,7 +454,8 @@ class HoverTests(unittest.TestCase):
         const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,600,340);
         ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,40,600,300);
         ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);let priceVisible=true;
-        canvas.onclick=e=>{if(e.offsetX>=300&&e.offsetX<=310&&e.offsetY>=10&&e.offsetY<=20)priceVisible=false;};
+        ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,1,4);
+        canvas.onclick=e=>{if(e.offsetX>=300&&e.offsetX<=310&&e.offsetY>=10&&e.offsetY<=20)priceVisible=!priceVisible;};
         canvas.onmousemove=e=>{if(e.offsetY<41||e.offsetY>338){tip.style.display='none';return;}
           const row=Math.min(29,Math.floor((e.offsetY-40)/10));
           if(priceVisible&&row===14){tip.style.display='block';tip.innerText='STAMP Open 986 High 987 Low 985 Close 986';return;}

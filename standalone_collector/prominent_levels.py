@@ -49,7 +49,7 @@ def identity(raw,timeframe):
 def normalize_prominent(raw,*,timeframe,run_id,captured_at,image):
     scan=identity(raw,timeframe)
     point=None
-    if HEATMAP_MODEL==2:
+    if HEATMAP_MODEL==2 or 'source_candle' in scan:
         from heatmap_hover import validate_candle
         candle=scan.get('source_candle')
         point=validate_candle(candle,candle.get('source_time') if isinstance(candle,dict) else None)

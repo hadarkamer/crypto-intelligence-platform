@@ -423,7 +423,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         raise HoverError('hover_candle_not_found')
 
     candle=None
-    if model==2:
+    if model in (1,2):
         if marker is None:raise HoverError('hover_candle_not_found')
         candle,candle_point=read_candle(candle_points(image_path,bounds))
     if marker is not None:toggle_candles()
@@ -597,7 +597,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     observed = datetime.fromisoformat(rows[0]['source_time'].replace('Z','+00:00'))
     age = (datetime.now(timezone.utc)-observed).total_seconds()
     if not -120 <= age <= 1200:raise HoverError('hover_source_stale')
-    if model==2:
+    if model in (1,2):
         close=validate_candle(candle,rows[0]['source_time'])
         if not rows[-1]['price']<=close<=rows[0]['price']:
             raise HoverError('hover_candle_outside_axis')
@@ -607,7 +607,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     page.mouse.move(0,0)
     return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
             'scope':'displayed_latest_column','heatmap_model':model,
-            **({'source_candle':candle} if model==2 else {}),
+            **({'source_candle':candle} if model in (1,2) else {}),
             **({'price_axis_ticks':list(source_axis)} if model==3 and source_axis is not None else {}),
             'timeframe':timeframe.upper(),'source_time':rows[0]['source_time'],
             'complete':True,'price_step':price_step,'rows':rows,
@@ -689,11 +689,48 @@ def candidate_pools(snapshot, image_path):
     return pools
 
 
+def source_price_range(snapshot, image_path):
+    """Model 3 exposes liquidity rows, not OHLC, on candle hover.
+
+    Bound the rightmost painted candle body with adjacent verified row prices.
+    This deliberately remains an interval, not a fabricated exact Close. The
+    two measured candle colours only locate pixels; they never supply a price.
+    """
+    from PIL import Image
+    from capture_readiness import safe_readiness
+    from model1_price_range import validate_price_range
+    ticks=safe_readiness(snapshot).get('price_axis_ticks')
+    if not ticks:raise HoverError('hover_price_axis_mismatch')
+    bounds=snapshot['plot_bounds'];right=math.floor(bounds['right'])
+    with Image.open(image_path) as source:
+        image=source.convert('RGB')
+        try:
+            points=[(x,y) for x in range(right-3,right+1)
+                for y in range(bounds['top']+1,bounds['bottom'])
+                if image.getpixel((x,y)) in ((234,51,35),(55,126,34))]
+        finally:image.close()
+    if not points:raise HoverError('hover_candle_not_found')
+    latest=max(x for x,y in points);ys=sorted(y for x,y in points if x==latest)
+    if any(b-a>2 for a,b in zip(ys,ys[1:])):raise HoverError('hover_candle_not_found')
+    positions=[(bounds['top']+r['y_fraction']*(bounds['bottom']-bounds['top']),r['price'])
+        for r in snapshot['rows']]
+    above=[price for y,price in positions if y<ys[0]-.5]
+    below=[price for y,price in positions if y>ys[-1]+.5]
+    if not above or not below:raise HoverError('hover_candle_outside_axis')
+    low,high=below[0],above[-1]
+    lower=[v for v in ticks if v<=low];upper=[v for v in ticks if v>=high]
+    if not lower or not upper:raise HoverError('hover_candle_outside_axis')
+    return validate_price_range({'low':low,'high':high,'axis_low':lower[-1],
+        'axis_high':upper[0],'confidence':'high','basis':'last_candle_axis_bracket'})
+
+
 def prepare_candidates(images):
     # Called after capture_heatmaps returns and its browser is closed.
     for image in images:
         snapshot=image['hover_snapshot']
         snapshot['candidates']=candidate_pools(snapshot,image['image'])
+        if snapshot.get('heatmap_model')==3:
+            snapshot['source_price_range']=source_price_range(snapshot,image['image'])
 
 
 def model_content(image):
@@ -704,7 +741,10 @@ def model_content(image):
     payload['plot_bounds'] = snapshot['plot_bounds']
     payload['row_height_pixels'] = snapshot['row_height_pixels']
     payload['candidates'] = snapshot['candidates']
-    if snapshot.get('heatmap_model')==2:
+    if snapshot.get('heatmap_model')==3:
+        payload['source_price_range']=snapshot['source_price_range']
+        payload['price_axis_ticks']=snapshot['price_axis_ticks']
+    else:
         validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
         payload['source_candle']=snapshot['source_candle']
     content = [{'type':'input_text','text':'Code-computed bands from this same PNG and verified displayed hover rows. '
@@ -731,30 +771,6 @@ def ground_analysis(raw, snapshot, *, image_path=None, source_sha256=None):
     if scans[0].get('readable') is not True or scans[0].get('blocking_condition')!='none':
         from model1_execution import StageFailure
         raise StageFailure('source_not_readable')
-    from model1_price_range import validate_price_range
-    scans[0].pop('source_candle',None)  # Never accept provider-created source evidence.
-    if snapshot.get('heatmap_model')==2:
-        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
-        if not snapshot['rows'][-1]['price']<=close<=snapshot['rows'][0]['price']:
-            raise HoverError('hover_candle_outside_axis')
-        scans[0]['source_candle']=copy.deepcopy(snapshot['source_candle'])
-        scans[0].pop('current_price_range',None)
-        current={'low':close,'high':close}  # Internal comparison bounds, never an output range.
-    else:
-        current=validate_price_range(scans[0].get('current_price_range'))
-    if 'price_axis_ticks' in snapshot:
-        # These ticks were read from visible DOM and checked around the same
-        # screenshot and sweep. Use that evidence, not an LLM transcription.
-        # Never repair a conflicting axis or invent labels absent from source.
-        from capture_readiness import safe_readiness
-        ticks=safe_readiness(snapshot).get('price_axis_ticks')
-        axis=scans[0].get('price_axis_range')
-        if (ticks is None or not isinstance(axis,dict)
-            or axis.get('low')!=ticks[0] or axis.get('high')!=ticks[-1]):
-            raise HoverError('hover_price_axis_mismatch')
-        scans[0]['price_axis_range']={
-            'low':ticks[0],'high':ticks[-1],
-            'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
     # Do not turn an LLM confidence label into numeric verification. Recompute
     # the complete selection from the SAME original PNG, including neighbouring
     # rows, gaps and sums. A changed image or altered/omitted pool fails closed.
@@ -770,6 +786,29 @@ def ground_analysis(raw, snapshot, *, image_path=None, source_sha256=None):
     verified=candidate_pools(snapshot,image_path)
     if snapshot.get('candidates')!=verified:
         raise HoverError('hover_candidate_evidence_mismatch')
+    scans[0].pop('source_candle',None)  # Never accept provider-created source evidence.
+    scans[0].pop('current_price_range',None)
+    if snapshot.get('heatmap_model')==3:
+        current=source_price_range(snapshot,image_path)
+        if snapshot.get('source_price_range')!=current:raise HoverError('hover_evidence_mismatch')
+        scans[0]['current_price_range']=current
+    else:
+        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        if not snapshot['rows'][-1]['price']<=close<=snapshot['rows'][0]['price']:
+            raise HoverError('hover_candle_outside_axis')
+        scans[0]['source_candle']=copy.deepcopy(snapshot['source_candle'])
+        current={'low':close,'high':close}  # Internal comparison bounds, never an output range.
+    if 'price_axis_ticks' in snapshot:
+        # These ticks were read from visible DOM and checked around the same
+        # screenshot and sweep. Use that evidence, not an LLM transcription.
+        # The provider does not own these numeric fields.
+        from capture_readiness import safe_readiness
+        ticks=safe_readiness(snapshot).get('price_axis_ticks')
+        if ticks is None:
+            raise HoverError('hover_price_axis_mismatch')
+        scans[0]['price_axis_range']={
+            'low':ticks[0],'high':ticks[-1],
+            'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
     candidates={p['id']:p for p in verified}
     selected=scans[0].get('prominent_levels')
     if (not isinstance(selected,list) or len(selected)!=len(candidates)
@@ -823,11 +862,14 @@ def attach_measurements(result, raw, snapshot, *, image):
     output.update(source_url=result['source_url'],captured_at=result['captured_at'],
         artifact_id=result['run_id'],sha256=hashlib.sha256(image).hexdigest(),
         observed_price_range=result['observed_price_range'])
-    if snapshot.get('heatmap_model')==2:
+    output.pop('source_price_range',None)
+    if snapshot.get('heatmap_model') in (1,2):
         close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
         if result.get('price_reference_type')!='exact_point' or result.get('observed_price')!=close or result['observed_price_range'] is not None:
             raise HoverError('hover_candle_evidence_mismatch')
         output['observed_price']=close
+    elif result.get('observed_price_range')!=snapshot.get('source_price_range'):
+        raise HoverError('hover_evidence_mismatch')
     candidates = raw['scans'][0]['prominent_levels']
     by_id = {r['id']:r for r in snapshot['rows']}
     for zone in result['zones']:

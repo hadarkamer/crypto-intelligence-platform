@@ -6,8 +6,9 @@ from install_original_flow import VISION_INSTRUCTIONS
 HOVER_INSTRUCTIONS = """
 Observe and explain the supplied map; do not give trade advice or predictions.
 Return exactly ONE scan for the requested model/timeframe. A detail crop is from
-the same screenshot, not an additional observation. Transcribe the visible
-minimum/maximum PRICE-axis ticks into price_axis_range with their numeric text.
+the same screenshot, not an additional observation. For Models 1/2 transcribe
+the visible PRICE-axis limits into price_axis_range with their numeric text.
+Model 3 supplies verified DOM price_axis_ticks; code owns its axis values.
 
 Code computes pool colours, row membership, continuity, quantities and prices
 from the same original PNG and a complete verified DOM hover column. Code
@@ -31,32 +32,28 @@ Yellow=many, green=normal, blue=few; a larger green sum never upgrades its colou
 Numbers come from verified displayed tooltip text, even when absent from the
 PNG. Do not recalculate or replace prices, source_row_ids, sums or percentages.
 
-The current-price reference is a visual range from the last candle; never use
-a candidate price or convenient midpoint as an exact current quote. Code assigns
-above/below and omits candidates intersecting that validated reference range.
-Still return those candidates for context validation rather than omitting them.
+When requested, price_axis_range.price_evidence must quote BOTH limits as full decimal
+numbers exactly matching those numeric fields. Read the visible labels; never
+substitute hover-row prices for axis labels.
+For Models 1/2 the reference is source_candle.close from the visible OHLC tooltip
+on this same map's latest column, with the same source_time as the liquidity
+rows. Code verifies it on a second read. This is the displayed candle Close,
+not a real-time market quote. Do not estimate a current price or price range
+from pixels. Code assigns above/below and omits candidates touching that Close.
+Keep the summary consistent with the supplied Close and return every candidate,
+including one touching the Close, for the context check.
+Model 3 does not expose OHLC on candle hover. Its source_price_range conservatively
+bounds the last painted candle body using adjacent measured tooltip row prices
+and verified DOM axis ticks. Keep it a range; never call its midpoint an exact
+Close. Code omits pools touching this interval. Check visually that the supplied
+reference covers the last candle; mark readable=false if it does not. Do not
+return or invent price reference fields: code supplies and validates them.
 Keep exact_dollar_totals_available=false: displayed K/M/B values are rounded.
 Liquidation Leverage in source_metric units is NOT a verified dollar amount.
 The denominator covers only the displayed latest column, not historical sums,
 all market liquidity or actual realized liquidations. Never infer money from
 colour or the legend. Keep short_summary concise and observational.
 """
-
-MODEL2_REFERENCE = '''
-price_axis_range.price_evidence must quote BOTH low and high as full decimal
-numbers exactly matching those numeric fields. A generic phrase such as "visible
-axis ticks" is insufficient. Read the labels from the image; do not invent them
-or substitute hover-row prices for axis labels.
-
-The current-price reference is source_candle.close, read from the visible OHLC
-tooltip on this same map's latest column. Its source_time matches the liquidity
-rows and it was unchanged on a second read. It is the displayed candle Close,
-not a real-time market quote. Do not estimate a current price or price range
-from pixels. Code assigns above/below and omits candidates touching that Close.
-Keep the summary consistent with the supplied numeric Close. Return every
-candidate for the context check, including one touching the Close.
-'''
-
 
 def install(runtime: Path):
     path = runtime/'market_vision/coinglass_heatmap_capture.py'
@@ -109,22 +106,18 @@ _hover_scan['properties']['prominent_levels']['items'] = {
 '''
     # Replace the image-only extraction instructions. Appending a conflicting
     # hover exception left GPT free to widen/omit precomputed candidates.
-    # Keep the existing identity/readability and current-price range safeguards.
-    text += '\nSYSTEM_PROMPT = '+repr(VISION_INSTRUCTIONS)+' + RANGE_INSTRUCTIONS + '+repr(HOVER_INSTRUCTIONS)+' + "\\nRequested heatmap: " + MODEL_LABEL\n'
-    model2_instructions=HOVER_INSTRUCTIONS
-    start=model2_instructions.index('The current-price reference is a visual range')
-    end=model2_instructions.index('Keep exact_dollar_totals_available=false:')
-    model2_instructions=model2_instructions[:start]+MODEL2_REFERENCE+model2_instructions[end:]
-    text += '\nfrom heatmap_models import HEATMAP_MODEL\nif HEATMAP_MODEL == 2:\n'
-    text += '    _scan = HEATMAP_SCHEMA["properties"]["scans"]["items"]\n'
-    text += '    for _key in ("current_price_range", "current_price_estimate", "current_price_confidence"):\n'
-    text += '        _scan["properties"].pop(_key, None)\n'
-    text += '        _scan["required"].remove(_key)\n'
-    text += '    SYSTEM_PROMPT = '+repr(VISION_INSTRUCTIONS+model2_instructions)+' + "\\nRequested heatmap: " + MODEL_LABEL\n'
-    # The detail remains useful for pool verification, but its old range-only
-    # instruction must not contradict the source-based reference in Model 2.
-    text += '    import price_detail_input as _detail\n'
-    text += '    _detail.DETAIL_TEXT = '+repr('Enlarged saved pixels from the SAME screenshot. Check map context and visibility of candidate locations at the latest right edge; code owns colour and row membership. Return one scan. Read the current reference from source_candle.close, not from this image.')+'\n'
+    # Remove image-price guesses. Code supplies Close for Models 1/2 and a
+    # source-row envelope for Model 3; legacy result validation remains available.
+    text += '\nfrom heatmap_models import HEATMAP_MODEL\n'
+    text += 'for _key in ("current_price_range", "current_price_estimate", "current_price_confidence"):\n'
+    text += '    _hover_scan["properties"].pop(_key, None)\n'
+    text += '    _hover_scan["required"].remove(_key)\n'
+    text += 'if HEATMAP_MODEL == 3:\n'
+    text += '    _hover_scan["properties"].pop("price_axis_range")\n'
+    text += '    _hover_scan["required"].remove("price_axis_range")\n'
+    text += 'SYSTEM_PROMPT = '+repr(VISION_INSTRUCTIONS+HOVER_INSTRUCTIONS)+' + "\\nRequested heatmap: " + MODEL_LABEL\n'
+    text += 'import price_detail_input as _detail\n'
+    text += '_detail.DETAIL_TEXT = '+repr('Enlarged saved pixels from the SAME screenshot. Check map context and visibility of candidate locations at the latest right edge; code owns colour and row membership. Return one scan. Use the supplied source_candle.close or source_price_range; do not estimate a new reference from this image.')+'\n'
     compile(text,str(path),'exec'); path.write_text(text)
 
     path = runtime/'collection_model1_task.py'
