@@ -50,13 +50,30 @@ class ReadinessTests(unittest.TestCase):
     def test_all_models_horizons_keep_strict_source_identity(self):
         for model in (1,2,3):
             for hours in (12,24,48):
-                page=Mock(url=source_url(model));page.evaluate.return_value=state(label=f'{hours} hour')
+                page=Mock(url=source_url(model))
+                page.evaluate.side_effect=lambda script,*args: ([77000,87000] if script==readiness.MODEL3_AXIS_SCRIPT
+                    else True if script==readiness.MODEL3_PAINT_SCRIPT else state(label=f'{hours} hour'))
                 with self.subTest(model=model,hours=hours):
                     self.assertTrue(readiness.wait_for_render(page,f'{hours}h',model)['ready'])
             self.assertFalse(readiness.valid_source(source_url(model).replace('coin=BTC','coin=ETH'),model))
             self.assertFalse(readiness.valid_source(source_url(model)+'&coin=BTC',model))
         self.assertFalse(readiness.valid_source(source_url(2),1))
         self.assertFalse(readiness.valid_source(source_url(1).replace('https:','http:'),1))
+
+    def test_model3_missing_axis_or_unfinished_paint_never_passes(self):
+        for ticks,paint,reason in ((None,True,'axis-not-ready'),([77000,87000],False,'render-pending')):
+            page=Mock(url=source_url(3))
+            page.evaluate.side_effect=lambda script,*args: (ticks if script==readiness.MODEL3_AXIS_SCRIPT
+                else paint if script==readiness.MODEL3_PAINT_SCRIPT else state())
+            result=readiness.wait_for_render(page,'12h',3,1)
+            self.assertFalse(result['ready']);self.assertEqual(result['reason'],reason)
+
+    def test_model3_waits_for_axis_then_checks_paint(self):
+        page=Mock(url=source_url(3));ticks=iter((None,[77000,87000],[77000,87000]))
+        page.evaluate.side_effect=lambda script,*args: (next(ticks) if script==readiness.MODEL3_AXIS_SCRIPT
+            else True if script==readiness.MODEL3_PAINT_SCRIPT else state())
+        self.assertTrue(readiness.wait_for_render(page,'12h',3)['ready'])
+        page.wait_for_function.assert_called_once()
 
     def test_wrong_source_never_waits(self):
         page=Mock(url='https://evil.example/?coin=BTC&type=symbol')
@@ -93,6 +110,8 @@ class InstalledGateTests(unittest.TestCase):
         driver=MagicMock();driver.__enter__.return_value=driver
         browser=driver.chromium.launch.return_value;context=browser.new_context.return_value
         page=context.new_page.return_value;page.url=source_url(1)
+        page.get_by_text.return_value.count.return_value=0  # No cookie banner.
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
         page.evaluate.side_effect=lambda script: state(reason) if script==readiness.STATE_SCRIPT else {
             'x':0,'y':20,'width':800,'height':600,'page_width':1000}
         page.wait_for_function.side_effect=TimeoutError('PRIVATE')
@@ -142,6 +161,10 @@ class InstalledGateTests(unittest.TestCase):
             return Counter(ast.dump(n,include_attributes=False) for n in ast.walk(ast.parse(text))
                 if isinstance(n,ast.Call) and ast.unparse(n.func)=='page.screenshot')
         adapted=(HERE/'runtime/market_vision/coinglass_heatmap_capture.py').read_text()
+        if 'full_page=HEATMAP_MODEL != 3' in adapted:
+            # The hover adapter changes only Model 3 to viewport capture to avoid
+            # Chromium repainting a different price range beyond the viewport.
+            adapted=adapted.replace('full_page=HEATMAP_MODEL != 3','full_page=True')
         self.assertEqual(shots(original),shots(adapted))
 
 
@@ -162,6 +185,18 @@ class RenderDOMTests(unittest.TestCase):
         try:
             page.set_content('<button role="combobox">48 hour</button><a href="/login">Login</a>'+body)
             return page.evaluate(readiness.STATE_SCRIPT)
+        finally:page.close()
+
+    def test_model3_axis_and_stable_paint_use_visible_numeric_text(self):
+        page=self.browser.new_page()
+        try:
+            for style in ('','opacity:0','visibility:hidden','display:none'):
+                page.set_content('<div style="'+style+'"><div data-axis="y" role="button">'
+                    '<div>87,000</div><div>77,000</div></div></div>')
+                self.assertEqual(page.evaluate(readiness.MODEL3_AXIS_SCRIPT),None if style else [77000,87000])
+                self.assertEqual(page.evaluate(readiness.MODEL3_PAINT_SCRIPT,100),not bool(style))
+            page.set_content('<div data-axis="y" role="button">Loading...</div>')
+            self.assertIsNone(page.evaluate(readiness.MODEL3_AXIS_SCRIPT))
         finally:page.close()
 
     def test_spinning_loading_overlay_is_rejected(self):

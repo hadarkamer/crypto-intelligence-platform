@@ -22,6 +22,11 @@ on:
       - market_vision/openai_heatmap_scanner.py
       - .github/workflows/standalone-heatmap-check.yml
   workflow_dispatch:
+    inputs:
+      hover_source_check:
+        description: Run one source-only pass of all nine maps (no AI or app writes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,7 +34,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     env:
       OPENAI_API_KEY: ""
       DATABASE_URL: ""
@@ -56,3 +61,17 @@ jobs:
         run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v
       - name: Check whitespace
         run: git diff --check
+      - name: Explicit source-only hover acceptance
+        # Source access is deliberate; PR checks and reruns never start scans.
+        if: >-
+          github.run_attempt == 1 &&
+          github.event_name == 'workflow_dispatch' && inputs.hover_source_check
+        run: python standalone_collector/hover_source_check.py --output hover-source-evidence
+      - name: Retain source check evidence
+        if: always() && hashFiles('hover-source-evidence/summary.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: hover-source-evidence
+          path: hover-source-evidence
+          retention-days: 7
+

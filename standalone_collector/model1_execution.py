@@ -18,13 +18,16 @@ CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable',
     'analysis_rate_limited','analysis_quota_exceeded','analysis_http_error',
     'price_uncertain','zones_invalid','worker_crashed'})
 VALIDATION_REASONS=frozenset(['invalid_positive_number', 'evidence_text_invalid', 'evidence_number_mismatch', 'axis_shape', 'axis_does_not_cover_price', 'level_list_shape', 'level_object', 'level_confidence', 'right_edge_missing', 'colour_or_shape', 'yellow_shape', 'green_shape', 'blue_intensity', 'level_outside_axis', 'point_count', 'point_outside_bounds', 'uncertainty_invalid', 'exact_price_not_verified', 'exact_point_bounds', 'axis_estimate_invalid', 'uncertainty_does_not_cover_bounds', 'price_precision', 'strength_score', 'side_invalid', 'side_conflicts_with_price'])
+VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_analysis_shape', 'hover_deadline', 'hover_evidence_mismatch', 'hover_geometry_invalid', 'hover_geometry_missing', 'hover_number_invalid', 'hover_plot_clipped', 'hover_plot_not_found', 'hover_point_multiple_rows', 'hover_pool_binding', 'hover_pool_empty_gap', 'hover_pool_overlap_or_gap', 'hover_pool_rows_invalid', 'hover_pool_uncertain', 'hover_price_grid_gap', 'hover_range_single_row', 'hover_resolution_insufficient', 'hover_row_count', 'hover_row_order', 'hover_rows_merged', 'hover_snapshot_changed', 'hover_source_stale', 'hover_text_invalid', 'hover_time_invalid', 'hover_timezone_not_utc'])
+VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_update_timeout', 'hover_candidates_unresolved', 'hover_candidate_missing', 'hover_candidate_disagreement', 'hover_cookie_overlay'])
+VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_price_axis_changed', 'hover_price_axis_mismatch'])
 STAGES=frozenset({'startup','capture','image_check','analysis','validation','saving'})
 PHASES=frozenset({'capture','select_12h','select_24h','select_48h','model_selection',
     'symbol_selection','wait_for_chart','screenshot','navigation','browser_launch',
     'browser_context','source_session_setup','page_creation','overlay_dismissal',
     'timeframe_selection','legend_preparation','chart_geometry','render_settle',
     'context_close','browser_close','render_readiness','timeframe_trigger_lookup',
-    'timeframe_open','timeframe_option_lookup','timeframe_select','timeframe_confirmation'})
+    'timeframe_open','timeframe_option_lookup','timeframe_select','timeframe_confirmation','hover_collection'})
 KINDS=frozenset({'TimeoutError','TargetClosedError','Error','RuntimeError','ValueError',
     'MemoryError','OSError','FileNotFoundError','ReadTimeout','ConnectTimeout'})
 AD_HOSTS=re.compile(r'^https?://(?:[a-zA-Z0-9-]+\.)*(?:doubleclick\.net|googlesyndication\.com|google-analytics\.com|googletagmanager\.com)/')

@@ -15,7 +15,7 @@ from model1_price_range import validate_price_range
 CONTRACT='prominent-rows.v1'
 SELECTION_POLICY='prominent_right_edge.v1'
 MAX_LEVELS=40
-NUMBER_TOKEN=re.compile(r'(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])')
+NUMBER_TOKEN=re.compile(r'(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d|\.\d)')
 
 def num(value):
     if type(value) not in (int,float) or not math.isfinite(value) or value<=0:

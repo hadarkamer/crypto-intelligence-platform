@@ -155,11 +155,16 @@ class ObserverTests(unittest.TestCase):
 
     def test_success_has_zero_observer_calls_and_one_original_image(self):
         page=self.page();page.evaluate.return_value=False;driver=self.capture_mocks(page)
-        with tempfile.TemporaryDirectory() as directory,self.patches(page,driver),patch.object(capture,'HEATMAP_MODEL',3),patch.object(capture,'_select_timeframe') as selector,patch('model1_legend.prepare_legend_for_capture'),patch.object(capture,'wait_for_render',return_value={'ready':True,'reason':'render-checks-passed','label':'24 hour'}),patch.object(capture,'verify_saved_render'),patch.object(capture,'observe_capture_failure') as watch:
+        page.get_by_role.return_value.count.return_value=0  # No settings drawer in this successful fixture.
+        page.get_by_text.return_value.count.return_value=0  # No cookie banner.
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
+        with tempfile.TemporaryDirectory() as directory,self.patches(page,driver),patch.object(capture,'HEATMAP_MODEL',3),patch.object(capture,'_select_timeframe') as selector,patch('model1_legend.prepare_legend_for_capture'),patch.object(capture,'wait_for_render',return_value={'ready':True,'reason':'render-checks-passed','label':'24 hour'}),patch.object(capture,'verify_saved_render'),patch.object(capture,'observe_capture_failure') as watch,patch('heatmap_hover.capture_column',return_value={'version':'displayed-hover.v1'}):
             selector.__name__='_select_timeframe'
             result=capture.capture_heatmaps(directory,timeframes=('24h',),url=MODEL3)
         self.assertEqual(len(result),1);watch.assert_not_called();page.screenshot.assert_called_once()
-        self.assertEqual(page.screenshot.call_args.kwargs['full_page'],True)
+        # Before the hover adapter the legacy image reader uses full-page.
+        # Installed Model 3 hover must keep its displayed axis during capture.
+        self.assertEqual(page.screenshot.call_args.kwargs['full_page'],'hover_snapshot' not in result[0])
 
     def test_adapter_has_one_error_observer_and_one_existing_screenshot(self):
         tree=ast.parse((HERE/'runtime/market_vision/coinglass_heatmap_capture.py').read_text())

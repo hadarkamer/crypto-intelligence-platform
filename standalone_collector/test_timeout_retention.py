@@ -36,7 +36,7 @@ def scanner_function(store):
 
 
 class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self,*,image=PNG,sidecar=True,kill=False,store_error=False,invalid_sidecar=False,progress=False):
+    async def exercise(self,*,image=PNG,sidecar=True,kill=False,store_error=False,invalid_sidecar=False,progress=False,model=3):
         events=[];directories=[];saved=[];timeouts=[]
         class Process:
             returncode=None
@@ -82,9 +82,9 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(asyncio,'create_subprocess_exec',side_effect=launch),\
             patch.object(asyncio,'wait_for',side_effect=wait),\
             contextlib.redirect_stdout(io.StringIO()) as output:
-            with self.assertRaises(BridgeError) as failure:await scanner('12H','job',3)
+            with self.assertRaises(BridgeError) as failure:await scanner('12H','job',model)
         self.assertEqual(failure.exception.code,'scan_timeout');self.assertEqual(failure.exception.status,504)
-        self.assertEqual(timeouts,[300,5]);self.assertEqual(events.count('terminate'),1)
+        self.assertEqual(timeouts,[360 if model==3 else 300,5]);self.assertEqual(events.count('terminate'),1)
         self.assertEqual(events.count('kill'),1 if kill else 0)
         self.assertLess(events.index('terminate'),events.index('retain'))
         self.assertEqual(process.waits,3 if kill else 2)
@@ -96,7 +96,7 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         saved,output=await self.exercise()
         self.assertEqual(len(saved),1);jid,image,diagnostic=saved[0]
         self.assertEqual(image,PNG);self.assertEqual(diagnostic['failure_code'],'scan_timeout')
-        self.assertEqual(diagnostic['timeout_seconds'],300);self.assertFalse(diagnostic['assessment_validated'])
+        self.assertEqual(diagnostic['timeout_seconds'],360);self.assertFalse(diagnostic['assessment_validated'])
         self.assertEqual(diagnostic['source_readiness']['reason'],'loading-indicator')
         self.assertEqual(diagnostic['source_network']['http_errors'][0]['status'],503)
         self.assertTrue(json.loads(output.split('MODEL1_EVIDENCE ')[1])['image_retained'])
@@ -112,7 +112,7 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(saved[0][1]);diagnostic=saved[0][2]
         self.assertFalse(diagnostic['assessment_validated'])
         self.assertEqual(diagnostic['failure_code'],'scan_timeout')
-        self.assertEqual(diagnostic['timeout_seconds'],300)
+        self.assertEqual(diagnostic['timeout_seconds'],360)
         progress=diagnostic['execution_progress']
         self.assertEqual((progress['stage'],progress['capture_phase']),('capture','navigation'))
         self.assertEqual((progress['heatmap_model'],progress['timeframe']),(3,'12H'))
@@ -120,6 +120,11 @@ class TimeoutRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('PRIVATE',json.dumps(diagnostic)+output)
 
     async def test_uncooperative_child_is_killed_and_reaped_before_retention(self):await self.exercise(kill=True)
+
+    async def test_models_one_and_two_keep_the_original_deadline_and_timeout_evidence(self):
+        for model in (1,2):
+            saved,_=await self.exercise(model=model)
+            self.assertEqual(saved[0][2]['timeout_seconds'],300)
 
     async def test_retention_failure_never_replaces_original_timeout(self):
         saved,output=await self.exercise(store_error=True)

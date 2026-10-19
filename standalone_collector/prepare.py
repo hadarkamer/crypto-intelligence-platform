@@ -58,7 +58,7 @@ def prepare():
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
-                 'capture_readiness.py','capture_failure_observer.py','store_diagnostics.py'):
+                 'capture_readiness.py','capture_failure_observer.py','store_diagnostics.py','heatmap_hover.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -100,11 +100,21 @@ def prepare():
         'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','-v'],
         cwd=HERE,check=True,timeout=90)
+    from install_heatmap_hover import install as install_hover
+    install_hover(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_prominent_levels',
+        'test_response_shape','test_capture_diagnostics','test_capture_readiness',
+        'test_source_login_required','test_timeout_retention','test_source_compatibility',
+        'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
+        'test_capture_failure_observer','-v'],
+        cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
-        'capture_flow':'one requested model/horizon; existing session, controls, PNG and same-image crop',
+        'capture_flow':'one requested model/horizon; existing session, PNG, one DOM hover column and same-image crop',
+        'numeric_reader':'displayed-hover.v1',
+        'quantity_scope':'displayed latest column; explicit units only; rounded source values',
         'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
-        'analysis':'one bounded model request per new observation',
+        'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
         'identity':'strict model-specific source, schema, screenshot label and job',
         'price_reference':'explicit visual range or validated legacy point; no fake midpoint',
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,

@@ -143,6 +143,13 @@ class ProminentTests(unittest.TestCase):
     def test_comma_formatted_exact_evidence(self):
         from prominent_levels import evidence
         self.assertEqual(evidence('Row: $77,420.50', [77420.5]),'Row: $77,420.50')
+    def test_sentence_period_is_punctuation_not_a_missing_axis_number(self):
+        from prominent_levels import evidence
+        text='Visible y-axis ticks: 78000 and 85000.'
+        self.assertEqual(evidence(text,[78000,85000]),text)
+        self.assertEqual(evidence('Price 80,567.54.',[80567.54]),'Price 80,567.54.')
+        for text,price in [('85000.5',85000),('85000.5.6',85000.5),('185000.',85000)]:
+            with self.assertRaises(StageFailure):evidence(text,[price])
     def test_estimate_requires_positive_covering_uncertainty(self):
         for changes in ({'uncertainty_usd':0},{'uncertainty_usd':.1},{'price_precision':'verified_label'},
             {'prices':[109]},{'price_low':110,'price_high':110}):
@@ -180,14 +187,39 @@ class ProminentTests(unittest.TestCase):
         source=(HERE/'runtime/collection_model1_task.py').read_text()
         self.assertGreater(source.index("if __name__ == '__main__':"),source.index('def normalize('))
     def test_actual_child_entrypoint_saves_new_contract(self):
-        from PIL import Image
+        from PIL import Image,ImageDraw
+        from heatmap_hover import parse_tooltip
+        hover_rows=[]
+        for i,price in enumerate([110,100,90]):
+            row=parse_tooltip(f'2026-01-01 00:00 Price {price} Liquidation Leverage 1.00M')
+            row.update(id=f'r{i}',time_text='2026-01-01 00:00',y_fraction=i/2)
+            hover_rows.append(row)
+        snapshot={'version':'displayed-hover.v1','rows':hover_rows,'total_value':3000000,
+            'metric':'Liquidation Leverage','unit':'source_metric','scope':'displayed_latest_column',
+            'source_time':'2026-01-01T00:00:00Z','heatmap_model':1,'timeframe':'12H',
+            'complete':True,'price_step':10,'rounding_error':15000,'duration_seconds':1,
+            'plot_bounds':{'left':0,'right':499,'top':0,'bottom':299},'row_height_pixels':100}
+        raw=sample()
+        for number,(level,index) in enumerate(zip(raw['scans'][0]['prominent_levels'],[0,2])):
+            level.update(confidence='high',candidate_id=f'c{number}',source_row_ids=[f'r{index}'])
         def capture(directory,*,timeframes):
             directory.mkdir()
             path=directory/'coinglass_btc_heatmap_12h.png'
-            Image.new('RGB',(10,10)).save(path)
-            return [{'image':str(path),'timeframe':'12h'}]
+            image=Image.new('RGB',(500,300),(68,1,84));draw=ImageDraw.Draw(image)
+            for top in (0,200):draw.rectangle((0,top,499,top+99),fill=(253,231,37))
+            image.save(path)
+            return [{'image':str(path),'timeframe':'12h','hover_snapshot':snapshot}]
+        hover_installed='prepare_candidates(images)' in (HERE/'runtime/collection_model1_task.py').read_text()
+        def analyze(images,**kwargs):
+            if hover_installed:
+                # Exercise real candidate computation before the one mocked API
+                # boundary; never mock out prepare_candidates or ground_analysis.
+                computed=images[0]['hover_snapshot']['candidates']
+                self.assertEqual([p['source_value'] for p in computed],[1000000,1000000])
+                self.assertEqual([p['source_row_ids'] for p in computed],[['r0'],['r2']])
+            return raw
         capture_module=types.SimpleNamespace(capture_heatmaps=capture,COINGLASS_HEATMAP_URL=task.SOURCE)
-        scanner_module=types.SimpleNamespace(analyze_heatmap_images=lambda *a,**kw:sample())
+        scanner_module=types.SimpleNamespace(analyze_heatmap_images=analyze)
         with tempfile.TemporaryDirectory() as root,patch.dict(sys.modules,{
             'market_vision.coinglass_heatmap_capture':capture_module,
             'market_vision.openai_heatmap_scanner':scanner_module}),patch.object(sys,'argv',[
@@ -198,6 +230,9 @@ class ProminentTests(unittest.TestCase):
             result=json.loads((Path(root)/'result.json').read_text())
             self.assertEqual(result['selection_policy'],SELECTION_POLICY)
             self.assertEqual(len(result['zones']),2)
+            if hover_installed:
+                self.assertEqual([z['source_value'] for z in result['zones']],[1000000,1000000])
+                self.assertEqual(result['hover_snapshot']['total_value'],3000000)
     def test_automatic_cache_requires_policy_marker(self):
         source=inspect.getsource(bridge.JobStore.start)
         self.assertIn("result->>'selection_policy'='prominent_right_edge.v1'",source)
