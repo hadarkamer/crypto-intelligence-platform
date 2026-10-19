@@ -1,0 +1,42 @@
+[
+  {
+    "phase": "grid",
+    "count": 141,
+    "step": 90.80999999999999,
+    "height": 5.710431654676259,
+    "top_price": 88236.67,
+    "bottom_price": 75523.27,
+    "bounds": {
+      "left": 81,
+      "right": 1508,
+      "top": 336,
+      "bottom": 1135
+    },
+    "source_axis": [
+      76000,
+      78000,
+      80000,
+      82000,
+      84000,
+      86000,
+      88000
+    ],
+    "calibration_seconds": 62.802
+  },
+  {
+    "phase": "sample",
+    "native_anchor_matches": [
+      true,
+      true,
+      true
+    ],
+    "sample_count": 10,
+    "elapsed": 82.5,
+    "average_ms": {
+      "dispatch_ms": 0.34,
+      "total_ms": 959.79,
+      "read_ms": 8.38,
+      "reads": 2
+    }
+  }
+]

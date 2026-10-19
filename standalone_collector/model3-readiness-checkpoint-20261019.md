@@ -40,3 +40,25 @@ No production deployment or database write. API calls so far remain one, the rej
 - One active serial guarded acceptance: /tmp/hover-model3-viewport-acceptance-20261019-0b6ab49, guard PID 3188, bundle SHA256 af7efad788bf06fdbee74e17f77d572cdc99b43de11a69676baddf35dbbe8e93. Cases: Model 3 48H -> 12H -> 24H. Stops on any failure; at most one API request per case; no database writes. Do not launch another. Last observed stage: 48H hover_collection, after the before/after screenshot axis gate passed.
 - Existing local disposable PGlite database review-data/hover-current-isolated-pg reopened successfully as legacy_transaction_test with both save functions; do not rebuild it unnecessarily. Its acceptance writes must be rolled back.
 - No production merge, deployment or database change.
+
+
+## Continuation: actual frame-update cost isolated
+
+No production merge/deploy/database write. No Model 1/2 source rerun. The one prior rejected-image OpenAI request remains the only API request; subsequent source cases stopped before analysis.
+
+All preceding candidates finished, sequentially:
+- Native reader, correct full-size viewport screenshot: 48H hover_deadline, 254.361 seconds overall; peak current 1020.09 MiB.
+- Text-only predicate per browser call: hover_deadline, 254.401 seconds; no useful timing improvement. Rejected.
+- Single pointer event + read per browser call: hover_deadline, 259.000 seconds. Rejected.
+- 1000x1300 viewport, native reader: hover_update_timeout during calibration, 115.503 seconds. Rejected; never accepted reduced coverage.
+- One page-side row batch, full visibility reads/native calibration/anchors: hover_deadline, 258.428 seconds. Rejected as production-ready.
+
+A bounded ten-row timing probe completed intentionally without AI or application writes. It found 141 native rows (price step 90.81; about 5.71px per row), 62.802 seconds calibration. Mean pointer-dispatch time 0.34ms; actual text-read work 8.38ms; full wait per changed tooltip 959.79ms, with two predicate observations. All three ordinary native-pointer anchors matched the sampled price, value, timestamp and unit. This isolates delayed page updates, not expensive string extraction, as the dominant cost. Evidence: model3-row-profile-20261019.json. Intentional probe termination is not an application acceptance result.
+
+The page-side batch prototype passed 22 local reader regressions plus explicit Model 3 stale/changed-time and missing-row fixtures, but remains TEST ONLY because paid-runtime timing failed. No event/batch/narrow-viewport code has been added to the production PR.
+
+Current active acceptance root: /tmp/hover-model3-full-chromium-20261019-73aeb29.
+Bundle SHA256: ae9616e0bd0c36c7c9878391d8496cea5c9db1a975d7b7cf79d39605e44bfa7e.
+This isolated candidate changes only Model 3's browser launch to supported channel=chromium (new headless/full Chromium); it restores the original native reader, full 1600x1300 viewport and all source checks. Sequential Model 3 48H -> 12H -> 24H, stop on first failure, max one GPT call per successful source case, zero application writes, same 1 CPU/2 GiB, same guard and deadlines. Inspect this root before any next launch. Do not duplicate it.
+
+Collector/app draft heads remain 73aeb29988006632f7237b4e3e8c57dd9713216b and bd82e38d5c33781dda8e744ae5649e3b7479dabf. All exact-head CI workflows are successful. Bases remain cf2413f6a34ff9cac33e27e957990eeab2c3c0f7 and 7d21e93ebd8c649bf7a741332fd1999b9cbb647d. New source/GPT success, app replay and live coordinated release are still open gates.
