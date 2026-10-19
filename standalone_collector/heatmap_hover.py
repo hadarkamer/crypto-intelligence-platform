@@ -19,6 +19,10 @@ VERSION = 'displayed-hover.v1'
 MAX_ROWS = 1600
 MAX_SECONDS = 55
 METRIC = 'Liquidation Leverage'
+# Model 2 source controls: clear green h=.42667, cyan/blue h=.49524.
+# Their midpoint is .46095. Keep teal out of the green band; the former .48
+# cutoff classified RGB(33,149,135) differently after a one-channel +/-1 change.
+MODEL2_GREEN_BLUE_HUE = .46
 NUMBER = r'\d+(?:,\d{3})*(?:\.\d+)?'
 TOOLTIP = re.compile(r'^(?P<time>(?:\d{1,2} [A-Za-z]{3} \d{4}, \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}))\s+Price\s+(?P<price>'+NUMBER+r')\s+Liquidation Leverage\s+(?P<amount>\$?'+NUMBER+r'\s*[KMB]?(?:\s*USD)?)$', re.I)
 
@@ -625,11 +629,12 @@ def candidate_pools(snapshot, image_path):
     bounds = snapshot['plot_bounds']
     x = math.floor(bounds['right']-.25)
     height = snapshot['row_height_pixels']
+    green_blue = MODEL2_GREEN_BLUE_HUE if snapshot.get('heatmap_model')==2 else .48
     def colour(rgb):
         h,s,v=colorsys.rgb_to_hsv(*(c/255 for c in rgb))
         if .13 <= h < .24 and s >= .45 and v >= .55:return 'yellow'
-        if .24 <= h < .48 and s >= .45 and v >= .4:return 'green'
-        if .48 <= h < .66 and s >= .45 and v >= .35:return 'blue'
+        if .24 <= h < green_blue and s >= .45 and v >= .4:return 'green'
+        if green_blue <= h < .66 and s >= .45 and v >= .35:return 'blue'
         return None
     groups=[]
     with Image.open(image_path) as original:

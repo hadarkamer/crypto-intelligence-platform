@@ -456,6 +456,36 @@ class HoverTests(unittest.TestCase):
             self.assertEqual([p['source_value'] for p in pools],[5e6,5e6,24e6])
             self.assertAlmostEqual(pools[0]['percent'],5/78*100)
 
+    def test_model2_teal_boundary_does_not_extend_a_green_pool(self):
+        from PIL import Image,ImageDraw
+        # Retained source pixels: blue, borderline teal, clear green, yellow,
+        # purple gap, then the two clear green rows accepted in the same image.
+        colours=[(38,124,141),(33,149,135),(65,186,104),(242,232,5),
+                 (66,19,100),(121,204,71),(48,173,118),(35,140,137)]
+        data=[]
+        for i in range(len(colours)):
+            row=parse_tooltip(f'2026-10-19 12:55 Price {84000-i*100} Liquidation Leverage {i+1}.00M')
+            data.append(dict(row,id=f'r{i}',time_text='2026-10-19 12:55',y_fraction=(i*20+10)/159))
+        snapshot={'heatmap_model':2,'rows':data,'plot_bounds':{'left':0,'right':499,'top':0,'bottom':159},
+                  'row_height_pixels':20,'total_value':36e6}
+        before=copy.deepcopy(snapshot)
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'source-colours.png'
+            for teal in ((33,149,135),(33,148,135),(33,150,135)):
+                im=Image.new('RGB',(500,160));draw=ImageDraw.Draw(im)
+                for i,rgb in enumerate(colours):
+                    draw.rectangle((0,i*20,499,i*20+19),fill=teal if i==1 else rgb)
+                im.save(path);im.close()
+                pools=candidate_pools(snapshot,path)
+                self.assertEqual([p['source_row_ids'] for p in pools],[['r3'],['r5','r6']])
+                self.assertEqual([p['row_colour'] for p in pools],['yellow','green'])
+                self.assertEqual([p['source_value'] for p in pools],[4e6,13e6])
+                self.assertAlmostEqual(pools[1]['percent'],13/36*100)
+            self.assertEqual(snapshot,before)  # All source rows and totals survive.
+            for model in (1,3):
+                pools=candidate_pools({**snapshot,'heatmap_model':model},path)
+                self.assertEqual(pools[0]['source_row_ids'],['r1','r2'])
+
     def test_direct_sweep_waits_for_changed_price_and_rejects_stuck_tooltip(self):
         from playwright.sync_api import sync_playwright
         stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')

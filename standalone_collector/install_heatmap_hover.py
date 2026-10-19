@@ -2,6 +2,7 @@
 from pathlib import Path
 from install_prominent_levels import once
 from install_original_flow import VISION_INSTRUCTIONS
+from heatmap_hover import MODEL2_GREEN_BLUE_HUE
 
 HOVER_INSTRUCTIONS = """
 Observe and explain the supplied map; do not give trade advice or predictions.
@@ -45,7 +46,7 @@ all market liquidity or actual realized liquidations. Never infer money from
 colour or the legend. Keep short_summary concise and observational.
 """
 
-MODEL2_REFERENCE = '''
+MODEL2_REFERENCE = f'''
 The current-price reference is source_candle.close, read from the visible OHLC
 tooltip on this same map's latest column. Its source_time matches the liquidity
 rows and it was unchanged on a second read. It is the displayed candle Close,
@@ -53,6 +54,17 @@ not a real-time market quote. Do not estimate a current price or price range
 from pixels. Code assigns above/below and omits candidates touching that Close.
 Still verify every candidate visually; candle evidence does not raise pool
 confidence. Keep the summary consistent with the supplied numeric Close.
+
+For this Model 2 classic palette, green means clear green/yellow-green, not the
+cyan/teal transition into blue. The code's normalized HSV hue intervals are
+green [0.24, {MODEL2_GREEN_BLUE_HUE}) and blue/teal [{MODEL2_GREEN_BLUE_HUE}, 0.66).
+Source colour controls: RGB(48,173,118) is green; RGB(35,140,137) and
+RGB(33,149,135) are blue/teal. Saturation and brightness must also be sufficient.
+Verify candidate row membership using that same colour definition. A blue/teal
+row must not extend a green pool. Two or more consecutive clear green rows form
+a green range; a single green row is not such a range. The existing candidates
+apply this rule before analysis. This does not authorize excluding a supplied
+candidate or raising confidence: still reject unclear boundaries or continuity.
 '''
 
 
