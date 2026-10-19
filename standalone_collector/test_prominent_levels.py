@@ -274,12 +274,16 @@ class ProminentTests(unittest.TestCase):
             code='''import json
 from heatmap_models import HEATMAP_MODEL, MODEL_LABEL, SOURCE_URL
 from collection_model1_task import normalize
+from heatmap_hover import parse_candle
 raw=json.loads(INPUT)
 for tf in ('12H','24H','48H'):
  s=raw['scans'][0];s.update(timeframe=tf.lower(),observed_timeframe=tf.lower(),observed_model=MODEL_LABEL)
+ if HEATMAP_MODEL==2:s['source_candle']=parse_candle('2026-10-19 12:10 Open 99 High 101 Low 98 Close 100')
  out=normalize(raw,timeframe=tf,run_id='id',captured_at='time',image=b'synthetic')
  assert out['heatmap_model']==HEATMAP_MODEL and out['source_url']==SOURCE_URL
  assert out['selection_policy']=='prominent_right_edge.v1' and out['timeframe']==tf
+ if HEATMAP_MODEL==2:
+  assert out['observed_price']==100 and out['observed_price_range'] is None and out['price_reference_type']=='exact_point'
 print('ok')
 '''.replace('INPUT',repr(json.dumps(template)))
             p=subprocess.run([sys.executable,'-c',code],cwd=HERE/'runtime',env=child_environment(model),capture_output=True,text=True,timeout=20)

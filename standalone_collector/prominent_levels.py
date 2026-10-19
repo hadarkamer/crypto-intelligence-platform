@@ -1,7 +1,7 @@
 """Source-specific prominent heatmap rows, validated without inferred precision.
 
 This module is installed only in the standalone app collector. It never scans
-the source itself. All price evidence refers to the one model/horizon PNG.
+the source itself. Price evidence refers to the same model/horizon observation.
 """
 from __future__ import annotations
 import hashlib
@@ -48,12 +48,19 @@ def identity(raw,timeframe):
 
 def normalize_prominent(raw,*,timeframe,run_id,captured_at,image):
     scan=identity(raw,timeframe)
-    current=validate_price_range(scan.get('current_price_range'))
+    point=None
+    if HEATMAP_MODEL==2:
+        from heatmap_hover import validate_candle
+        candle=scan.get('source_candle')
+        point=validate_candle(candle,candle.get('source_time') if isinstance(candle,dict) else None)
+        current={'low':point,'high':point}
+    else:
+        current=validate_price_range(scan.get('current_price_range'))
     axis=scan.get('price_axis_range')
     if not isinstance(axis,dict) or set(axis)!={'low','high','price_evidence'}:
         raise StageFailure('zones_invalid', 'axis_shape')
     axis_low,axis_high=num(axis['low']),num(axis['high'])
-    if not axis_low<=current['low']<current['high']<=axis_high:
+    if not axis_low<=current['low']<=current['high']<=axis_high or not axis_low<axis_high:
         raise StageFailure('zones_invalid', 'axis_does_not_cover_price')
     axis_text=evidence(axis['price_evidence'],(axis_low,axis_high))
     candidates=scan.get('prominent_levels')
@@ -132,8 +139,9 @@ def normalize_prominent(raw,*,timeframe,run_id,captured_at,image):
         'selection_policy':SELECTION_POLICY,
         'run_id':run_id,'source_url':SOURCE_URL,'symbol':'BTC','heatmap_model':HEATMAP_MODEL,
         'timeframe':timeframe,'captured_at':captured_at,'source_updated_at':None,
-        'provider':'OpenAI','model':model,'usage':raw.get('usage'),'observed_price':None,
-        'price_reference_type':'visual_range','observed_price_range':current,
+        'provider':'OpenAI','model':model,'usage':raw.get('usage'),'observed_price':point,
+        'price_reference_type':'exact_point' if point is not None else 'visual_range',
+        'observed_price_range':None if point is not None else current,
         'price_axis_range':{'low':axis_low,'high':axis_high,'price_evidence':axis_text},
         'omitted_ambiguous_zones':omitted,'zones':zones,
         'evidence':{'sha256':hashlib.sha256(image).hexdigest(),'artifact_id':run_id,'content_type':'image/png'},

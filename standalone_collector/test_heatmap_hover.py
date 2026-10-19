@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
     READ_TOOLTIP, READ_UPDATED_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,
-    dismiss_cookie_banner, require_cookie_banner_hidden)
+    dismiss_cookie_banner, require_cookie_banner_hidden, parse_candle, validate_candle, candle_points)
 
 REFERENCE={'low':81000,'high':81100,'axis_low':80000,'axis_high':83000,
            'confidence':'high','basis':'last_candle_axis_bracket'}
@@ -32,6 +32,33 @@ def rows():
 
 
 class HoverTests(unittest.TestCase):
+    def test_candle_parser_rejects_liquidity_values_bad_ohlc_and_time(self):
+        tip='19 Oct 2026, 12:10 Open 82384.4 High 82441.6 Low 82333.8 Close 82432'
+        candle=parse_candle(tip)
+        self.assertEqual(validate_candle(candle,'2026-10-19T12:10:00Z'),82432)
+        for invalid in (tip.replace('82432','90000'),tip.replace('19 Oct','32 Oct'),
+            '19 Oct 2026, 12:10 Price 82432 Liquidation Leverage 1M',tip+' extra'):
+            with self.assertRaises(HoverError):parse_candle(invalid)
+        with self.assertRaisesRegex(HoverError,'hover_candle_time_mismatch'):
+            validate_candle(candle,'2026-10-19T12:05:00Z')
+        with self.assertRaisesRegex(HoverError,'hover_candle_evidence_mismatch'):
+            validate_candle(dict(candle,close=82400),candle['source_time'])
+
+    def test_candle_close_overrides_wrong_visual_reference_without_weakening_pool_checks(self):
+        candle=parse_candle('2026-10-17 12:05 Open 82200 High 82300 Low 82100 Close 82250')
+        snap={'heatmap_model':2,'source_time':candle['source_time'],'source_candle':candle,
+              'rows':rows(),'candidates':[candidate(['r1','r2'])]}
+        level={'candidate_id':'c0','shape':'range','side':'above','confidence':'high','row_colour':'green','intensity':'normal'}
+        raw=proposed([level]);raw['scans'][0]['current_price_range']={'confidence':'low'}
+        grounded=ground_analysis(raw,snap)
+        self.assertEqual(grounded['scans'][0]['prominent_levels'][0]['side'],'below')
+        self.assertNotIn('current_price_range',grounded['scans'][0])
+        self.assertEqual(grounded['scans'][0]['source_candle'],candle)
+        for change in ({'source_time':'2026-10-17T12:10:00Z'},{'source_candle':None}):
+            with self.assertRaises(HoverError):ground_analysis(raw,{**snap,**change})
+        raw['scans'][0]['prominent_levels'][0]['confidence']='medium'
+        with self.assertRaisesRegex(HoverError,'hover_pool_uncertain'):ground_analysis(raw,snap)
+
     def test_persistent_tooltip_requires_visible_update_before_reusing_numbers(self):
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
@@ -334,20 +361,29 @@ class HoverTests(unittest.TestCase):
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
                 for model in (2,3):
-                    for missing in (False,True):
+                    for missing in ((False,True,"candle_changed") if model==2 else (False,True)):
                         expected=prices.copy()
                         if model==2:
                             expected=[round(90167.75-(i-1)*138.45,2) for i in range(30)]
                             expected[0]=90305.7;expected[-1]=round(expected[-1]+.5,2)
                         values=expected.copy()
-                        if missing:values[14]=values[15]
-                        page.set_content(html.replace('PRICES',json.dumps(values)))
+                        if missing is True:values[14]=values[15]
+                        fixture=html.replace('PRICES',json.dumps(values))
+                        if model==2:
+                            fixture=fixture.replace('height="300"','height="340"')
+                            fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,4,4);let shown=true;c.onclick=()=>shown=!shown;")
+                            fixture=fixture.replace('e.offsetY/10','(e.offsetY-40)/10')
+                            fixture=fixture.replace("t.style.display='block';t.innerText=", "if(e.offsetY<40)return;t.style.display='block';if(shown&&e.offsetY>=180&&e.offsetY<=184){t.innerText='STAMP Open 88300 High 88500 Low 88200 Close 88400';return;}t.innerText=").replace('STAMP',stamp)
+                        if missing=="candle_changed":
+                            fixture=fixture.replace('let shown=true;c.onclick=()=>shown=!shown;', 'let shown=true,toggles=0;c.onclick=()=>{shown=!shown;toggles++};')
+                            fixture=fixture.replace("Close 88400'", "Close '+(toggles>1?'88401':'88400')")
+                        page.set_content(fixture)
                         path=Path(temp)/'grid.png';page.screenshot(path=str(path),full_page=True)
                         if missing:
-                            with self.assertRaisesRegex(HoverError,'hover_update_timeout'):
-                                capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
+                            with self.assertRaisesRegex(HoverError,'hover_candle_changed' if missing=='candle_changed' else 'hover_update_timeout'):
+                                capture_column(page,path,{'x':20,'y':40,'width':600,'height':340 if model==2 else 300},model=model,timeframe='12h')
                         else:
-                            result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='12h')
+                            result=capture_column(page,path,{'x':20,'y':40,'width':600,'height':340 if model==2 else 300},model=model,timeframe='12h')
                             self.assertEqual([r['price'] for r in result['rows']],expected)
                             self.assertEqual(result['total_value'],465000000)
             finally:browser.close()
@@ -436,6 +472,11 @@ class HoverTests(unittest.TestCase):
                 for model,mode in ([(2,m) for m in ('normal','stuck','changed-time')] +
                                    [(3,m) for m in ('normal','stuck','no-animation-frame','changed-time','synthetic-different','expired-model3')]):
                     fixture=html.replace('STUCK',str(mode=='stuck').lower())
+                    if model==2:
+                        fixture=fixture.replace('height="300"','height="340"')
+                        fixture=fixture.replace("ctx.fillRect(0,0,600,300);", "ctx.fillRect(0,40,600,300);ctx.fillStyle='rgb(43,184,153)';ctx.fillRect(300,10,10,10);ctx.fillStyle='rgb(14,203,129)';ctx.fillRect(596,180,4,4);let shown=true;c.onclick=()=>shown=!shown;")
+                        fixture=fixture.replace('e.offsetY/10','(e.offsetY-40)/10')
+                        fixture=fixture.replace("if("+str(mode=='stuck').lower()+" && row===14)return;", "if(e.offsetY<40)return;if(shown&&e.offsetY>=180&&e.offsetY<=184){t.style.display='block';t.innerText='"+stamp+" Open 986 High 987 Low 985 Close 986';return;}if("+str(mode=='stuck').lower()+" && row===14)return;")
                     if mode=='no-animation-frame':
                         # DOM updates continue while animation-frame callbacks
                         # never run. Timer polling must still read every row.
@@ -459,7 +500,7 @@ class HoverTests(unittest.TestCase):
                     elif mode in ('stuck','changed-time','synthetic-different'):
                         reason='hover_update_timeout' if mode=='stuck' else 'hover_snapshot_changed'
                         with self.assertRaisesRegex(HoverError,reason):
-                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='24h')
+                            capture_column(page,path,{'x':20,'y':40,'width':600,'height':340 if model==2 else 300},model=model,timeframe='24h')
                     else:
                         if mode=='no-animation-frame':
                             # A valid Model 3 sweep must survive the former
@@ -469,7 +510,7 @@ class HoverTests(unittest.TestCase):
                                 snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='24h')
                             self.assertEqual(snapshot['duration_seconds'],60)
                         else:
-                            snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':300},model=model,timeframe='24h')
+                            snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':340 if model==2 else 300},model=model,timeframe='24h')
                         self.assertEqual(len(snapshot['rows']),30)
                         self.assertEqual(snapshot['total_value'],30000000)
             finally:browser.close()

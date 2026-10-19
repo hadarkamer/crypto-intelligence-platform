@@ -58,6 +58,33 @@ def parse_tooltip(text):
             'source_time': observed.isoformat().replace('+00:00', 'Z')}
 
 
+def parse_candle(text):
+    """An OHLC tooltip is a different source record from a liquidity row."""
+    normalized = ' '.join(str(text).split())
+    pattern = (r'^(?P<time>\d{1,2} [A-Za-z]{3} \d{4}, \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2})'
+        + ''.join(r'\s+'+key.title()+r'\s+(?P<'+key+'>'+NUMBER+r')' for key in ('open','high','low','close')) + '$')
+    match = re.fullmatch(pattern, normalized)
+    if not match: raise HoverError('hover_candle_text_invalid')
+    stamp = match['time']
+    try:
+        at = datetime.strptime(stamp, '%Y-%m-%d %H:%M' if stamp[4:5]=='-' else '%d %b %Y, %H:%M').replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HoverError('hover_candle_time_invalid') from None
+    values = {k:float(Decimal(match[k].replace(',',''))) for k in ('open','high','low','close')}
+    if (any(not 0 < v < 1e12 for v in values.values()) or
+        not values['low'] <= min(values['open'],values['close']) <= max(values['open'],values['close']) <= values['high']):
+        raise HoverError('hover_candle_number_invalid')
+    return {**values,'source_time':at.isoformat().replace('+00:00','Z'),'raw_text':normalized}
+
+
+def validate_candle(candle, source_time):
+    if not isinstance(candle,dict) or parse_candle(candle.get('raw_text')) != candle:
+        raise HoverError('hover_candle_evidence_mismatch')
+    if candle['source_time'] != source_time:
+        raise HoverError('hover_candle_time_mismatch')
+    return candle['close']
+
+
 # Only visible DOM content. No framework state, canvas internals or private API.
 READ_TOOLTIP = r'''mode => {
   const candidates = [...document.querySelectorAll('.cg-toolti-box')].filter(e => {
@@ -73,13 +100,39 @@ READ_TOOLTIP = r'''mode => {
   // Read the complete observed tooltip, never its innermost matching div.
   if(candidates.length!==1)return null;
   const text=candidates[0].innerText;
-  if(text.length>220 || !text.includes('Liquidation Leverage'))return null;
+  if(text.length>220 || !(mode==='candle' ? /\bOpen\s/.test(text) && /\bClose\s/.test(text) : text.includes('Liquidation Leverage')))return null;
   if(mode==='state'){
     const r=candidates[0].getBoundingClientRect();
     return {text,position:[r.x,r.y,r.width,r.height]};
   }
   return text;
 }'''
+
+
+def candle_points(image_path, bounds):
+    """Pixels select hover locations only; no price is inferred from colour.
+
+    Search only the last four rendered columns. These candle colours are
+    distinct from the classic heatmap palette. Ambiguity remains a failure.
+    """
+    from PIL import Image
+    with Image.open(image_path) as original:
+        image=original.convert('RGB')
+    try:
+        right=math.floor(bounds['right']-.25)
+        ys=[]
+        for y in range(bounds['top']+1,bounds['bottom']):
+            for x in range(right-3,right+1):
+                r,g,b=image.getpixel((x,y))
+                if (r<35 and g>185 and 100<b<150) or (r>200 and g<110 and 40<b<150):
+                    ys.append(y);break
+        groups=[]
+        for y in ys:
+            if not groups or y-groups[-1][-1]>2:groups.append([])
+            groups[-1].append(y)
+        if not 1<=len(groups)<=8:raise HoverError('hover_candle_not_found')
+        return [(bounds['right']-.25,(g[0]+g[-1])/2) for g in groups]
+    finally:image.close()
 
 READ_UPDATED_TOOLTIP = r'''previous => {
   const current = (''' + READ_TOOLTIP + r''')('state');
@@ -301,11 +354,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     viewport = page.viewport_size
     if not viewport or bounds['bottom']-bounds['top']+40 > viewport['height']:
         raise HoverError('hover_plot_clipped')
-    if model in (1,2):
-        marker=price_overlay_point(image_path,geometry,bounds)
-        if marker is not None:
-            page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
-            page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
+    marker=price_overlay_point(image_path,geometry,bounds) if model in (1,2) else None
     if model!=3:
         page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
@@ -340,6 +389,31 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         if not result:
             raise HoverError('hover_update_timeout')
         return result
+
+    def toggle_candles():
+        page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
+        page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
+        page.evaluate('(top) => window.scrollTo(0, top)',scroll_y)
+
+    def read_candle(points):
+        # A visible liquidity tooltip first proves an old candle tip was replaced.
+        page.mouse.move(x,bounds['top']+1.5-scroll_y)
+        wait_for_tooltip(READ_TOOLTIP,timeout_ms=700)
+        for px,py in points:
+            page.mouse.move(px,py-scroll_y)
+            try:
+                text=wait_for_tooltip('() => ('+READ_TOOLTIP+")('candle')",timeout_ms=350)
+            except HoverError as exc:
+                if exc.reason!='hover_update_timeout':raise
+                continue
+            return parse_candle(text),(px,py)
+        raise HoverError('hover_candle_not_found')
+
+    candle=None
+    if model==2:
+        if marker is None:raise HoverError('hover_candle_not_found')
+        candle,candle_point=read_candle(candle_points(image_path,bounds))
+    if marker is not None:toggle_candles()
 
     def read(y, expected=None, *, native=False):
         nonlocal read_count
@@ -504,9 +578,17 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     observed = datetime.fromisoformat(rows[0]['source_time'].replace('Z','+00:00'))
     age = (datetime.now(timezone.utc)-observed).total_seconds()
     if not -120 <= age <= 1200:raise HoverError('hover_source_stale')
+    if model==2:
+        close=validate_candle(candle,rows[0]['source_time'])
+        if not rows[-1]['price']<=close<=rows[0]['price']:
+            raise HoverError('hover_candle_outside_axis')
+        toggle_candles()
+        final,_=read_candle([candle_point])
+        if final!=candle:raise HoverError('hover_candle_changed')
     page.mouse.move(0,0)
     return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
             'scope':'displayed_latest_column','heatmap_model':model,
+            **({'source_candle':candle} if model==2 else {}),
             **({'price_axis_ticks':list(source_axis)} if model==3 and source_axis is not None else {}),
             'timeframe':timeframe.upper(),'source_time':rows[0]['source_time'],
             'complete':True,'price_step':price_step,'rows':rows,
@@ -580,6 +662,9 @@ def model_content(image):
     payload['plot_bounds'] = snapshot['plot_bounds']
     payload['row_height_pixels'] = snapshot['row_height_pixels']
     payload['candidates'] = snapshot['candidates']
+    if snapshot.get('heatmap_model')==2:
+        validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        payload['source_candle']=snapshot['source_candle']
     return [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
              'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
              'If any boundary, colour or continuity is wrong, mark that candidate confidence=low. '
@@ -595,7 +680,16 @@ def ground_analysis(raw, snapshot):
         from model1_execution import StageFailure
         raise StageFailure('source_not_readable')
     from model1_price_range import validate_price_range
-    current=validate_price_range(scans[0].get('current_price_range'))
+    scans[0].pop('source_candle',None)  # Never accept provider-created source evidence.
+    if snapshot.get('heatmap_model')==2:
+        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        if not snapshot['rows'][-1]['price']<=close<=snapshot['rows'][0]['price']:
+            raise HoverError('hover_candle_outside_axis')
+        scans[0]['source_candle']=copy.deepcopy(snapshot['source_candle'])
+        scans[0].pop('current_price_range',None)
+        current={'low':close,'high':close}  # Internal comparison bounds, never an output range.
+    else:
+        current=validate_price_range(scans[0].get('current_price_range'))
     if 'price_axis_ticks' in snapshot:
         # These ticks were read from visible DOM and checked around the same
         # screenshot and sweep. Use that evidence, not an LLM transcription.
@@ -658,6 +752,11 @@ def attach_measurements(result, raw, snapshot, *, image):
     output.update(source_url=result['source_url'],captured_at=result['captured_at'],
         artifact_id=result['run_id'],sha256=hashlib.sha256(image).hexdigest(),
         observed_price_range=result['observed_price_range'])
+    if snapshot.get('heatmap_model')==2:
+        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        if result.get('price_reference_type')!='exact_point' or result.get('observed_price')!=close or result['observed_price_range'] is not None:
+            raise HoverError('hover_candle_evidence_mismatch')
+        output['observed_price']=close
     candidates = raw['scans'][0]['prominent_levels']
     by_id = {r['id']:r for r in snapshot['rows']}
     for zone in result['zones']:

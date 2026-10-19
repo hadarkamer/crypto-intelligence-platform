@@ -45,6 +45,16 @@ all market liquidity or actual realized liquidations. Never infer money from
 colour or the legend. Keep short_summary concise and observational.
 """
 
+MODEL2_REFERENCE = '''
+The current-price reference is source_candle.close, read from the visible OHLC
+tooltip on this same map's latest column. Its source_time matches the liquidity
+rows and it was unchanged on a second read. It is the displayed candle Close,
+not a real-time market quote. Do not estimate a current price or price range
+from pixels. Code assigns above/below and omits candidates touching that Close.
+Still verify every candidate visually; candle evidence does not raise pool
+confidence. Keep the summary consistent with the supplied numeric Close.
+'''
+
 
 def install(runtime: Path):
     path = runtime/'market_vision/coinglass_heatmap_capture.py'
@@ -92,6 +102,22 @@ _hover_level['required'].append('candidate_id')
     # hover exception left GPT free to widen/omit precomputed candidates.
     # Keep the existing identity/readability and current-price range safeguards.
     text += '\nSYSTEM_PROMPT = '+repr(VISION_INSTRUCTIONS)+' + RANGE_INSTRUCTIONS + '+repr(HOVER_INSTRUCTIONS)+' + "\\nRequested heatmap: " + MODEL_LABEL\n'
+    model2_instructions=HOVER_INSTRUCTIONS.replace(
+        'Assess it separately from confidence in the last-candle current-price range.',
+        'Numeric candle evidence does not determine candidate confidence.')
+    start=model2_instructions.index('The current-price reference is a visual range')
+    end=model2_instructions.index('Keep exact_dollar_totals_available=false:')
+    model2_instructions=model2_instructions[:start]+MODEL2_REFERENCE+model2_instructions[end:]
+    text += '\nfrom heatmap_models import HEATMAP_MODEL\nif HEATMAP_MODEL == 2:\n'
+    text += '    _scan = HEATMAP_SCHEMA["properties"]["scans"]["items"]\n'
+    text += '    for _key in ("current_price_range", "current_price_estimate", "current_price_confidence"):\n'
+    text += '        _scan["properties"].pop(_key, None)\n'
+    text += '        _scan["required"].remove(_key)\n'
+    text += '    SYSTEM_PROMPT = '+repr(VISION_INSTRUCTIONS+model2_instructions)+' + "\\nRequested heatmap: " + MODEL_LABEL\n'
+    # The detail remains useful for pool verification, but its old range-only
+    # instruction must not contradict the source-based reference in Model 2.
+    text += '    import price_detail_input as _detail\n'
+    text += '    _detail.DETAIL_TEXT = '+repr('Enlarged saved pixels from the SAME screenshot. Verify candidate colours and continuity at the latest right edge. Return one scan. Read the current reference from source_candle.close, not from this image.')+'\n'
     compile(text,str(path),'exec'); path.write_text(text)
 
     path = runtime/'collection_model1_task.py'
