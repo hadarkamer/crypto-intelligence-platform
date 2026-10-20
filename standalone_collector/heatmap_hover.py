@@ -799,16 +799,18 @@ def ground_analysis(raw, snapshot, *, image_path=None, source_sha256=None):
         scans[0]['source_candle']=copy.deepcopy(snapshot['source_candle'])
         current={'low':close,'high':close}  # Internal comparison bounds, never an output range.
     if 'price_axis_ticks' in snapshot:
-        # These ticks were read from visible DOM and checked around the same
-        # screenshot and sweep. Use that evidence, not an LLM transcription.
-        # The provider does not own these numeric fields.
+        # Numbered ticks need not reach the painted plot edges. The complete,
+        # validated tooltip column owns its bounds; using only the outer ticks
+        # incorrectly rejects visible edge pools in Model 3. Keep the DOM
+        # ticks as independent source evidence, not as clipping boundaries.
         from capture_readiness import safe_readiness
         ticks=safe_readiness(snapshot).get('price_axis_ticks')
         if ticks is None:
             raise HoverError('hover_price_axis_mismatch')
+        low,high=snapshot['rows'][-1]['price'],snapshot['rows'][0]['price']
         scans[0]['price_axis_range']={
-            'low':ticks[0],'high':ticks[-1],
-            'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
+            'low':low,'high':high,
+            'price_evidence':f'Visible tooltip row bounds {low} — {high}; verified DOM price-axis ticks {ticks[0]} — {ticks[-1]} from the same captured map'}
     candidates={p['id']:p for p in verified}
     selected=scans[0].get('prominent_levels')
     if (not isinstance(selected,list) or len(selected)!=len(candidates)
