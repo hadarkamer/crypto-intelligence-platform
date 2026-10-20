@@ -289,14 +289,15 @@ class HoverTests(unittest.TestCase):
                 {'rows':rows(),'candidates':[]})
         self.assertEqual(error.exception.code,'source_not_readable')
 
-    def test_verified_dom_axis_owns_model3_bounds_and_rejects_invalid_source_ticks(self):
+    def test_verified_rows_own_model3_bounds_and_invalid_source_ticks_are_rejected(self):
         from prominent_levels import evidence
         snapshot,image=self.source_fixture(3)
         raw=proposed([self.context_level()])
         raw['scans'][0]['price_axis_range']={'low':84000,'high':80000,'price_evidence':'visible axis ticks'}
         grounded=ground_analysis(raw,snapshot,**image)
         axis=grounded['scans'][0]['price_axis_range']
-        evidence(axis['price_evidence'],(82100,82400))
+        self.assertEqual((axis['low'],axis['high']),(82147.19,82325.77))
+        evidence(axis['price_evidence'],(82147.19,82325.77,82100,82400))
         self.assertEqual(raw['scans'][0]['price_axis_range']['price_evidence'],'visible axis ticks')
         for ticks in ([84000,80000],[],[81000,82000]):
             with self.assertRaises(HoverError):
@@ -318,6 +319,57 @@ class HoverTests(unittest.TestCase):
         page.evaluate.return_value=[77000,87000]
         with self.assertRaisesRegex(HoverError,'hover_price_axis_mismatch'):
             verify_source_axis(page,[77000,87000],rows())
+
+    def test_model3_edge_pools_beyond_numbered_ticks_survive_full_validation(self):
+        from PIL import Image,ImageDraw
+        import prominent_levels
+        from model1_execution import StageFailure
+        from heatmap_models import source_url, schema_version
+        path=Path(self.temp.name)/'edge-pools.png'
+        data=[]
+        for i in range(11):
+            row=parse_tooltip(f'2026-10-17 12:05 Price {83500-i*100} Liquidation Leverage 1M')
+            row.update(id=f'r{i}',time_text='2026-10-17 12:05',y_fraction=(i*20+10)/219)
+            data.append(row)
+        # Both the top and bottom pools are inside the painted map, beyond its
+        # outer numbered ticks. Cover single yellow rows and green row ranges.
+        for timeframe,colour,count in ((tf,c,n) for tf in ('12H','24H','48H')
+                for c,n in (((253,231,37),1),((48,173,118),2))):
+            with self.subTest(timeframe=timeframe,rows_per_pool=count):
+                image=Image.new('RGB',(500,220),(68,1,84));draw=ImageDraw.Draw(image)
+                draw.rectangle((0,0,499,count*20-1),fill=colour)
+                draw.rectangle((0,220-count*20,499,219),fill=colour)
+                draw.rectangle((499,115,499,116),fill=(234,51,35));image.save(path)
+                snapshot={'rows':data,'heatmap_model':3,'complete':True,'total_value':11000000,
+                    'unit':'source_metric','plot_bounds':{'left':0,'right':499,'top':0,'bottom':219},
+                    'row_height_pixels':20,'source_time':'2026-10-17T12:05:00Z',
+                    'price_axis_ticks':[82700,83000,83300],'timeframe':timeframe}
+                snapshot['candidates']=candidate_pools(snapshot,path)
+                snapshot['source_price_range']=source_price_range(snapshot,path)
+                raw=proposed([dict(self.context_level(),candidate_id=p['id']) for p in snapshot['candidates']])
+                raw.update(symbol='BTC',analysis_mode='visual_screenshot',model='synthetic')
+                raw['scans'][0].update(timeframe=timeframe.lower(),observed_timeframe=timeframe.lower(),
+                    observed_model='Model 3',observed_symbol='BTC',observed_mode='Symbol')
+                grounded=ground_analysis(raw,snapshot,image_path=path,
+                    source_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                args=dict(timeframe=timeframe,run_id='00000000-0000-4000-8000-000000000001',
+                    captured_at='2026-10-17T12:06:00Z',image=path.read_bytes())
+                with patch.multiple(prominent_levels,HEATMAP_MODEL=3,MODEL_LABEL='Model 3',
+                        SOURCE_URL=source_url(3),SCHEMA_VERSION=schema_version(3)):
+                    result=prominent_levels.normalize_prominent(grounded,**args)
+                    result=attach_measurements(result,grounded,snapshot,image=args['image'])
+                    self.assertEqual([z['side'] for z in result['zones']],['above','below'])
+                    self.assertEqual(result['zones'][0]['price_high'],83500)
+                    self.assertEqual(result['zones'][1]['price_low'],82500)
+                    self.assertEqual([z['source_value'] for z in result['zones']],[count*1000000]*2)
+                    # The correction must not admit a price outside the actual
+                    # observed rows.
+                    for index,key,value in ((0,'price_high',83600),(1,'price_low',82400)):
+                        bad=copy.deepcopy(grounded)
+                        bad['scans'][0]['prominent_levels'][index][key]=value
+                        with self.assertRaises(StageFailure) as rejected:
+                            prominent_levels.normalize_prominent(bad,**args)
+                        self.assertEqual(rejected.exception.reason,'level_outside_axis')
 
     def test_plot_finder_ignores_legend_and_white_page(self):
         from PIL import Image,ImageDraw
