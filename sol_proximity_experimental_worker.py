@@ -348,8 +348,15 @@ class SolProximityWorker:
                 outcome = 'FAILED'
             else:
                 outcome = 'FAILED' if type(exc).__name__ in ('BadRequest', 'Forbidden') else 'UNKNOWN'
-        saved = await self.db(self.store.finish_attempt, scope, intent['intent_id'], intent['attempt_token'], outcome,
-                              self.clock(), message_id=message_id)
+        if source_failed and self.runtime.get('retry_class') in ('TRANSIENT', 'RATE_LIMIT_COOLDOWN'):
+            # No Telegram call occurred. Release this exact claim for the
+            # existing serial retry cadence, without extending alert freshness.
+            outcome = await self.db(self.store.release_unattempted, scope, intent['intent_id'],
+                                    intent['attempt_token'], self.clock())
+            saved = outcome is not None
+        else:
+            saved = await self.db(self.store.finish_attempt, scope, intent['intent_id'], intent['attempt_token'], outcome,
+                                  self.clock(), message_id=message_id)
         if not saved:
             raise RuntimeError('SOL delivery acknowledgement not persisted')
         self.runtime['last_delivery_status'] = outcome
