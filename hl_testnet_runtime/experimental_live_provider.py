@@ -774,7 +774,11 @@ class LiveEvidenceProvider:
             # Stable fixed-exit trades consume no live mark: use the CURRENT
             # reconciled fill/order facts, so newly missing or undersized exits
             # still request a fresh market before the runtime repairs them.
-            market_lanes=source_lanes & collection_lanes;cancellation_lanes=set()
+            # Account entry gates suppress source-only quotes, never marks
+            # needed by the owned maintenance lanes added below.
+            market_lanes={(account,symbol) for account,symbol in source_lanes & collection_lanes
+                if account not in result['account_entry_blocked']}
+            cancellation_lanes=set()
             for trade in price_state['trades'].values():
                 if trade['phase'] in runtime.FINAL:continue
                 active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
@@ -846,6 +850,8 @@ class LiveEvidenceProvider:
                 msg=trade['source'];account=trade['account']
                 if (runtime._lane(account,trade['symbol']) in human
                         or trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
+                        or (runtime._lane(account,trade['symbol']) in result['blocked_lanes']
+                            and cid not in state.get('formula_states',{}))
                         or not source_io_allowed[account] or cid in result['bars']):
                     continue
                 try:
@@ -895,7 +901,11 @@ class LiveEvidenceProvider:
             # Keep formula stop updates and pending-order cancellation alive
             # during an entry halt. Entry ranges/allowance have no maintenance
             # authority and must never delay protection of an existing fill.
+            # A durable formula checkpoint consumes candles even when entry is
+            # blocked. Preserve that independent consumer and its original cursor.
             if (msg['family'] in ('r2732','sol_g65') and candidate
+                    and (cid in state.get('formula_states',{})
+                        or account not in result['account_entry_blocked'] and lane not in result['blocked_lanes'])
                     and source_io_allowed[account] and cid not in result['bars']):
                 try:
                     cursor=(trade or {}).get('condition') or state.get('formula_states',{}).get(cid) or {}
@@ -1114,6 +1124,14 @@ class LiveEvidenceProvider:
             planner=object.__new__(TestnetExecutionRuntime)
             expected=planner._admit(replay,cid,ctx,self.now(),risk_snapshot=trade.get('entry_risk'))
             if expected is None:
+                # An account sample aging after preparation is a refreshable
+                # refusal, not retirement of the original, still-active alert.
+                sample=ctx['entry_accounts'].get(cid,{})
+                if (replay.get('entry_blocked',{}).get(cid)=='FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED'
+                        and any(type(sample.get(field,sample.get('at_ms'))) is int
+                            and self.now()-sample.get(field,sample.get('at_ms'))>=limit
+                            for field,limit in (('at_ms',15001),('signer_at_ms',300000),('allowance_at_ms',60000)))):
+                    raise ProviderError('ENTRY_ACCOUNT_SAMPLE_EXPIRED')
                 raise ProviderError('FINAL_SOURCE_ENTRY_ADMISSION_RETIRED')
             expected['observed_at_ms']=p['observed_at_ms']
             if expected!=p:
