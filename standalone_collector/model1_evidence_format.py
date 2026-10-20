@@ -6,6 +6,7 @@ helpers collect a bounded saved PNG plus a fixed numeric/enum-only diagnostic.
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 
 MAX_IMAGE=4*1024*1024
@@ -43,6 +44,8 @@ def safe_scan(source):
         for level in levels[:40]:
             if not isinstance(level,dict):continue
             item={k:number(level.get(k)) for k in ('price_low','price_high','uncertainty_usd','strength_score')}
+            candidate=level.get('candidate_id')
+            if isinstance(candidate,str) and re.fullmatch(r'c(?:[0-9]|[1-3][0-9])',candidate):item['candidate_id']=candidate
             for k,allowed in {'side':('above','below'),'shape':('point','range'),
                 'intensity':('many','normal','few'),'row_colour':('yellow','green','blue'),
                 'confidence':('high','medium','low'),'price_precision':('verified_label','axis_estimate'),

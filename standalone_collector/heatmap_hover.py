@@ -19,6 +19,10 @@ VERSION = 'displayed-hover.v1'
 MAX_ROWS = 1600
 MAX_SECONDS = 55
 METRIC = 'Liquidation Leverage'
+# Model 2 source controls: clear green h=.42667, cyan/blue h=.49524.
+# Their midpoint is .46095. Keep teal out of the green band; the former .48
+# cutoff classified RGB(33,149,135) differently after a one-channel +/-1 change.
+MODEL2_GREEN_BLUE_HUE = .46
 NUMBER = r'\d+(?:,\d{3})*(?:\.\d+)?'
 TOOLTIP = re.compile(r'^(?P<time>(?:\d{1,2} [A-Za-z]{3} \d{4}, \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}))\s+Price\s+(?P<price>'+NUMBER+r')\s+Liquidation Leverage\s+(?P<amount>\$?'+NUMBER+r'\s*[KMB]?(?:\s*USD)?)$', re.I)
 
@@ -58,8 +62,35 @@ def parse_tooltip(text):
             'source_time': observed.isoformat().replace('+00:00', 'Z')}
 
 
+def parse_candle(text):
+    """An OHLC tooltip is a different source record from a liquidity row."""
+    normalized = ' '.join(str(text).split())
+    pattern = (r'^(?P<time>\d{1,2} [A-Za-z]{3} \d{4}, \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2})'
+        + ''.join(r'\s+'+key.title()+r'\s+(?P<'+key+'>'+NUMBER+r')' for key in ('open','high','low','close')) + '$')
+    match = re.fullmatch(pattern, normalized)
+    if not match: raise HoverError('hover_candle_text_invalid')
+    stamp = match['time']
+    try:
+        at = datetime.strptime(stamp, '%Y-%m-%d %H:%M' if stamp[4:5]=='-' else '%d %b %Y, %H:%M').replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HoverError('hover_candle_time_invalid') from None
+    values = {k:float(Decimal(match[k].replace(',',''))) for k in ('open','high','low','close')}
+    if (any(not 0 < v < 1e12 for v in values.values()) or
+        not values['low'] <= min(values['open'],values['close']) <= max(values['open'],values['close']) <= values['high']):
+        raise HoverError('hover_candle_number_invalid')
+    return {**values,'source_time':at.isoformat().replace('+00:00','Z'),'raw_text':normalized}
+
+
+def validate_candle(candle, source_time):
+    if not isinstance(candle,dict) or parse_candle(candle.get('raw_text')) != candle:
+        raise HoverError('hover_candle_evidence_mismatch')
+    if candle['source_time'] != source_time:
+        raise HoverError('hover_candle_time_mismatch')
+    return candle['close']
+
+
 # Only visible DOM content. No framework state, canvas internals or private API.
-READ_TOOLTIP = r'''() => {
+READ_TOOLTIP = r'''mode => {
   const candidates = [...document.querySelectorAll('.cg-toolti-box')].filter(e => {
     const r=e.getBoundingClientRect();
     if(!r.width || !r.height || r.bottom<=0 || r.top>=innerHeight)return false;
@@ -73,7 +104,57 @@ READ_TOOLTIP = r'''() => {
   // Read the complete observed tooltip, never its innermost matching div.
   if(candidates.length!==1)return null;
   const text=candidates[0].innerText;
-  return text.length<=220 && text.includes('Liquidation Leverage') ? text : null;
+  if(text.length>220 || !(mode==='candle' ? /\bOpen\s/.test(text) && /\bClose\s/.test(text) : text.includes('Liquidation Leverage')))return null;
+  if(mode==='state'){
+    const r=candidates[0].getBoundingClientRect();
+    return {text,position:[r.x,r.y,r.width,r.height]};
+  }
+  return text;
+}'''
+
+
+def candle_points(image_path, bounds):
+    """Pixels select hover locations only; no price is inferred from colour.
+
+    Search only the last four rendered columns. These candle colours are
+    distinct from the classic heatmap palette. Ambiguity remains a failure.
+    """
+    from PIL import Image
+    with Image.open(image_path) as original:
+        image=original.convert('RGB')
+    try:
+        right=math.floor(bounds['right']-.25)
+        pixels=[]
+        for y in range(bounds['top']+1,bounds['bottom']):
+            for x in range(right-3,right+1):
+                r,g,b=image.getpixel((x,y))
+                if (r<35 and g>185 and 100<b<150) or (r>200 and g<110 and 40<b<150):
+                    pixels.append((x,y))
+        groups=[]
+        for point in pixels:
+            if not groups or point[1]-groups[-1][-1][1]>2:groups.append([])
+            groups[-1].append(point)
+        if not 1<=len(groups)<=8:raise HoverError('hover_candle_not_found')
+        points=[]
+        for group in groups:
+            # The candle can end before the heatmap edge (observed in 12H).
+            # Hover a painted pixel in the rightmost candle segment, not empty
+            # space at the heatmap boundary. Timestamp matching still proves
+            # that it belongs to the same latest column as the liquidity rows.
+            x=max(p[0] for p in group)
+            ys=[p[1] for p in group if p[0]==x]
+            points.append((x+.5,ys[len(ys)//2]+.5))
+        return points
+    finally:image.close()
+
+READ_UPDATED_TOOLTIP = r'''previous => {
+  const current = (''' + READ_TOOLTIP + r''')('state');
+  if(!current)return false;
+  // CoinGlass may keep its tooltip visible after the pointer leaves the plot.
+  // Require rendered evidence of an update; never accept an unchanged old tip.
+  return !previous || current.text!==previous.text ||
+    current.position.some((value,index)=>Math.abs(value-previous.position[index])>.1)
+    ? current.text : false;
 }'''
 
 READ_EXPECTED_TOOLTIP = r'''expected => {
@@ -170,7 +251,7 @@ def price_overlay_point(image_path, geometry, bounds):
     finally:region.close()
 
 
-def validate_rows(rows, *, complete=True):
+def validate_rows(rows, *, complete=True, edge_prices=False):
     if not isinstance(rows, list) or not 3 <= len(rows) <= MAX_ROWS:
         raise HoverError('hover_row_count')
     previous = None
@@ -186,10 +267,16 @@ def validate_rows(rows, *, complete=True):
             if gap <= 0: raise HoverError('hover_row_order')
             gaps.append(gap)
         previous = row['price']
-    step = statistics.median(gaps)
+    step = statistics.median(gaps[1:-1] if edge_prices and len(gaps)>2 else gaps)
     # Displayed prices are rounded to cents. A missing row must not pass as coverage.
-    if complete and any(abs(gap-step) > max(.025, step*.002) for gap in gaps):
-        raise HoverError('hover_price_grid_gap')
+    if complete:
+        tolerance=max(.025, step*.002)
+        for index,gap in enumerate(gaps):
+            # Model 2 clips the first/last displayed price to the plot edge.
+            # These intervals may be shorter, never longer than one native row.
+            clipped=edge_prices and len(gaps)>2 and index in (0,len(gaps)-1)
+            if (gap>step+tolerance if clipped else abs(gap-step)>tolerance):
+                raise HoverError('hover_price_grid_gap')
     return step
 
 
@@ -280,11 +367,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     viewport = page.viewport_size
     if not viewport or bounds['bottom']-bounds['top']+40 > viewport['height']:
         raise HoverError('hover_plot_clipped')
-    if model in (1,2):
-        marker=price_overlay_point(image_path,geometry,bounds)
-        if marker is not None:
-            page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
-            page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
+    marker=price_overlay_point(image_path,geometry,bounds) if model in (1,2) else None
     if model!=3:
         page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
@@ -320,19 +403,49 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             raise HoverError('hover_update_timeout')
         return result
 
+    def toggle_candles():
+        page.evaluate('(top) => window.scrollTo(0, top)',max(0,marker[1]-30))
+        page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
+        page.evaluate('(top) => window.scrollTo(0, top)',scroll_y)
+
+    def read_candle(points):
+        # A visible liquidity tooltip first proves an old candle tip was replaced.
+        page.mouse.move(x,bounds['top']+1.5-scroll_y)
+        wait_for_tooltip(READ_TOOLTIP,timeout_ms=700)
+        for px,py in points:
+            page.mouse.move(px,py-scroll_y)
+            try:
+                text=wait_for_tooltip('() => ('+READ_TOOLTIP+")('candle')",timeout_ms=350)
+            except HoverError as exc:
+                if exc.reason!='hover_update_timeout':raise
+                continue
+            return parse_candle(text),(px,py)
+        raise HoverError('hover_candle_not_found')
+
+    candle=None
+    if model in (1,2):
+        if marker is None:raise HoverError('hover_candle_not_found')
+        candle,candle_point=read_candle(candle_points(image_path,bounds))
+    if marker is not None:toggle_candles()
+
     def read(y, expected=None, *, native=False):
         nonlocal read_count
         if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
+        previous = None
         if expected is None or native:
-            # Calibration must observe disappearance before another pointer move.
-            # Row centres have an expected price, so they need no leave/re-enter.
+            # Some source tooltips persist outside the plot. Observe their text
+            # and position instead of requiring them to disappear within 450ms.
             page.mouse.move(0, 0)
-            wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+            if model == 3:
+                # Keep the verified WebGL event/anchor path unchanged.
+                wait_for_tooltip('() => ('+READ_TOOLTIP+')() === null', timeout_ms=450)
+            else:
+                previous = page.evaluate(READ_TOOLTIP, 'state')
         page.mouse.move(x, y-scroll_y)
         text = wait_for_tooltip(
-            READ_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
-            arg=expected, timeout_ms=700)
+            READ_UPDATED_TOOLTIP if expected is None else READ_EXPECTED_TOOLTIP,
+            arg=previous if expected is None else expected, timeout_ms=700)
         read_count += 1
         row = parse_tooltip(text)
         row['time_text'] = ' '.join(text.split()).split(' Price ')[0]
@@ -374,13 +487,17 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
                 raise HoverError('hover_snapshot_changed')
             y = sample_y
     for i,row in enumerate(calibration):row['id']=f'r{i}'
-    initial_step = validate_rows(calibration)
+    if model==2:
+        validate_rows(calibration,complete=False)
+        initial_step=validate_rows([dict(row,id=f'r{i}') for i,row in enumerate(calibration[1:])])
+        if top_row['price']-calibration[1]['price']>initial_step+max(.025,initial_step*.002):
+            raise HoverError('hover_price_grid_gap')
+    else:
+        initial_step = validate_rows(calibration)
     if min(b-a for a,b in zip(transitions,transitions[1:])) < 2:
         raise HoverError('hover_resolution_insufficient')
 
     bottom_row, bottom_y = edge(bottom_y, -1)
-    count = round((top_row['price']-bottom_row['price'])/initial_step)+1
-    if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
     # Locate the last boundary too. This prevents a one-pixel calibration error
     # from accumulating across the whole height of the chart.
     previous_y = bottom_y
@@ -388,9 +505,17 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     for offset in range(1,122):
         target = bottom_y-offset
         if target <= top_y:break
+        if model==2:
+            # Near the viewport bottom the persistent tooltip can be clamped:
+            # both text and position stay identical within a native price row.
+            # Establish the already-verified top-row tooltip first, so the next
+            # observation must change PRICE even when its box cannot move.
+            read(top_y,top_row['price'])
         row = read(target)
         if row['price'] != bottom_row['price']:
-            if abs(row['price']-bottom_row['price']-initial_step) > max(.025,initial_step*.002):
+            gap=row['price']-bottom_row['price']
+            tolerance=max(.025,initial_step*.002)
+            if (not 0<gap<=initial_step+tolerance if model==2 else abs(gap-initial_step)>tolerance):
                 raise HoverError('hover_price_grid_gap')
             last_inner = row
             last_boundary = (previous_y+target)/2
@@ -399,6 +524,9 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             raise HoverError('hover_snapshot_changed')
         previous_y = target
     if last_boundary is None:raise HoverError('hover_resolution_insufficient')
+    count = (round((calibration[1]['price']-last_inner['price'])/initial_step)+3 if model==2
+             else round((top_row['price']-bottom_row['price'])/initial_step)+1)
+    if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
     height = (last_boundary-transitions[0])/(count-2)
     if height < 2 or any(abs(t-(transitions[0]+i*height))>1.1 for i,t in enumerate(transitions)):
         raise HoverError('hover_resolution_insufficient')
@@ -458,7 +586,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
         rows.append(row);positions.append(target)
-    price_step = validate_rows(rows)
+    price_step = validate_rows(rows,edge_prices=model==2)
     if model==3 and source_axis is not None:verify_source_axis(page,source_axis,rows)
     # Recheck distributed anchors after the sweep. A refresh must fail this
     # observation rather than combine values from different source moments.
@@ -469,9 +597,17 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     observed = datetime.fromisoformat(rows[0]['source_time'].replace('Z','+00:00'))
     age = (datetime.now(timezone.utc)-observed).total_seconds()
     if not -120 <= age <= 1200:raise HoverError('hover_source_stale')
+    if model in (1,2):
+        close=validate_candle(candle,rows[0]['source_time'])
+        if not rows[-1]['price']<=close<=rows[0]['price']:
+            raise HoverError('hover_candle_outside_axis')
+        toggle_candles()
+        final,_=read_candle([candle_point])
+        if final!=candle:raise HoverError('hover_candle_changed')
     page.mouse.move(0,0)
     return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
             'scope':'displayed_latest_column','heatmap_model':model,
+            **({'source_candle':candle} if model in (1,2) else {}),
             **({'price_axis_ticks':list(source_axis)} if model==3 and source_axis is not None else {}),
             'timeframe':timeframe.upper(),'source_time':rows[0]['source_time'],
             'complete':True,'price_step':price_step,'rows':rows,
@@ -484,33 +620,56 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
 def candidate_pools(snapshot, image_path):
     """Locate classic-palette bands; calculate only from the verified rows.
 
-    Candidates still require visual confirmation in the existing single GPT call.
+    Code owns row membership; GPT checks map identity, readability and visibility.
     Three samples within each row reduce boundary/candlestick pixel noise. A gap
     or colour change always splits a band; no interpolation creates quantities.
     """
     from PIL import Image
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     bounds = snapshot['plot_bounds']
-    x = math.floor(bounds['right']-.25)
     height = snapshot['row_height_pixels']
+    green_blue = MODEL2_GREEN_BLUE_HUE if snapshot.get('heatmap_model')==2 else .48
     def colour(rgb):
         h,s,v=colorsys.rgb_to_hsv(*(c/255 for c in rgb))
         if .13 <= h < .24 and s >= .45 and v >= .55:return 'yellow'
-        if .24 <= h < .48 and s >= .45 and v >= .4:return 'green'
-        if .48 <= h < .66 and s >= .45 and v >= .35:return 'blue'
+        if .24 <= h < green_blue and s >= .45 and v >= .4:return 'green'
+        if green_blue <= h < .66 and s >= .45 and v >= .35:return 'blue'
         return None
     groups=[]
     with Image.open(image_path) as original:
         image=original.convert('RGB')
         try:
-            for row in snapshot['rows']:
+            coordinates=[bounds.get(k) for k in ('left','right','top','bottom')]
+            if (any(type(v) not in (int,float) or not math.isfinite(v) for v in coordinates)
+                or not 0 <= bounds['left'] < bounds['right'] < image.width
+                or not 0 <= bounds['top'] < bounds['bottom'] < image.height
+                or type(height) not in (int,float) or not math.isfinite(height)
+                or not 0 < height <= bounds['bottom']-bounds['top']):
+                raise HoverError('hover_geometry_invalid')
+            x = math.floor(bounds['right']-.25)
+            previous_y=None
+            for index,row in enumerate(snapshot['rows']):
+                fraction=row.get('y_fraction')
+                if type(fraction) not in (int,float) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
+                    raise HoverError('hover_geometry_invalid')
                 y=bounds['top']+row['y_fraction']*(bounds['bottom']-bounds['top'])
+                # The capture stores outer-row anchors at the visible plot
+                # edges, while interior rows use calibrated centres. Their
+                # first/last gap can therefore span 1.5 rows plus calibration
+                # rounding; interior gaps must still fit one native row.
+                max_gap=(1.5*height if index in (1,len(snapshot['rows'])-1) else height)+1
+                if previous_y is not None and not 0 < y-previous_y <= max_gap:
+                    raise HoverError('hover_geometry_invalid')
+                previous_y=y
                 samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*height))))))
                          for d in (-.2,0,.2)]
                 label=next((c for c in ('yellow','green','blue') if samples.count(c)>=2),None)
                 if row['value']==0:label=None
                 if groups and groups[-1][0]==label:groups[-1][1].append(row)
                 else:groups.append((label,[row]))
+            if (snapshot['rows'][0]['y_fraction']*(bounds['bottom']-bounds['top']) > height
+                or (1-snapshot['rows'][-1]['y_fraction'])*(bounds['bottom']-bounds['top']) > height):
+                raise HoverError('hover_geometry_invalid')
         finally:image.close()
     prominent=any(label=='yellow' or (label=='green' and len(members)>1) for label,members in groups)
     pools=[]
@@ -530,61 +689,142 @@ def candidate_pools(snapshot, image_path):
     return pools
 
 
+def source_price_range(snapshot, image_path):
+    """Model 3 exposes liquidity rows, not OHLC, on candle hover.
+
+    Bound the rightmost painted candle body with adjacent verified row prices.
+    This deliberately remains an interval, not a fabricated exact Close. The
+    two measured candle colours only locate pixels; they never supply a price.
+    """
+    from PIL import Image
+    from capture_readiness import safe_readiness
+    from model1_price_range import validate_price_range
+    ticks=safe_readiness(snapshot).get('price_axis_ticks')
+    if not ticks:raise HoverError('hover_price_axis_mismatch')
+    bounds=snapshot['plot_bounds'];right=math.floor(bounds['right'])
+    with Image.open(image_path) as source:
+        image=source.convert('RGB')
+        try:
+            points=[(x,y) for x in range(right-3,right+1)
+                for y in range(bounds['top']+1,bounds['bottom'])
+                if image.getpixel((x,y)) in ((234,51,35),(55,126,34))]
+        finally:image.close()
+    if not points:raise HoverError('hover_candle_not_found')
+    latest=max(x for x,y in points);ys=sorted(y for x,y in points if x==latest)
+    if any(b-a>2 for a,b in zip(ys,ys[1:])):raise HoverError('hover_candle_not_found')
+    positions=[(bounds['top']+r['y_fraction']*(bounds['bottom']-bounds['top']),r['price'])
+        for r in snapshot['rows']]
+    above=[price for y,price in positions if y<ys[0]-.5]
+    below=[price for y,price in positions if y>ys[-1]+.5]
+    if not above or not below:raise HoverError('hover_candle_outside_axis')
+    low,high=below[0],above[-1]
+    lower=[v for v in ticks if v<=low];upper=[v for v in ticks if v>=high]
+    if not lower or not upper:raise HoverError('hover_candle_outside_axis')
+    return validate_price_range({'low':low,'high':high,'axis_low':lower[-1],
+        'axis_high':upper[0],'confidence':'high','basis':'last_candle_axis_bracket'})
+
+
 def prepare_candidates(images):
     # Called after capture_heatmaps returns and its browser is closed.
     for image in images:
         snapshot=image['hover_snapshot']
         snapshot['candidates']=candidate_pools(snapshot,image['image'])
+        if snapshot.get('heatmap_model')==3:
+            snapshot['source_price_range']=source_price_range(snapshot,image['image'])
 
 
 def model_content(image):
     snapshot = image.get('hover_snapshot')
     if not snapshot: return []
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     payload = {k: snapshot[k] for k in ('version','metric','unit','scope','source_time','total_value')}
+    payload['plot_bounds'] = snapshot['plot_bounds']
+    payload['row_height_pixels'] = snapshot['row_height_pixels']
     payload['candidates'] = snapshot['candidates']
-    return [{'type':'input_text','text':'Candidate bands from this same map and verified displayed hover rows. '
-             'Verify every candidate visually and return its candidate_id. Do not invent or change its rows or numbers. '
-             'If any boundary, colour or continuity is wrong, mark that candidate confidence=low. '
+    if snapshot.get('heatmap_model')==3:
+        payload['source_price_range']=snapshot['source_price_range']
+        payload['price_axis_ticks']=snapshot['price_axis_ticks']
+    else:
+        validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        payload['source_candle']=snapshot['source_candle']
+    content = [{'type':'input_text','text':'Code-computed bands from this same PNG and verified displayed hover rows. '
+             'Return every candidate_id with right_edge_visible and strength_score only. '
+             'Check map context and whether the candidate location is visible and unobstructed at the latest edge. '
+             'Code independently rechecks colour classes, row membership, continuity and all numbers against the original evidence. '
              'source_metric is NOT verified USD. Total covers the displayed current column only.\n'+json.dumps(payload)}]
+    if snapshot.get('heatmap_model')==2:
+        from price_detail_input import detail_provenance
+        detail=detail_provenance(image)
+        if detail is not None:
+            x,y,_,_=detail['crop_box'];scale=detail['scale']
+            content[0]['text']+=(f'\nCoordinate mapping for the supplied detail: full-image origin {[x,y]}, '
+                f'enlargement {scale}. For a full-image point (X,Y), detail pixels are '
+                f'({scale}*(X-{x}), {scale}*(Y-{y})). This only locates existing pixels and adds no confidence.')
+    return content
 
 
-def ground_analysis(raw, snapshot):
-    validate_rows(snapshot['rows'])
+def ground_analysis(raw, snapshot, *, image_path=None, source_sha256=None):
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     result = copy.deepcopy(raw)
     scans = result.get('scans')
     if not isinstance(scans,list) or len(scans)!=1: raise HoverError('hover_analysis_shape')
-    if scans[0].get('readable') is False or scans[0].get('blocking_condition','none')!='none':
+    if scans[0].get('readable') is not True or scans[0].get('blocking_condition')!='none':
         from model1_execution import StageFailure
         raise StageFailure('source_not_readable')
-    from model1_price_range import validate_price_range
-    current=validate_price_range(scans[0].get('current_price_range'))
+    # Do not turn an LLM confidence label into numeric verification. Recompute
+    # the complete selection from the SAME original PNG, including neighbouring
+    # rows, gaps and sums. A changed image or altered/omitted pool fails closed.
+    from pathlib import Path
+    if image_path is None or source_sha256 is None:
+        raise HoverError('hover_image_evidence_missing')
+    if hashlib.sha256(Path(image_path).read_bytes()).hexdigest()!=source_sha256:
+        raise HoverError('hover_image_changed')
+    if (snapshot.get('complete') is not True
+        or snapshot.get('total_value')!=float(sum(Decimal(str(r['value'])) for r in snapshot['rows']))
+        or snapshot.get('unit')!=snapshot['rows'][0]['unit']):
+        raise HoverError('hover_evidence_mismatch')
+    verified=candidate_pools(snapshot,image_path)
+    if snapshot.get('candidates')!=verified:
+        raise HoverError('hover_candidate_evidence_mismatch')
+    scans[0].pop('source_candle',None)  # Never accept provider-created source evidence.
+    scans[0].pop('current_price_range',None)
+    if snapshot.get('heatmap_model')==3:
+        current=source_price_range(snapshot,image_path)
+        if snapshot.get('source_price_range')!=current:raise HoverError('hover_evidence_mismatch')
+        scans[0]['current_price_range']=current
+    else:
+        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        if not snapshot['rows'][-1]['price']<=close<=snapshot['rows'][0]['price']:
+            raise HoverError('hover_candle_outside_axis')
+        scans[0]['source_candle']=copy.deepcopy(snapshot['source_candle'])
+        current={'low':close,'high':close}  # Internal comparison bounds, never an output range.
     if 'price_axis_ticks' in snapshot:
         # These ticks were read from visible DOM and checked around the same
         # screenshot and sweep. Use that evidence, not an LLM transcription.
-        # Never repair a conflicting axis or invent labels absent from source.
+        # The provider does not own these numeric fields.
         from capture_readiness import safe_readiness
         ticks=safe_readiness(snapshot).get('price_axis_ticks')
-        axis=scans[0].get('price_axis_range')
-        if (ticks is None or not isinstance(axis,dict)
-            or axis.get('low')!=ticks[0] or axis.get('high')!=ticks[-1]):
+        if ticks is None:
             raise HoverError('hover_price_axis_mismatch')
         scans[0]['price_axis_range']={
             'low':ticks[0],'high':ticks[-1],
             'price_evidence':f'Visible price-axis ticks {ticks[0]} — {ticks[-1]}; verified DOM labels from the same captured map'}
-    candidates={p['id']:p for p in snapshot['candidates']}
+    candidates={p['id']:p for p in verified}
     selected=scans[0].get('prominent_levels')
     if (not isinstance(selected,list) or len(selected)!=len(candidates)
+        or any(not isinstance(p,dict) for p in selected)
         or {p.get('candidate_id') for p in selected}!=set(candidates)):
         raise HoverError('hover_candidate_missing')
     used = set()
     by_id = {r['id']:r for r in snapshot['rows']}
     for level in selected:
-        if level.get('confidence') != 'high':
-            raise HoverError('hover_pool_uncertain')
+        if set(level)!={'candidate_id','right_edge_visible','strength_score'}:
+            raise HoverError('hover_analysis_shape')
+        if level['right_edge_visible'] is not True:
+            raise HoverError('hover_pool_not_visible')
         candidate=candidates[level['candidate_id']]
-        if any(level.get(k)!=candidate[k] for k in ('row_colour','shape','intensity')):
-            raise HoverError('hover_candidate_disagreement')
+        level.update({k:candidate[k] for k in ('row_colour','shape','intensity')})
+        level.update(continuous=True,weak_gap_present=False)
         ids = candidate['source_row_ids']
         level['source_row_ids']=ids
         if not isinstance(ids,list) or not ids or len(ids)!=len(set(ids)) or any(i not in by_id for i in ids):
@@ -605,22 +845,31 @@ def ground_analysis(raw, snapshot):
         level.update(price_low=low,price_high=high,
             prices=[low] if len(members)==1 else [],
             price_precision='verified_label',evidence_basis='tooltip',uncertainty_usd=0,
-            confidence='high',price_evidence=f"Price {low} — Price {high}; displayed tooltip rows {ids[0]} to {ids[-1]}")
+            confidence='high',price_evidence=f"Price {low} — Price {high}; displayed tooltip rows {ids[0]} to {ids[-1]}; membership verified from source pixels")
         # Classification is arithmetic against the fully validated reference
         # range. The normalizer still omits pools intersecting that range.
         if low>current['high']:level['side']='above'
         elif high<current['low']:level['side']='below'
+        else:level['side']='above'  # Intersecting pools are omitted by the normalizer.
     return result
 
 
 def attach_measurements(result, raw, snapshot, *, image):
-    validate_rows(snapshot['rows'])
+    validate_rows(snapshot['rows'],edge_prices=snapshot.get('heatmap_model')==2)
     output = copy.deepcopy(snapshot)
     output['rows'] = [{k:r[k] for k in ('id','price','value','raw_price','raw_value','rounding_error')}
                       for r in snapshot['rows']]
     output.update(source_url=result['source_url'],captured_at=result['captured_at'],
         artifact_id=result['run_id'],sha256=hashlib.sha256(image).hexdigest(),
         observed_price_range=result['observed_price_range'])
+    output.pop('source_price_range',None)
+    if snapshot.get('heatmap_model') in (1,2):
+        close=validate_candle(snapshot.get('source_candle'),snapshot['source_time'])
+        if result.get('price_reference_type')!='exact_point' or result.get('observed_price')!=close or result['observed_price_range'] is not None:
+            raise HoverError('hover_candle_evidence_mismatch')
+        output['observed_price']=close
+    elif result.get('observed_price_range')!=snapshot.get('source_price_range'):
+        raise HoverError('hover_evidence_mismatch')
     candidates = raw['scans'][0]['prominent_levels']
     by_id = {r['id']:r for r in snapshot['rows']}
     for zone in result['zones']:
