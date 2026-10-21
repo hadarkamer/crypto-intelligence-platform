@@ -76,6 +76,33 @@ def _original_stop_needed(state, trade):
     return unknown_entry or remaining>0 and not covered
 
 
+def _fixed_exits_stable(trade, now):
+    """Skip quotes only while every frozen exit covers its exact owned share."""
+    from . import doge_partial_execution as partial
+    if trade['source']['family'] in ('r2732','sol_g65') or runtime._remaining(trade)<=0:
+        return False
+    active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
+            if order['status']=='OPEN']
+    if any(leg=='ENTRY' for leg,order in active):
+        return False
+    if partial.is_doge(trade['source']):
+        if partial.time_exit_due(trade,now):
+            return False
+        desired=partial.desired_orders(trade)
+    else:
+        remaining=life.text(runtime._remaining(trade))
+        desired=[('STOP',trade['prices']['stop'],remaining),
+                 ('TAKE_PROFIT',trade['prices']['take_profit'],remaining)]
+    if len(active)!=len(desired):
+        return False
+    return all(len(matches:=[o for own_leg,o in active
+            if own_leg==leg and life.number(o['wire_order']['p'])==life.number(price)])==1
+        and matches[0]['wire_order']['r'] is True
+        and life.number(matches[0]['wire_order']['s'])-sum(
+            (life.number(f['quantity']) for f in matches[0]['fills']),Decimal(0))==life.number(quantity)
+        for leg,price,quantity in desired)
+
+
 def _retired_experimental(state, now):
     """Find immutable final facts without refreshing their evidence clocks."""
     from .experimental_execution_archive import _eligible
@@ -84,7 +111,7 @@ def _retired_experimental(state, now):
         in state.get('blocked_lanes',{}).items() if reason not in COLD_HISTORY_RETRY_ERRORS})
     result = {}
     for cid, trade in state['trades'].items():
-        if cid not in state['sources'] or not _eligible(eligible_state, cid, now):
+        if cid not in state['sources'] or not _eligible(eligible_state, cid, now, require_settlement=False):
             continue
         if trade['phase']==external.MANUAL_CLOSED:
             result[cid]=dict(binding=None,snapshot=None,orders=[])
@@ -141,6 +168,12 @@ def _merge_bucket(target, cold):
 
 class LiveEvidenceProvider:
     domain='mainnet'
+
+    def collect_funding(self, task):
+        # Reuse the existing public /info transport and shared background
+        # budget. No credentials, signer, extra thread or polling loop.
+        reader = self._public_reader or sync.PublicReader(budget=self.budget, priority='background')
+        return reader.read('userFunding', task['account'], start=task['start'], end=task['end'])
 
     def __init__(self, env, *, legacy_store, experimental_store, price_evidence,
                  budget, clock=None, info_reader=None, public_reader=None,
@@ -768,7 +801,11 @@ class LiveEvidenceProvider:
             # Stable fixed-exit trades consume no live mark: use the CURRENT
             # reconciled fill/order facts, so newly missing or undersized exits
             # still request a fresh market before the runtime repairs them.
-            market_lanes=source_lanes & collection_lanes;cancellation_lanes=set()
+            # Account entry gates suppress source-only quotes, never marks
+            # needed by the owned maintenance lanes added below.
+            market_lanes={(account,symbol) for account,symbol in source_lanes & collection_lanes
+                if account not in result['account_entry_blocked']}
+            cancellation_lanes=set()
             for trade in price_state['trades'].values():
                 if trade['phase'] in runtime.FINAL:continue
                 active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
@@ -779,18 +816,13 @@ class LiveEvidenceProvider:
                     # exit by ID; a price quote cannot change that decision.
                     cancellation_lanes.add((trade['account'],trade['symbol']))
                     continue
-                stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
-                    and not any(leg=='ENTRY' for leg,order in active)
-                    and trade['account'] not in unresolved
-                    and all(len([o for own_leg,o in active if own_leg==leg])==1
-                        and all(o['wire_order']['r'] is True
-                            and life.number(o['wire_order']['s'])-sum(
-                                (life.number(f['quantity']) for f in o['fills']),Decimal(0))==remaining
-                            and life.number(o['wire_order']['p'])==life.number(price)
-                            for own_leg,o in active if own_leg==leg)
-                        for leg,price in (('STOP',trade['prices']['stop']),
-                                          ('TAKE_PROFIT',trade['prices']['take_profit']))))
+                stable=(trade['account'] not in unresolved
+                    and _fixed_exits_stable(trade,self.now()))
                 if not stable:market_lanes.add((trade['account'],trade['symbol']))
+            # A failed observation cannot consume a mark. Filter before the
+            # shared quote read, retaining all actionable protection lanes.
+            market_lanes={(account,symbol) for account,symbol in market_lanes
+                if account in inventories and runtime._lane(account,symbol) not in result['blocked_lanes']}
             market=None;market_error=None
             if market_lanes:
                 market_at=self.now()
@@ -836,6 +868,8 @@ class LiveEvidenceProvider:
                 msg=trade['source'];account=trade['account']
                 if (runtime._lane(account,trade['symbol']) in human
                         or trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
+                        or (runtime._lane(account,trade['symbol']) in result['blocked_lanes']
+                            and cid not in state.get('formula_states',{}))
                         or not source_io_allowed[account] or cid in result['bars']):
                     continue
                 try:
@@ -885,7 +919,11 @@ class LiveEvidenceProvider:
             # Keep formula stop updates and pending-order cancellation alive
             # during an entry halt. Entry ranges/allowance have no maintenance
             # authority and must never delay protection of an existing fill.
+            # A durable formula checkpoint consumes candles even when entry is
+            # blocked. Preserve that independent consumer and its original cursor.
             if (msg['family'] in ('r2732','sol_g65') and candidate
+                    and (cid in state.get('formula_states',{})
+                        or account not in result['account_entry_blocked'] and lane not in result['blocked_lanes'])
                     and source_io_allowed[account] and cid not in result['bars']):
                 try:
                     cursor=(trade or {}).get('condition') or state.get('formula_states',{}).get(cid) or {}
@@ -1102,8 +1140,16 @@ class LiveEvidenceProvider:
                 raise ProviderError('ENTRY_ALREADY_HAS_OBSERVED_EXPOSURE')
             del replay['trades'][cid];del replay['requests'][request['request_id']]
             planner=object.__new__(TestnetExecutionRuntime)
-            expected=planner._admit(replay,cid,ctx,self.now())
+            expected=planner._admit(replay,cid,ctx,self.now(),risk_snapshot=trade.get('entry_risk'))
             if expected is None:
+                # An account sample aging after preparation is a refreshable
+                # refusal, not retirement of the original, still-active alert.
+                sample=ctx['entry_accounts'].get(cid,{})
+                if (replay.get('entry_blocked',{}).get(cid)=='FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED'
+                        and any(type(sample.get(field,sample.get('at_ms'))) is int
+                            and self.now()-sample.get(field,sample.get('at_ms'))>=limit
+                            for field,limit in (('at_ms',15001),('signer_at_ms',300000),('allowance_at_ms',60000)))):
+                    raise ProviderError('ENTRY_ACCOUNT_SAMPLE_EXPIRED')
                 raise ProviderError('FINAL_SOURCE_ENTRY_ADMISSION_RETIRED')
             expected['observed_at_ms']=p['observed_at_ms']
             if expected!=p:
@@ -1129,6 +1175,7 @@ class LiveEvidenceProvider:
         if p['action']['type']!='cancel':
             result['market']={k:v for k,v in ctx['marks'][lane].items() if k!='account'}
         if entry:
+            result['entry_risk']=deepcopy(trade.get('entry_risk'))
             result['entry_account']=deepcopy(ctx['entry_accounts'][cid])
             if not contract.is_approved(trade['source']):
                 result.update(source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])
@@ -1141,4 +1188,10 @@ class LiveEvidenceProvider:
             result.update(owner=owner,owner_snapshot=owner_snapshot,lock_proof=trade['condition'],
                 observed_stop_requests=[deepcopy(r) for r in state['requests'].values()
                     if r['proposal']['card_id']==cid and r['proposal']['leg']=='STOP' and r['phase']=='OBSERVED'])
+            from . import doge_partial_execution as partial
+            if partial.is_doge(trade['source']):
+                result.update(exit_trade=deepcopy(trade),
+                    observed_exit_requests=[deepcopy(r) for r in state['requests'].values()
+                        if r['proposal']['card_id']==cid and r['proposal']['leg']=='TAKE_PROFIT'
+                        and r['proposal']['action']['type']!='cancel' and r['phase']=='OBSERVED'])
         return deepcopy(result)

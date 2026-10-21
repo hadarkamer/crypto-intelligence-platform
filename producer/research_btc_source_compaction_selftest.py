@@ -1,5 +1,6 @@
 """Exact source parity and raw-snapshot lifetime across bounded BTC wave reads."""
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import timedelta
 import json
 import os
@@ -11,6 +12,8 @@ from uuid import uuid4
 import research_btc_wave_endpoint_report as report
 import research_btc_wave_report_worker as worker
 from research_btc_wave_endpoint_report_selftest import START, event
+from research_btc_wave_endpoint_report_selftest import ROUTE, candle
+from research_btc_wave_report_worker_selftest import fixtures
 from research_outcome_worker import _snapshot_price_provenance
 
 
@@ -60,6 +63,7 @@ class SourceConnection:
         self.descriptors = default_descriptors if descriptors is None else descriptors
         self.refs = []
         self.live_before_wave = []
+        self.live_hype_before_wave = []
         self.peak_non_hype = 0
         self.queries = []
 
@@ -106,6 +110,8 @@ class SourceConnection:
         policy, lower, upper, limit = params
         assert policy == report.POLICY_VERSION
         self.live_before_wave.append(self.live_non_hype())
+        self.live_hype_before_wave.append([eid for eid, symbol, ref in self.refs
+                                          if symbol == 'HYPE' and ref() is not None])
         selected = sorted((item for item in self.descriptors
             if lower <= item[1] < (upper or OBSERVED+timedelta(days=1))), key=lambda x: (x[1], x[0]))[:limit]
         return Result([self.raw_event(item) for item in selected])
@@ -152,7 +158,229 @@ def legacy_compacted_source(conn, observed):
     return {'waves': waves, 'events': compact}
 
 
+def duplicate_hype_source(*, body_bytes=12_000):
+    """Both directions in each wave, with HYPE and Spot winning ALL separately."""
+    source = fixtures()
+    source['events'] = []
+    for wave_index, wave_id in enumerate(('first', 'second')):
+        symbols = ('BTC', 'HYPE', 'HYPE', 'ETH', 'HYPE', 'HYPE', 'BTC')
+        if wave_index:
+            symbols = ('HYPE', 'BTC', 'HYPE', 'HYPE', 'ETH', 'HYPE', 'BTC')
+        for index, symbol in enumerate(symbols):
+            row = event(100+wave_index*10+index, symbol=symbol,
+                        direction='LONG' if index in (0, 1, 2, 6) else 'SHORT',
+                        seconds=wave_index*3600+index+10, wave_id=wave_id)
+            row['engine_snapshot'] = {'price_source': 'hyperliquid' if symbol == 'HYPE' else 'binance_spot',
+                'price_pair': symbol+'USDT', 'raw_details': {'event': row['event_id'],
+                    'body': 'x'*body_bytes}, 'unicode': 'מקור'}
+            source['events'].append(row)
+    return source
+
+
+def fetch_fixture(symbol, start, end):
+    import hyperliquid_perp_price_path as perp
+    first = int((start-START)//report.MINUTE)
+    count = int((end+report.MILLISECOND-start)//report.MINUTE)
+    route = perp.SOURCE if symbol == 'HYPE' else {**ROUTE, 'symbol': symbol, 'pair': symbol+'USDT'}
+    return {**route, 'candles': [candle(first+i, high=101., low=99.5) for i in range(count)]}
+
+
+def selection_identity(source):
+    return [(row['btc_parent_movement_id'], row['coin_scope'], row['direction'], row['event_id'])
+            for row in report.select_representatives(source['events'])]
+
+
 class SourceCompactionTests(unittest.TestCase):
+    def test_nonselected_hype_preserves_all_rows_selection_reports_and_closed_cache(self):
+        import research_native_hype_mark_supplement as native
+        source = duplicate_hype_source()
+        original = worker.canonical(source)
+        compact = worker.compact_source(source)
+        self.assertEqual(worker.canonical(source), original)
+        self.assertEqual(selection_identity(compact), selection_identity(source))
+        self.assertEqual([row['event_id'] for row in compact['events']],
+                         [row['event_id'] for row in source['events']])
+        selected_hype = {row['event_id'] for row in report.select_representatives(source['events'])
+                         if row['symbol'] == 'HYPE'}
+        self.assertEqual(selected_hype, {101, 104, 110, 113})
+        for before, after in zip(source['events'], compact['events']):
+            self.assertEqual({key: value for key, value in after.items()
+                              if key not in {'engine_snapshot', 'engine_snapshot_digest', 'engine_snapshot_compacted'}},
+                             {key: value for key, value in before.items() if key != 'engine_snapshot'})
+            self.assertEqual(after['engine_snapshot_digest'], report.snapshot_digest(before['engine_snapshot']))
+            self.assertEqual(_snapshot_price_provenance(before['engine_snapshot']),
+                             _snapshot_price_provenance(after['engine_snapshot']))
+            if before['event_id'] in selected_hype:
+                self.assertIs(after['engine_snapshot'], before['engine_snapshot'])
+                self.assertFalse(after.get('engine_snapshot_compacted'))
+                self.assertEqual(native.source_digest(before), native.source_digest(after))
+            else:
+                self.assertTrue(after['engine_snapshot_compacted'])
+                self.assertNotIn('raw_details', after['engine_snapshot'])
+        now = START+timedelta(minutes=120)
+        raw_report = report.build_report(**source, observed_at=now, include_hype_perp=True, fetcher=fetch_fixture)
+        compact_report = report.build_report(**compact, observed_at=now, include_hype_perp=True, fetcher=fetch_fixture)
+        # Report entries and price provenance are unchanged; native full source
+        # digests were checked separately for every selected HYPE event above.
+        self.assertEqual(worker.canonical(raw_report), worker.canonical(compact_report))
+        self.assertTrue(any(row['status'] == 'READY' and row['source_scope'] == report.PERP_SCOPE
+                            for row in compact_report['records']))
+        for previous, incoming in ((source, compact), (compact, source), (compact, compact)):
+            cache = report.verified_closed_cache(previous_report=raw_report, previous_source=previous,
+                **incoming, observed_at=now, include_hype_perp=True)
+            baseline = report.verified_closed_cache(previous_report=raw_report, previous_source=source,
+                **source, observed_at=now, include_hype_perp=True)
+            self.assertEqual(worker.canonical(list(cache.values())),
+                             worker.canonical(list(baseline.values())))
+            self.assertTrue(cache)
+
+    def test_digest_present_checkpoint_migrates_without_mutation_and_resumes_identically(self):
+        source = duplicate_hype_source()
+        legacy = {'waves': source['waves'], 'events': [worker._compact_source_event(row) for row in source['events']]}
+        self.assertTrue(all('engine_snapshot_digest' in row for row in legacy['events']))
+        job = worker.prepare_job(legacy, START+timedelta(minutes=120))
+        worker.advance_job(job, fetcher=fetch_fixture, path_limit=2)
+        job = json.loads(worker.canonical(job))  # Actual restart representation.
+        original = worker.canonical(job)
+        migrated = worker.compact_job(job)
+        self.assertIsNot(migrated, job)
+        self.assertEqual(worker.canonical(job), original)
+        for key in job.keys()-{'source', 'source_digest'}:
+            self.assertEqual(migrated[key], job[key], key)
+        self.assertEqual(migrated['source_digest'], worker.digest(worker.compact_source(source)))
+        self.assertEqual(migrated['source'], json.loads(worker.canonical(worker.compact_source(source))))
+        self.assertIs(worker.compact_job(migrated), migrated)
+        for current in (job, migrated):
+            while not worker.advance_job(current, fetcher=fetch_fixture, path_limit=2)['completed']:
+                pass
+        raw_report, new_report = worker.finish_job(job), worker.finish_job(migrated)
+        raw_report.pop('source_digest')
+        new_report.pop('source_digest')
+        self.assertEqual(worker.canonical(raw_report), worker.canonical(new_report))
+
+    def test_changed_or_invalid_snapshot_is_rejected_before_migration(self):
+        source = duplicate_hype_source()
+        for event_id in (101, 102):  # Selected and nonselected full HYPE snapshots.
+            with self.subTest(event_id=event_id):
+                legacy = {'waves': source['waves'], 'events': [worker._compact_source_event(row) for row in source['events']]}
+                row = next(row for row in legacy['events'] if row['event_id'] == event_id)
+                row['engine_snapshot'] = {**row['engine_snapshot'], 'changed': True}
+                with self.assertRaisesRegex(ValueError, 'Frozen engine snapshot changed'):
+                    worker.compact_source(legacy)
+        for bad_digest in (None, 'g'*64, 'short', 12):
+            compact = worker.compact_source(source)
+            next(row for row in compact['events'] if row['event_id'] == 102)['engine_snapshot_digest'] = bad_digest
+            with self.assertRaisesRegex(ValueError, 'Invalid frozen engine snapshot digest'):
+                worker.compact_source(compact)
+        compact = worker.compact_source(source)
+        selected = next(row for row in compact['events'] if row['event_id'] == 101)
+        selected['engine_snapshot_compacted'] = True
+        with self.assertRaisesRegex(ValueError, 'Selected HYPE event requires'):
+            worker.compact_source(compact)
+        corrupt = duplicate_hype_source()
+        corrupt['events'][2]['engine_snapshot']['not_finite'] = float('nan')
+        with self.assertRaises(ValueError):
+            worker.compact_source(corrupt)
+
+    def test_migration_rejects_changed_source_fields_or_missing_original_digest(self):
+        source = duplicate_hype_source()
+        legacy = {'waves': source['waves'], 'events': [worker._compact_source_event(row) for row in source['events']]}
+        for change in ('score', 'source_digest', 'missing_digest'):
+            with self.subTest(change=change):
+                job = worker.prepare_job(deepcopy(legacy), START+timedelta(minutes=120))
+                if change == 'score':
+                    job['source']['events'][2]['score'] -= 1
+                elif change == 'source_digest':
+                    job['source_digest'] = '0'*64
+                else:
+                    job.pop('source_digest')
+                original = worker.canonical(job)
+                with self.assertRaisesRegex(ValueError, 'Frozen job source changed'):
+                    worker.compact_job(job)
+                self.assertEqual(worker.canonical(job), original)
+
+    def test_migrated_raw_bodies_are_released_before_publication_recheck(self):
+        source = duplicate_hype_source()
+        legacy = {'waves': source['waves'], 'events': [worker._compact_source_event(row) for row in source['events']]}
+        job = worker.prepare_job(legacy, START+timedelta(minutes=120))
+        self.assertTrue(worker.advance_job(job, fetcher=fetch_fixture)['completed'])
+        serialized = worker.canonical(job)
+        selected_hype = {row['event_id'] for row in report.select_representatives(source['events'])
+                         if row['symbol'] == 'HYPE'}
+        refs, writes = [], []
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def commit(self): pass
+            def rollback(self): pass
+            def transaction(self): return nullcontext()
+            def execute(self, sql, params=()):
+                self.sql = ' '.join(sql.split())
+                if self.sql.startswith('UPDATE '):
+                    writes.append((self.sql, params))
+                return self
+            def fetchone(self):
+                if self.sql.startswith('SELECT report,'):
+                    return {'report': None, 'report_observed_at_utc': None, 'next_report_at_utc': None,
+                            'has_pending_job': True, 'state_xmin': '101'}
+                if self.sql.startswith('SELECT pending_job,'):
+                    decoded = json.loads(serialized)
+                    for row in decoded['source']['events']:
+                        if row['symbol'] == 'HYPE' and row['event_id'] not in selected_hype:
+                            row['engine_snapshot'] = Snapshot(row['engine_snapshot'])
+                            refs.append(weakref.ref(row['engine_snapshot']))
+                    return {'pending_job': decoded, 'source': None}
+                return {'held': True}
+        def recheck(conn, observed_at):
+            self.assertEqual(observed_at, START+timedelta(minutes=120))
+            self.assertEqual(len(refs), 4)
+            self.assertTrue(all(ref() is None for ref in refs), 'Legacy checkpoint still owns discarded bodies')
+            return worker.compact_source(source)
+        with patch.object(worker, '_connect', return_value=Connection()), \
+             patch.object(worker, 'load_job_source', side_effect=recheck) as reread, \
+             patch.object(worker.research_sheet_outbox, 'stage_upserts', side_effect=lambda conn, rows: len(rows)):
+            result = worker.ResearchBTCWaveReportWorker().run_once(now=START+timedelta(hours=3))
+        self.assertTrue(result['published'])
+        reread.assert_called_once()
+        self.assertEqual(len(writes), 1)
+        # A modified legacy source cannot be rehashed as a valid new checkpoint,
+        # advanced, rechecked or staged while retaining its prior path records.
+        broken = json.loads(serialized)
+        broken['source']['events'][2]['score'] -= 1
+        serialized = worker.canonical(broken)
+        with patch.object(worker, '_connect', return_value=Connection()), \
+             patch.object(worker, 'advance_job') as advance, \
+             patch.object(worker, 'load_job_source') as reread, \
+             patch.object(worker.research_sheet_outbox, 'stage_upserts') as stage:
+            with self.assertRaisesRegex(ValueError, 'Frozen job source changed'):
+                worker.ResearchBTCWaveReportWorker().run_once(now=START+timedelta(hours=3))
+        advance.assert_not_called()
+        reread.assert_not_called()
+        stage.assert_not_called()
+        self.assertEqual(len(writes), 1)
+
+    def test_streaming_duplicate_hype_matches_frozen_compaction_and_releases_unused_bodies(self):
+        waves, descriptors = population()
+        descriptors = [(eid, stamp, wave_id, 'HYPE' if eid % 10 in (0, 1, 4, 5) else symbol, corrupt)
+                       for eid, stamp, wave_id, symbol, corrupt in descriptors]
+        class DuplicateConnection(SourceConnection):
+            def raw_event(self, descriptor):
+                row = super().raw_event(descriptor)
+                row['direction'] = 'SHORT' if row['event_id'] % 10 >= 4 else 'LONG'
+                return row
+        legacy = DuplicateConnection(waves, descriptors)
+        expected = worker.compact_source(legacy_compacted_source(legacy, OBSERVED))
+        current = DuplicateConnection(waves, descriptors)
+        actual = worker.load_job_source(current, OBSERVED)
+        self.assertEqual(worker.canonical(actual), worker.canonical(expected))
+        self.assertEqual(current.queries, legacy.queries)
+        selected = {row['event_id'] for row in report.select_representatives(actual['events'])
+                    if row['symbol'] == 'HYPE'}
+        self.assertEqual(len(selected), 10)
+        self.assertTrue(all(set(previous).issubset(selected) for previous in current.live_hype_before_wave))
+        self.assertEqual({eid for eid, symbol, ref in current.refs if symbol == 'HYPE' and ref() is not None}, selected)
+        self.assertTrue(all(not previous for previous in current.live_before_wave))
+
     def test_exact_legacy_bytes_filters_hype_and_raw_lifetime(self):
         legacy = SourceConnection()
         expected = legacy_compacted_source(legacy, OBSERVED)

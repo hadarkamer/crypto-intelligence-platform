@@ -477,6 +477,66 @@ class DispatchPureTests(NoExternal):
                     order.update(orderType='Limit',isTrigger=False)
                 with self.assertRaises(DispatchError):m.identity(changed,intent,venue.now())
 
+    def test_filled_take_with_released_trigger_keeps_exact_order_identity(self):
+        venue=Venue()
+        action=dict(type='order',orders=[dict(a=0,b=False,p='11',s='100',r=True,
+            t=dict(trigger=dict(isMarket=False,triggerPx='11',tpsl='tp')),
+            c='0x'+'a'*32)],grouping='na')
+        request=dict(attempt_at_ms=T,reply=None,proposal=dict(account=A,symbol='DOGE',
+            leg='TAKE_PROFIT',operation='CREATE_EXIT',action=action))
+        venue.send(request);venue.fill('1000','100')
+        raw=venue.lookup(A,action['orders'][0]['c'])
+        raw['order']['order'].update(isTrigger=False,triggerPx='0.0',sz='0.0')
+        self.assertEqual(m.identity(raw,request,venue.now()),'1000')
+        for change in (dict(cloid='0x'+'b'*32),dict(coin='ETH'),dict(side='B'),
+                       dict(reduceOnly=False),dict(origSz='99'),dict(limitPx='12'),
+                       dict(orderType='Limit'),dict(isPositionTpsl=True),
+                       dict(isTrigger=0),dict(triggerPx='12'),dict(sz='1')):
+            with self.subTest(change=change):
+                changed=deepcopy(raw);changed['order']['order'].update(change)
+                with self.assertRaises(ValueError):m.identity(changed,request,venue.now())
+        for status in ('open','triggered','canceled','rejected'):
+            with self.subTest(status=status):
+                changed=deepcopy(raw);changed['order']['status']=status
+                with self.assertRaises(ValueError):m.identity(changed,request,venue.now())
+        for invalid in ('stop','market','different_trigger','rejected_reply','wrong_oid','early','future'):
+            with self.subTest(invalid=invalid):
+                changed=deepcopy(raw);intent=deepcopy(request)
+                trigger=intent['proposal']['action']['orders'][0]['t']['trigger']
+                if invalid=='stop':
+                    intent['proposal']['leg']='STOP';trigger.update(isMarket=True,tpsl='sl')
+                    changed['order']['order']['orderType']='Stop Market'
+                elif invalid=='market':trigger['isMarket']=True
+                elif invalid=='different_trigger':trigger['triggerPx']='12'
+                elif invalid=='rejected_reply':intent['reply']=dict(state='REJECTED')
+                elif invalid=='wrong_oid':intent['reply']=dict(state='ACCEPTED_UNVERIFIED',oid='1001')
+                elif invalid=='early':changed['order']['statusTimestamp']=T-1
+                else:changed['order']['statusTimestamp']=venue.now()+1
+                with self.assertRaises(ValueError):m.identity(changed,intent,venue.now())
+
+    def test_rejected_entry_with_exact_rejected_order_is_bound_without_retry(self):
+        venue=Venue()
+        action=dict(type='order',orders=[dict(a=0,b=False,p='11',s='100',r=False,
+            t=dict(limit=dict(tif='Gtc')),c='0x'+'a'*32)],grouping='na')
+        request=dict(attempt_at_ms=T,reply=dict(state='REJECTED',code='OTHER_REJECTION',oid=None),
+            proposal=dict(account=A,symbol='DOGE',leg='ENTRY',operation='ENTRY',action=action))
+        venue.send(request)
+        raw=venue.lookup(A,action['orders'][0]['c']);raw['order']['status']='perpMarginRejected'
+        self.assertEqual(m.identity(raw,request,venue.now()),'1000')
+        for status in ('open','filled','canceled','triggered'):
+            with self.subTest(status=status):
+                changed=deepcopy(raw);changed['order']['status']=status
+                with self.assertRaisesRegex(DispatchError,'REJECTION_CONFLICTS_WITH_PUBLIC_ORDER'):
+                    m.identity(changed,request,venue.now())
+        for change in (dict(cloid='0x'+'b'*32),dict(coin='ETH'),dict(side='B'),
+                       dict(origSz='99'),dict(limitPx='12'),dict(reduceOnly=True)):
+            with self.subTest(change=change):
+                changed=deepcopy(raw);changed['order']['order'].update(change)
+                with self.assertRaises(ValueError):m.identity(changed,request,venue.now())
+        request['reply']['oid']='1001'
+        with self.assertRaisesRegex(DispatchError,'RECEIPT_AND_PUBLIC_ORDER_CONFLICT'):
+            m.identity(raw,request,venue.now())
+
     def test_malformed_cancel_responses_remain_unknown(self):
         for raw in (None,{},dict(status='ok',response=None),dict(status='ok',response='no')):
             self.assertEqual(m.normalized_reply(raw,'cancel')['state'],'OUTCOME_UNKNOWN')

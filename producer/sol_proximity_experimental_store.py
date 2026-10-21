@@ -210,7 +210,13 @@ def transact(scope, now, config_sha256, action, *, database_url=None, migrate_le
         # Additive transport only. Its explicit migration is never run here;
         # failure must not roll back an otherwise valid source observation.
         from experimental_execution_bridge import approved_enabled
-        if approved_enabled() and not state.get('notification_only', False):
+        from approved_alert_contract import DOGE_PARTIAL_RULE
+        # The selected DOGE observation keeps its frozen reducer state. Only
+        # its exact formula-qualified scope gains approved-alert forwarding;
+        # unrelated notification-only sources remain excluded.
+        forwardable = (not state.get('notification_only', False)
+                       or scope.endswith(':' + DOGE_PARTIAL_RULE))
+        if approved_enabled() and forwardable:
             conn.execute('SAVEPOINT approved_execution_outbox')
             try:
                 from approved_alert_outbox import synchronize
@@ -285,6 +291,26 @@ def claim_pending(scope, now, *, config_sha256, database_url=None):
                 return deepcopy(i)
         return None
     return transact(scope, now, config_sha256, claim, database_url=database_url)
+
+
+def release_unattempted(scope, intent_id, token, now, *, config_sha256, database_url=None):
+    """Release only known-unsent evidence failures under the exact claim token.
+
+    The original deadline and source position still apply. A send timeout or
+    orphaned/terminal claim is never eligible for this retry path.
+    """
+    def release(s):
+        live = {p['position_id'] for p in s['active'] if p['status'] == 'OPEN'}
+        for i in s['intents']:
+            if i['intent_id'] == intent_id and i.get('attempt_token') == token and i['status'] == 'IN_FLIGHT':
+                outcome = ('EXPIRED' if now >= i['expires_ms'] else
+                           'CANCELLED_POSITION_ENDED' if i['position_id'] not in live else 'PENDING')
+                i.update(status=outcome, attempt_token=None, attempt_ms=None,
+                         acknowledged_ms=None if outcome == 'PENDING' else now, message_id=None)
+                signal.count(s, 'DELIVERY_RETRY_PENDING' if outcome == 'PENDING' else 'DELIVERY_'+outcome)
+                return outcome
+        return None
+    return transact(scope, now, config_sha256, release, database_url=database_url)
 
 
 def finish_attempt(scope, intent_id, token, outcome, now, *, message_id=None, config_sha256, database_url=None):

@@ -1,28 +1,26 @@
 """Owner-selected notification roster; collection and ordinary Watch stay independent.
 
-The 2026-10-05 roster permanently retires experimental formulas preceding XRP
-R2732. A legacy ALL deployment profile must not re-enable those old sources.
+The 2026-10-17 roster keeps only the owner's four selected leaders. A legacy
+ALL deployment profile must not re-enable retired experimental sources.
 """
 from __future__ import annotations
 
 import os
 
-ROSTER_VERSION = "owner-r2732-and-later-20261008-v3-doge-partial"
+ROSTER_VERSION = "owner-top4-20261017-v4"
 SELECTED_MANUAL_RULES = frozenset()
 MAXPAIN_COMPONENT_RULES = frozenset((
-    'HYPE_MAXPAIN_DIST05_15_LONG_TF',
-    'DOGE_MAXPAIN_DIST15_25_LONG_TF',
     'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
-    'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
-    'ETH_MAXPAIN_LONG_DIST1_3',
 ))
 SELECTED_EXPERIMENTAL_RULES = frozenset((
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK',
     'HYPE_ROW71205_SHORT',
-    'SOL_MAXPAIN_DIST1_3_RANGE24',
     'SOL_G65_K49_PROFIT_LOCK',
 )) | MAXPAIN_COMPONENT_RULES
 RETIRED_EXPERIMENTAL_RULES = frozenset((
+    'SOL_MAXPAIN_DIST1_3_RANGE24', 'HYPE_MAXPAIN_DIST05_15_LONG_TF',
+    'DOGE_MAXPAIN_DIST15_25_LONG_TF', 'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
+    'ETH_MAXPAIN_LONG_DIST1_3',
     'U21_XRP_SHORT', 'SOL_MAXPAIN_PROXIMITY_GT15',
     'C1274', 'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL',
     'C0964', 'MAGNET_OBSERVATION_DOGE_SHORT',

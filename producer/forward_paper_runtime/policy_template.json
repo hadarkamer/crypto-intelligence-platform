@@ -1,0 +1,71 @@
+{
+  "version": "doge-eth-first-observed-paper-render-v1",
+  "client_date": "2026-10-21",
+  "timezone": "Asia/Jerusalem",
+  "scopes": [
+    {
+      "scope_key": "53b3680d48251081e92d157e983a4b9e3b721c58429c42ab809a3dca0e3e0ded",
+      "candidate_key": "captured-question-search-v3-experimental-binding:liquidity_ENTRY_2",
+      "symbol": "DOGE",
+      "direction": "SHORT",
+      "window_minutes": 720,
+      "threshold_bps": 50,
+      "candidate_definition_sha256": "a911ab78dcf4a6af7f1bc1cd077fa961b721d56a7ea6a308598bef337ccf607c",
+      "formula_version": "formula-evidence-v1-ordered-v7-btc-parent-5-or-fresh3:captured-question-search-v3-experimental-binding:btc-parent-close-reversal-200bps-v1"
+    },
+    {
+      "scope_key": "547dca3a524767251396d50f6ef5b05141693e0b47194030e6ca6930df839511",
+      "candidate_key": "captured-question-search-v3-experimental-binding:INVERSE:captured-question-search-v3-experimental-binding:CORE_PRICE_OI_FUTURES_CVD_TOTAL_65",
+      "symbol": "ETH",
+      "direction": "LONG",
+      "window_minutes": 60,
+      "threshold_bps": 50,
+      "candidate_definition_sha256": "9a9afa2b4721d5ae026dca0433c64bed138073b04f5f397a94addb4aff2d63aa",
+      "formula_version": "formula-evidence-v1-ordered-v7-btc-parent-5-or-fresh3:captured-question-search-v3-experimental-binding:btc-parent-close-reversal-200bps-v1"
+    }
+  ],
+  "required_markers": [
+    "alert_time_utc",
+    "delivered_at_utc",
+    "event_created_at_utc",
+    "match_created_at_utc",
+    "membership_created_at_utc",
+    "parent_created_at_utc",
+    "parent_confirmed_at_utc",
+    "btc_bar_created_at_utc",
+    "btc_observed_close_utc"
+  ],
+  "books": [
+    "DOGE_only",
+    "ETH_only",
+    "first_per_parent"
+  ],
+  "barrier_bps": 50,
+  "net_cost_pp": 0.1,
+  "poll_seconds": 10,
+  "entry_expiry_seconds": 90,
+  "quote_max_elapsed_seconds": 5,
+  "max_quote_gap_seconds": 30,
+  "quote_source": "BINANCE_SPOT_BOOK_TICKER",
+  "quote_symbols": {
+    "DOGE": "DOGEUSDT",
+    "ETH": "ETHUSDT"
+  },
+  "parent_policy_version": "btc-parent-close-reversal-200bps-v1",
+  "bootstrap": "Observe and log existing rows without opening positions. Only source alerts and whole parent waves beginning strictly after study start can enter the forward sample.",
+  "candidate_clock": "First response receipt in which all fixed prerequisites were seen together; raw-first-seen is logged separately. Recorded transaction-start clocks remain annotations, never a first-read substitute.",
+  "same_poll_order": [
+    "max_required_recorded_marker",
+    "event_id",
+    "symbol"
+  ],
+  "late_rows": "Previously frozen parent winner is immutable, including when an older recorded timestamp arrives later.",
+  "entry": "Strict next full minute after first eligible response receipt; first quote request starting at/after planned entry. Expire after 90 seconds. Capacity gated at planned time; no fallback or queue.",
+  "fill_model": "Observed midpoint research proxy, not executable fill. Store bid/ask; fixed0.10pp all-in scenario includes spread, never subtract spread twice.",
+  "exit": "First observed midpoint threshold crossing or first quote requested at/after holding deadline. OBSERVED outcomes are discrete samples, not proof of intragap first-touch or execution.",
+  "gaps": "A quote gap greater than30seconds or open-position restart marks path_uncertain permanently. Retain every outcome with its flags.",
+  "source_identity": "New forward study, not retrospective data or previous backtest. No exchange/account/order/notification access.",
+  "bounds_are_protocol_choices": "10second polling,90second entry expiry,5second quote roundtrip,30second gap flag are frozen research settings, not measured latency guarantees.",
+  "quote_documentation": "https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#symbol-order-book-ticker",
+  "clock_scope": "Render observer DB response receipt; distinct from alert delivery and exchange execution"
+}

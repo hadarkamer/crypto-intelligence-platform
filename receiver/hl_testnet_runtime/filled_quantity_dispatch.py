@@ -330,21 +330,59 @@ def identity(raw, request, now_ms):
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
         raise DispatchError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
     leg=p['leg'];immediate=p['operation'] in ('CLOSE_PASSED_TAKE','EMERGENCY_CLOSE')
+    if p['operation'] in ('TIME_EXIT','PARTIAL_TAKE'):
+        # These markers are frozen in the durable proposal and checked against
+        # the authenticated source again at the signing boundary. They do not
+        # turn an arbitrary legacy STOP or TP into an immediate order.
+        import approved_alert_contract as approved
+        from .doge_partial_execution import RULE
+        if (p.get('source_version')!=approved.VERSION or p.get('source_rule_id')!=RULE
+                or p['symbol']!='DOGE'
+                or leg!=('STOP' if p['operation']=='TIME_EXIT' else 'TAKE_PROFIT')
+                or expected['r'] is not True or expected['t']!={'limit':{'tif':'Ioc'}}):
+            raise DispatchError('EXACT_APPROVED_DOGE_IMMEDIATE_INTENT_REQUIRED')
+        immediate=True
     typ='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
+    # A fully executed TP can retain its original orderType while the venue
+    # clears the active trigger fields. Bind the same signed limit intent;
+    # the collector must still independently prove every fill and finality.
+    filled_take=(leg=='TAKE_PROFIT' and not immediate and env.get('status')=='filled'
+        and o.get('isTrigger') is False
+        and expected['t']=={'trigger':{'isMarket':False,'triggerPx':expected['p'],'tpsl':'tp'}}
+        and life.number(o.get('triggerPx'))==0 and life.number(o.get('sz'))==0)
+    # After a market stop fills, the venue can clear its trigger and replace
+    # limitPx with the activation's market execution limit. Those fields no
+    # longer restate the signed trigger. Require an independently persisted OID
+    # binding; the collectors below still have to prove every fill and finality.
+    reply=request.get('reply') or {}
+    bound_stop=(request.get('phase') in ('OBSERVED','OUTCOME_UNKNOWN','ACK_UNVERIFIED')
+        and request.get('observed_oid') in (None,str(oid))
+        and ((request.get('phase')=='OBSERVED' and request.get('observed_oid')==str(oid))
+             or (reply.get('state')=='ACCEPTED_UNVERIFIED' and reply.get('oid')==str(oid))))
+    filled_stop=(leg=='STOP' and not immediate and bound_stop
+        and env.get('status')=='filled' and expected['r'] is True
+        and expected['t']=={'trigger':{'isMarket':True,'triggerPx':expected['p'],'tpsl':'sl'}}
+        and o.get('isTrigger') is False
+        and life.number(o.get('triggerPx'))==0 and life.number(o.get('sz'))==0)
     if (o.get('cloid')!=expected['c'] or o.get('coin')!=p['symbol']
             or o.get('side')!=('B' if expected['b'] else 'A')
             or type(o.get('reduceOnly')) is not bool or o['reduceOnly']!=expected['r']
             or life.number(o.get('origSz'),positive=True)!=life.number(expected['s'])
-            or life.number(o.get('limitPx'),positive=True)!=life.number(expected['p'])
+            or (life.number(o.get('limitPx'),positive=True)!=life.number(expected['p']) and not filled_stop)
             or o.get('orderType')!=typ or o.get('isPositionTpsl',False) is not False
-            or type(o.get('isTrigger')) is not bool or o['isTrigger']!=(leg!='ENTRY' and not immediate)):
+            or type(o.get('isTrigger')) is not bool
+            or (o['isTrigger']!=(leg!='ENTRY' and not immediate) and not (filled_take or filled_stop))):
         raise DispatchError('ORDER_TERMS_NOT_BOUND_TO_INTENT')
     if immediate and (expected['t'] != {'limit':{'tif':'Ioc'}}
                       or env.get('status')=='open'):
         raise DispatchError('IMMEDIATE_TAKE_NOT_TERMINAL')
-    if leg!='ENTRY' and not immediate and life.number(o.get('triggerPx'),positive=True)!=life.number(expected['t']['trigger']['triggerPx']):
+    if leg!='ENTRY' and not immediate and not (filled_take or filled_stop) and life.number(o.get('triggerPx'),positive=True)!=life.number(expected['t']['trigger']['triggerPx']):
         raise DispatchError('TRIGGER_NOT_BOUND_TO_INTENT')
-    if (request.get('reply') or {}).get('state')=='REJECTED':
+    # A rejected ENTRY may have an order record. Only a matching terminal
+    # rejection agrees with the ACK; the collector also requires zero fills.
+    if ((request.get('reply') or {}).get('state')=='REJECTED'
+            and not (leg=='ENTRY' and p['operation']=='ENTRY'
+                     and env.get('status') in evidence.REJECTED)):
         raise DispatchError('REJECTION_CONFLICTS_WITH_PUBLIC_ORDER')
     known=(request.get('reply') or {}).get('oid')
     if known is not None and known!=str(oid):

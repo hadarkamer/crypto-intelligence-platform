@@ -32,26 +32,22 @@ def retained_history_plan(start, end):
 
 
 class HistoryGapPlanTests(unittest.TestCase):
-    def test_three_day_monolithic_replay_cannot_spend_protection_reserve(self):
+    def test_three_day_replay_funds_rows_without_empty_day_reservations(self):
         old = closed_evidence()
         end = T + 3 * evidence.DAY_MS + 55 * 60 * 1000
         bodies = evidence._planned_observation_reads(
             old['bindings'], old['snapshot'], T, end,
             reuse_verified_terminals=True)
         self.assertEqual(sum(budget.request_weight('/info', body)
-                             for body in bodies), 1004)
+                             for body in bodies), 284)
         owner = budget.Budget(pg.PostgresJournal.for_ci(
             'postgresql://offline:unused@localhost/hl_journal_ci'))
-        with patch.object(owner, '_transaction',
-                          side_effect=AssertionError('DATABASE_MUST_NOT_BE_OPENED')), \
+        with patch.object(owner, '_fund_observation') as funded, \
              patch('http.client.HTTPSConnection',
                    side_effect=AssertionError('HTTP_MUST_NOT_BEGIN')):
-            with self.assertRaises(budget.BudgetError) as caught:
-                owner.reserve_observation(bodies, priority='background')
-        self.assertEqual(str(caught.exception), 'TESTNET_REQUEST_BUDGET_EXHAUSTED')
-        self.assertEqual(caught.exception.requested_weight, 1004)
-        self.assertEqual(caught.exception.ceiling, 800)
-        self.assertIsNone(caught.exception.retry_after_ms)
+            owner.reserve_observation(bodies, priority='background')
+        self.assertEqual(sum(row[2] for row in funded.call_args.args[0]),284)
+        self.assertEqual(funded.call_args.args[1],'background')
 
     def test_one_day_history_and_final_checkpoint_have_bounded_fixed_plans(self):
         stop = T + evidence.DAY_MS - 2 * evidence.OVERLAP_MS

@@ -15,6 +15,7 @@ import approved_alert_contract as contract
 from . import card_lifecycle as life, filled_quantity_dispatch as wire
 from . import price_precision, risk_policy, two_account_execution as roles
 from . import experimental_execution_prices as execution_prices
+from . import doge_partial_execution as doge
 from .filled_dispatch_store import DefinitelyUnsent
 from .long_stream_runtime import _validate_account_inventory
 
@@ -58,12 +59,16 @@ def _source(source, current, now, *, entry):
     return source
 
 
-def _terms(request, source, metadata):
+def _terms(request, source, metadata, *, formula_risk=None):
     p=request['proposal']
     role='long_account' if source['side']=='LONG' else 'short_account'
     if (p['card_id'] != source['occurrence_id'] or p['symbol'] != source['symbol']
             or p['role'] != role or p['source_at'] != source['source_at']):
         raise BoundaryError('SOURCE_REQUEST_IDENTITY_MISMATCH')
+    if p['operation'] in ('TIME_EXIT','PARTIAL_TAKE') and (
+            not doge.is_doge(source) or p.get('source_rule_id')!=source['rule_id']
+            or p.get('source_version')!=source['version']):
+        raise BoundaryError('EXACT_APPROVED_DOGE_IMMEDIATE_SOURCE_REQUIRED')
     prepared=execution_prices.prepare(source,metadata)
     index,decimals=wire.asset(metadata,source['symbol'])
     action=wire.canonical_wire_action(p['action'])
@@ -95,18 +100,28 @@ def _terms(request, source, metadata):
             for leg,field in (('sl','stop'),('tp','take_profit')):
                 exits.append(dict(a=index,b=not o['b'],p=levels[field],s=o['s'],r=True,
                     t=dict(trigger=dict(isMarket=leg=='sl',triggerPx=levels[field],tpsl=leg)),c=o['c']))
-            risk_policy.assert_new_entry_budget(dict(type='order',orders=[bracket]+exits,grouping='normalTpsl'))
+            risk_policy.assert_new_entry_budget(dict(type='order',orders=[bracket]+exits,grouping='normalTpsl'),
+                                                formula_risk=formula_risk)
         elif (p['leg'] not in ('STOP','TAKE_PROFIT') or o['r'] is not True
                 or o['b'] is not (source['side']=='SHORT')):
             raise BoundaryError('REDUCE_ONLY_EXACT_OWNER_EXIT_REQUIRED')
-        elif p['operation']=='EMERGENCY_CLOSE':
+        elif p['operation'] in ('EMERGENCY_CLOSE', 'TIME_EXIT'):
+            if p['operation']=='TIME_EXIT' and not doge.is_doge(source):
+                raise BoundaryError('DOGE_TIME_EXIT_CONTRACT_REQUIRED')
             if action['type']!='order' or p['leg']!='STOP' or o['t']!={'limit':{'tif':'Ioc'}}:
                 raise BoundaryError('EXACT_EMERGENCY_IOC_REQUIRED')
+        elif p['operation']=='PARTIAL_TAKE':
+            if (not doge.is_doge(source) or action['type']!='order' or p['leg']!='TAKE_PROFIT'
+                    or o['t']!={'limit':{'tif':'Ioc'}}
+                    or o['p']!=doge.partial_price(source,decimals)):
+                raise BoundaryError('EXACT_DOGE_PARTIAL_IOC_REQUIRED')
         else:
             expected=levels['stop' if p['leg']=='STOP' else 'take_profit']
             allowed={expected}
             if p['leg']=='STOP' and source['policy'].get('locked_stop'):
                 allowed.add(price_precision.round_price(source['policy']['locked_stop'],decimals))
+            if p['leg']=='TAKE_PROFIT' and doge.is_doge(source):
+                allowed.add(doge.partial_price(source,decimals))
             if (o['p'] not in allowed or o['t']!=dict(trigger=dict(isMarket=p['leg']=='STOP',
                     triggerPx=o['p'],tpsl='sl' if p['leg']=='STOP' else 'tp'))):
                 raise BoundaryError('FROZEN_EXIT_TERMS_REQUIRED')
@@ -134,9 +149,62 @@ def _lock(source, proof, now, *, current):
     return value
 
 
+def _doge_trade(owner,snapshot,source,context):
+    """Bind split sizing to exact independently observed owned fills."""
+    trade=context.get('exit_trade')
+    if (not isinstance(trade,dict) or trade.get('source')!=source
+            or any(trade.get(k)!=owner[v] for k,v in (('cid','card_id'),('account','account'),
+                ('symbol','symbol'),('role','role'),('side','side'),('quantity','planned_quantity')))
+            or trade.get('prices')!=owner['prices']):
+        raise BoundaryError('EXACT_DOGE_DURABLE_OWNER_REQUIRED')
+    index,decimals=wire.asset(context['metadata'],source['symbol'])
+    if trade.get('asset')!=dict(index=index,decimals=decimals):
+        raise BoundaryError('EXACT_DOGE_ASSET_REQUIRED')
+    legs=trade.get('order_legs',{})
+    if (set(legs)!=set(trade.get('orders',{}))
+            or any(set(owner['orders'][leg])!={oid for oid,kind in legs.items() if kind==leg}
+                   for leg in ('ENTRY','STOP','TAKE_PROFIT'))):
+        raise BoundaryError('EXACT_DOGE_ORDER_BINDINGS_REQUIRED')
+    for key,entry in (('entry_fills',True),('exit_fills',False)):
+        actual={f['fill_id']:dict(fill_id=f['fill_id'],order_id=f['oid'],quantity=f['quantity'],
+                    price=f['price'],at_ms=f['at_ms']) for f in snapshot['fills']
+                if (legs.get(f['oid'])=='ENTRY') is entry}
+        if trade.get(key)!=actual:
+            raise BoundaryError('EXACT_DOGE_OBSERVED_FILLS_REQUIRED')
+    requests=context.get('observed_exit_requests',[])
+    for oid in owner['orders']['TAKE_PROFIT']:
+        matches=[r for r in requests if r.get('phase')=='OBSERVED' and r.get('observed_oid')==oid]
+        if len(matches)!=1:
+            raise BoundaryError('DOGE_TAKE_NOT_BOUND_TO_DURABLE_REQUEST')
+        req=matches[0]; _,action=_terms(req,source,context['metadata'])
+        if (req['proposal']['account']!=owner['account'] or req['proposal']['leg']!='TAKE_PROFIT'
+                or trade['orders'][oid]['wire_order']!=wire.requested_order(action)):
+            raise BoundaryError('DOGE_TAKE_DURABLE_TERMS_CHANGED')
+    return trade
+
+
 def _owned_snapshot(owner,snapshot,source,context,now):
     """Project only proven replacement OIDs into legacy immutable-price review."""
     projected=deepcopy(snapshot)
+    if doge.is_doge(source):
+        trade=_doge_trade(owner,snapshot,source,context)
+        for row in projected['open_orders']:
+            if row['oid'] not in owner['orders']['TAKE_PROFIT']:
+                continue
+            observed=trade['orders'][row['oid']]; order=observed['wire_order']
+            unfilled=life.number(order['s'])-sum((life.number(f['quantity']) for f in observed['fills']),Decimal(0))
+            trigger=order['t'].get('trigger')
+            triggered=row['order_type']=='TRIGGERED_TP_LIMIT' and row['trigger_price'] is None
+            if (trigger!=dict(isMarket=False,triggerPx=order['p'],tpsl='tp')
+                    or row['reduce_only'] is not True or row['price']!=order['p']
+                    or row['side']!=('A' if source['side']=='LONG' else 'B')
+                    or life.number(row['quantity'])!=unfilled
+                    or not (triggered or row['order_type']=='TP_LIMIT' and row['trigger_price']==order['p'])):
+                raise BoundaryError('DOGE_TAKE_OBSERVED_TERMS_CHANGED')
+            # Only exact owned TP prices are projected. Quantities, fills and
+            # trigger state remain the independently observed facts.
+            row['price']=owner['prices']['take_profit']
+            if not triggered:row['trigger_price']=owner['prices']['take_profit']
     for row in projected['open_orders']:
         if row['oid'] not in owner['orders']['STOP'] or row['trigger_price']==owner['prices']['stop']:
             continue
@@ -179,7 +247,14 @@ def review(request, context, *, now_ms):
         raise BoundaryError('INDEPENDENT_ACCOUNT_ROUTES_REQUIRED')
     if context['host']!=HOST:
         raise BoundaryError('TESTNET_HOST_REQUIRED')
-    prepared,action=_terms(request,source,context['metadata'])
+    formula_risk = context.get('entry_risk') if entry else None
+    if entry:
+        if p.get('entry_risk') != formula_risk:
+            raise BoundaryError('DURABLE_FORMULA_RISK_MISMATCH')
+        if formula_risk is not None:
+            from .formula_accounting import validate_risk
+            validate_risk(formula_risk, source['rule_id'])
+    prepared,action=_terms(request,source,context['metadata'], formula_risk=formula_risk)
     safety=context['safety']
     _fresh(safety['at_ms'],now_ms,15000,'ACCOUNT_SAFETY_EVIDENCE_EXPIRED')
     if safety['account']!=p['account'] or safety['role']!=p['role']:
@@ -252,28 +327,41 @@ def review(request, context, *, now_ms):
                     or str(action['cancels'][0]['o']) not in sum(owner['orders'].values(),[])):
                 raise BoundaryError('CANCEL_OID_NOT_OWNED')
         else:
-            if life.number(p['quantity'],positive=True)!=life.number(view['cards'][0]['remaining_quantity']):
+            expected_quantity=life.number(view['cards'][0]['remaining_quantity'])
+            o=wire.requested_order(action)
+            split=doge.is_doge(source) and p['leg']=='TAKE_PROFIT'
+            if split:
+                trade=_doge_trade(owner,snap,source,context)
+                targets={row['price']:life.number(row['quantity']) for row in doge.take_orders(trade)}
+                expected_quantity=targets.get(o['p'],Decimal(0))
+            if life.number(p['quantity'],positive=True)!=expected_quantity:
                 raise BoundaryError('EXIT_EXCEEDS_OBSERVED_OWN_REMAINING')
             own_active=active_ids & set(owner['orders'][p['leg']])
+            if split:
+                # Each frozen target owns its own order; the other target is
+                # neither a duplicate nor authority to modify its OID.
+                own_active={oid for oid in own_active if next(
+                    row for row in snap['open_orders'] if row['oid']==oid)['price']==o['p']}
             if action['type']=='batchModify':
                 if (p['operation'] not in ('MODIFY_EXIT','AMEND_EXIT')
                         or own_active!={str(action['modifies'][0]['oid'])}):
                     raise BoundaryError('MODIFY_OID_NOT_EXCLUSIVELY_ACTIVE')
-            elif p['operation']!='EMERGENCY_CLOSE' and (p['operation']!='CREATE_EXIT' or own_active):
+            elif p['operation'] not in ('EMERGENCY_CLOSE','TIME_EXIT','PARTIAL_TAKE') and (p['operation']!='CREATE_EXIT' or own_active):
                 raise BoundaryError('CREATE_EXIT_ALREADY_ACTIVE_OR_UNKNOWN_OPERATION')
             # Closed-minute proof must be exact to the contract and target;
             # a passed mark or caller-supplied locked price is never enough.
-            o=wire.requested_order(action)
             old=prepared['execution']['stop']
-            if p['operation']=='EMERGENCY_CLOSE':
+            if p['operation'] in ('EMERGENCY_CLOSE','TIME_EXIT','PARTIAL_TAKE'):
                 from .emergency_close import close_price, trigger, DEADLINE_MS
                 sample=p['sample']
                 _fresh(sample['at_ms'],now_ms,DEADLINE_MS,'EMERGENCY_MARK_EXPIRED')
                 _fresh(snap['at_ms'],now_ms,DEADLINE_MS,'EMERGENCY_OWNER_SNAPSHOT_EXPIRED')
                 _,decimals=wire.asset(context['metadata'],p['symbol'])
-                if life.number(o['p'])!=life.number(close_price(sample['mark_price'],decimals,buy=o['b'])):
+                if (p['operation']!='PARTIAL_TAKE'
+                        and life.number(o['p'])!=life.number(close_price(sample['mark_price'],decimals,buy=o['b']))):
                     raise BoundaryError('EXACT_EMERGENCY_MARK_LIMIT_REQUIRED')
-                if life.number(p['quantity'])!=life.number(view['cards'][0]['remaining_quantity']):
+                if (p['operation']!='PARTIAL_TAKE'
+                        and life.number(p['quantity'])!=life.number(view['cards'][0]['remaining_quantity'])):
                     raise BoundaryError('EMERGENCY_EXACT_REMAINDER_REQUIRED')
                 if active_ids & set(owner['orders']['ENTRY']):
                     raise BoundaryError('EMERGENCY_ENTRY_REMAINDER_NOT_FINAL')
@@ -285,7 +373,16 @@ def review(request, context, *, now_ms):
                 mark=life.number(sample['mark_price'],positive=True)
                 take=life.number(prepared['execution']['take_profit'])
                 crossed=(mark<=stop or mark>=take) if source['side']=='LONG' else (mark>=stop or mark<=take)
-                if not crossed:
+                if p['operation']=='TIME_EXIT':
+                    if not doge.timeout_due(source,now_ms):
+                        raise BoundaryError('DOGE_HOLDING_DEADLINE_NOT_REACHED')
+                elif p['operation']=='PARTIAL_TAKE':
+                    partial=life.number(doge.partial_price(source,decimals))
+                    if own_active:
+                        raise BoundaryError('DOGE_PARTIAL_TAKE_ORDER_STILL_ACTIVE')
+                    if not (mark>=partial if source['side']=='LONG' else mark<=partial):
+                        raise BoundaryError('DOGE_PARTIAL_TARGET_NOT_REACHED')
+                elif not crossed:
                     # Reuse the established protection deadline exactly. Its
                     # proof is derived from independently observed fills and
                     # stop coverage, never from a proposal reason or boolean.
