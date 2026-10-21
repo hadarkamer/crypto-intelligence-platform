@@ -139,13 +139,13 @@ class StoreTests(unittest.TestCase):
     def test_restart_does_not_reset_pending(self):
         self.intake(self.newscope,102);a=store.snapshot(self.newscope)
         b=store.initialize_scope(self.newscope,BASE+3*M,config_sha256='test');self.assertEqual(a['active'],b['active'])
-    def test_notification_only_skips_execution_sync(self):
-        self.intake(self.newscope,102)
+    def test_unrelated_notification_only_scope_skips_execution_sync(self):
+        self.intake(self.oldscope,102)
         with patch('experimental_execution_bridge.approved_enabled',return_value=True),patch('approved_alert_outbox.synchronize',side_effect=AssertionError('execution forbidden')):
-            store.transact(self.newscope,BASE+2*M,'test',lambda x:None)
-    def test_rule_not_in_execution_contract(self):
+            store.transact(self.oldscope,BASE+2*M,'test',lambda x:None)
+    def test_rule_supported_only_by_approved_execution_contract(self):
         import approved_alert_contract,experimental_execution_contract
-        self.assertNotIn(w.RULE_ID,approved_alert_contract.SPECS)
+        self.assertIn(w.RULE_ID,approved_alert_contract.SPECS)
         self.assertNotIn(w.RULE_ID,experimental_execution_contract.SPECS)
 
 class WorkerTests(unittest.IsolatedAsyncioTestCase):

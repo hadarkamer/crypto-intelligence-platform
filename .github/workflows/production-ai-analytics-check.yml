@@ -45,9 +45,8 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/.ci/receiver
     services:
       postgres:
-        # Docker Official Images mirror; pin the same PostgreSQL 18 image used
-        # by the prior passing CI run, avoiding Docker Hub's anonymous quota.
-        image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        # Pin the same PostgreSQL 18 image directly from Docker Official Images.
+        image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_USER: research_test
           POSTGRES_PASSWORD: research_test
@@ -65,7 +64,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hadarkamer/crypto-intelligence-platform
-          ref: 8b92eac0a7d898a56bb376d1637837415ef1b3a6
+          ref: 9b6fcc8149e64b0f9b527517a354f297f67465ed
           path: .ci/receiver
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -79,8 +78,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C .ci/receiver rev-parse HEAD)" = "8b92eac0a7d898a56bb376d1637837415ef1b3a6"
-          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "507f264c57cd63594e4952476ca988e063bbb6ea"
+          test "$(git -C .ci/receiver rev-parse HEAD)" = "9b6fcc8149e64b0f9b527517a354f297f67465ed"
+          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "61bbc2aa9759683f7c3b5c6e66f1b7e0062019a8"
           cmp experimental_execution_contract.py .ci/receiver/experimental_execution_contract.py
           cmp experimental_execution_fixtures.py .ci/receiver/experimental_execution_fixtures.py
           cmp approved_alert_contract.py .ci/receiver/approved_alert_contract.py
