@@ -30,6 +30,7 @@ def approved_enabled(env=None):
 
 
 def approved_source_keys(scopes):
+    import approved_alert_contract as approved
     keys = []
     for scope in sorted(scopes):
         if not isinstance(scope, str) or not contract.HEX.fullmatch(scope):
@@ -38,7 +39,7 @@ def approved_source_keys(scopes):
         from approved_alert_producer import FORMULA_STORES
         keys.extend(version + ':' + hashlib.sha256(subscription.encode()).hexdigest()
                     for version in FORMULA_STORES)
-        for rule, spec in contract.SPECS.items():
+        for rule, spec in approved.SPECS.items():
             source_scope = subscription if spec[0] == 'SOL' else subscription + ':' + rule
             keys.append('sol-proximity-notification-store-v1:' + hashlib.sha256(source_scope.encode()).hexdigest())
     return keys

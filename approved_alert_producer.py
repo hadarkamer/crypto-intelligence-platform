@@ -99,6 +99,11 @@ def _approved_intent(intent, state, current, *, now_ms, fence_ms):
         reason = 'SOURCE_OBSERVATION_ENDED'
         as_of = max(approved, (observed.get('terminal_ms') or
                     observed.get('unknown_ms') or state['bar_cursor_ms']) + 60_000)
+    elif p['rule_id'] == contract.DOGE_PARTIAL_RULE and observed.get('partial_taken'):
+        # The first target has already been observed. Retire any unfilled
+        # entry remainder; actual venue fills keep their receiver-owned exits.
+        reason = 'SOURCE_PARTIAL_TAKE_OBSERVED'
+        as_of = max(approved, observed['partial_ms'] + 60_000)
     if as_of > now_ms:
         raise contract.ContractError('FUTURE_SOURCE_STATE')
     if not reason and now_ms >= expiry:
@@ -122,6 +127,11 @@ def _approved_intent(intent, state, current, *, now_ms, fence_ms):
         source_sequence=as_of*10+contract.RANK[kind], source_as_of=contract.iso_ms(as_of),
         source_state='CANCELED' if reason else 'APPROVED', valid_until=None, cancel_reason=reason)
     value['occurrence_id'] = contract.occurrence_id(value)
+    if p['rule_id'] == contract.DOGE_PARTIAL_RULE:
+        value['policy'].update(name='DOGE_PARTIAL_TAKE_75_H24_V1',
+            partial_take_price=displayed_price(p['partial_take_price']),
+            partial_fraction='0.75', hold_until=contract.iso_ms(p['hold_until_ms']),
+            stop_policy='KEEP_ORIGINAL')
     return contract.validate(value)
 
 
@@ -173,7 +183,9 @@ def source_open(state, position):
     if position is None:
         return False
     if state['version'] == SOURCE_VERSION:
-        return position.get('status') == 'OPEN'
+        return (position.get('status') == 'OPEN' and not (
+            position.get('rule_id') == contract.DOGE_PARTIAL_RULE
+            and position.get('partial_taken')))
     return (position.get('outcome') is None and not position.get('closed_at')
             and (state['version'] != 'sol-g65-k49-lock-cap1-v1' or position.get('phase') == 'OPEN'))
 
@@ -182,7 +194,9 @@ def source_end_ms(state, position, value):
     approved = contract.moment_ms(value['approved_at'])
     if state['version'] == SOURCE_VERSION:
         return max(approved, ((position or {}).get('terminal_ms') or
-            (position or {}).get('unknown_ms') or state['bar_cursor_ms']) + 60_000)
+            (position or {}).get('unknown_ms') or
+            ((position or {}).get('partial_ms') if (position or {}).get('rule_id') == contract.DOGE_PARTIAL_RULE else None)
+            or state['bar_cursor_ms']) + 60_000)
     stamps = [(position or {}).get(k) for k in ('exit_at', 'closed_at', 'closed_through')]
     if not position:
         stamps.append(state.get('last_exit_at'))

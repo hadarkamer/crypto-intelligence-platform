@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hadarkamer/crypto-intelligence-platform
-          ref: 8b92eac0a7d898a56bb376d1637837415ef1b3a6
+          ref: e45834dd787b698ae492265a42f9063b02c8a145
           path: .ci/receiver
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -79,8 +79,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C .ci/receiver rev-parse HEAD)" = "8b92eac0a7d898a56bb376d1637837415ef1b3a6"
-          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "507f264c57cd63594e4952476ca988e063bbb6ea"
+          test "$(git -C .ci/receiver rev-parse HEAD)" = "e45834dd787b698ae492265a42f9063b02c8a145"
+          test "$(git -C .ci/receiver rev-parse HEAD:hl_testnet_runtime)" = "93056c239f50b7e1a189e32e58c408cba2987005"
           cmp experimental_execution_contract.py .ci/receiver/experimental_execution_contract.py
           cmp experimental_execution_fixtures.py .ci/receiver/experimental_execution_fixtures.py
           cmp approved_alert_contract.py .ci/receiver/approved_alert_contract.py

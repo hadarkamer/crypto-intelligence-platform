@@ -210,7 +210,13 @@ def transact(scope, now, config_sha256, action, *, database_url=None, migrate_le
         # Additive transport only. Its explicit migration is never run here;
         # failure must not roll back an otherwise valid source observation.
         from experimental_execution_bridge import approved_enabled
-        if approved_enabled() and not state.get('notification_only', False):
+        from approved_alert_contract import DOGE_PARTIAL_RULE
+        # The selected DOGE observation keeps its frozen reducer state. Only
+        # its exact formula-qualified scope gains approved-alert forwarding;
+        # unrelated notification-only sources remain excluded.
+        forwardable = (not state.get('notification_only', False)
+                       or scope.endswith(':' + DOGE_PARTIAL_RULE))
+        if approved_enabled() and forwardable:
             conn.execute('SAVEPOINT approved_execution_outbox')
             try:
                 from approved_alert_outbox import synchronize
