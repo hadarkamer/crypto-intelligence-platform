@@ -1,2 +1,0 @@
-# Optional TESTNET connection tests only. Not imported/installed by the live bot.
-hyperliquid-python-sdk==0.24.0

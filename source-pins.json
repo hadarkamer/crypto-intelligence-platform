@@ -1,0 +1,11 @@
+{
+  "repository": "hadarkamer/crypto-intelligence-platform",
+  "receiver": {
+    "commit": "9b6fcc8149e64b0f9b527517a354f297f67465ed",
+    "tree": "5421064f840db8a5b95af0abbe35dcf66616fd4d"
+  },
+  "producer": {
+    "commit": "53f0e919ccbeaf81383b6bfb0bf0a0340393c005",
+    "tree": "acbb4e047f6bd5b421d46cb6039df98490fc1952"
+  }
+}
