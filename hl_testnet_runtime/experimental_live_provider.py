@@ -76,6 +76,33 @@ def _original_stop_needed(state, trade):
     return unknown_entry or remaining>0 and not covered
 
 
+def _fixed_exits_stable(trade, now):
+    """Skip quotes only while every frozen exit covers its exact owned share."""
+    from . import doge_partial_execution as partial
+    if trade['source']['family'] in ('r2732','sol_g65') or runtime._remaining(trade)<=0:
+        return False
+    active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
+            if order['status']=='OPEN']
+    if any(leg=='ENTRY' for leg,order in active):
+        return False
+    if partial.is_doge(trade['source']):
+        if partial.time_exit_due(trade,now):
+            return False
+        desired=partial.desired_orders(trade)
+    else:
+        remaining=life.text(runtime._remaining(trade))
+        desired=[('STOP',trade['prices']['stop'],remaining),
+                 ('TAKE_PROFIT',trade['prices']['take_profit'],remaining)]
+    if len(active)!=len(desired):
+        return False
+    return all(len(matches:=[o for own_leg,o in active
+            if own_leg==leg and life.number(o['wire_order']['p'])==life.number(price)])==1
+        and matches[0]['wire_order']['r'] is True
+        and life.number(matches[0]['wire_order']['s'])-sum(
+            (life.number(f['quantity']) for f in matches[0]['fills']),Decimal(0))==life.number(quantity)
+        for leg,price,quantity in desired)
+
+
 def _retired_experimental(state, now):
     """Find immutable final facts without refreshing their evidence clocks."""
     from .experimental_execution_archive import _eligible
@@ -789,17 +816,8 @@ class LiveEvidenceProvider:
                     # exit by ID; a price quote cannot change that decision.
                     cancellation_lanes.add((trade['account'],trade['symbol']))
                     continue
-                stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
-                    and not any(leg=='ENTRY' for leg,order in active)
-                    and trade['account'] not in unresolved
-                    and all(len([o for own_leg,o in active if own_leg==leg])==1
-                        and all(o['wire_order']['r'] is True
-                            and life.number(o['wire_order']['s'])-sum(
-                                (life.number(f['quantity']) for f in o['fills']),Decimal(0))==remaining
-                            and life.number(o['wire_order']['p'])==life.number(price)
-                            for own_leg,o in active if own_leg==leg)
-                        for leg,price in (('STOP',trade['prices']['stop']),
-                                          ('TAKE_PROFIT',trade['prices']['take_profit']))))
+                stable=(trade['account'] not in unresolved
+                    and _fixed_exits_stable(trade,self.now()))
                 if not stable:market_lanes.add((trade['account'],trade['symbol']))
             # A failed observation cannot consume a mark. Filter before the
             # shared quote read, retaining all actionable protection lanes.
@@ -1170,4 +1188,10 @@ class LiveEvidenceProvider:
             result.update(owner=owner,owner_snapshot=owner_snapshot,lock_proof=trade['condition'],
                 observed_stop_requests=[deepcopy(r) for r in state['requests'].values()
                     if r['proposal']['card_id']==cid and r['proposal']['leg']=='STOP' and r['phase']=='OBSERVED'])
+            from . import doge_partial_execution as partial
+            if partial.is_doge(trade['source']):
+                result.update(exit_trade=deepcopy(trade),
+                    observed_exit_requests=[deepcopy(r) for r in state['requests'].values()
+                        if r['proposal']['card_id']==cid and r['proposal']['leg']=='TAKE_PROFIT'
+                        and r['proposal']['action']['type']!='cancel' and r['phase']=='OBSERVED'])
         return deepcopy(result)

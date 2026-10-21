@@ -32,6 +32,7 @@ LOCAL_ENTRY_REFUSALS = frozenset((
     'PRICES_COLLAPSED_AFTER_ROUNDING', 'PRICE_PRECISION_NO_ROUNDING',
     'CURRENT_PRICE_OR_SIZE_PRECISION_REJECTED', 'OUTSIDE_LAB_SIZE_BOUNDS',
     'MARK_NOTIONAL_EXCEEDS_LAB_CAP',
+    'DOGE_PARTIAL_TARGET_COLLAPSED_AFTER_ROUNDING', 'DOGE_SPLIT_QUANTITY_UNREPRESENTABLE',
     'FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED', 'EXACT_FRESH_TESTNET_MARK_SAMPLE_REQUIRED',
     'PROSPECTIVE_ENTRY_ALREADY_CONSUMED', 'FORMULA_OVERLAP_NOT_ALLOWED',
     'G65_PENDING_ENTRY_OR_CANCEL_ALREADY_CONSUMED', 'HYPE_ORIGINAL_ENTRY_WINDOW_CONSUMED',
@@ -282,6 +283,20 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             # Insufficient emergency freshness cannot authorize a close; it
             # also must not suppress ordinary protection with its own gates.
             return None
+        from . import doge_partial_execution as partial
+        if partial.is_doge(trade['source']):
+            stops=[o for oid,o in trade['orders'].items()
+                if trade['order_legs'][oid]=='STOP' and o['status']=='OPEN']
+            if (len(stops)==1 and stops[0]['wire_order']['r'] is True
+                    and stops[0]['wire_order']['p']==trade['prices']['stop']
+                    and stops[0]['wire_order']['t']==dict(trigger=dict(isMarket=True,
+                        triggerPx=trade['prices']['stop'],tpsl='sl'))
+                    and life.number(stops[0]['wire_order']['s'])-sum(
+                        (life.number(f['quantity']) for f in stops[0]['fills']),0)==_remaining(trade)):
+                # Already reconciled original STOP coverage cannot have an
+                # uncovered-stop deadline. Stable split targets need no mark
+                # or metadata read just to repeat that read-only conclusion.
+                return None
         orders={leg:[oid for oid,v in trade['order_legs'].items() if v==leg]
                 for leg in ('ENTRY','STOP','TAKE_PROFIT')}
         if not orders['ENTRY']: return None
@@ -296,6 +311,11 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         proof=dict(metadata=context['metadata'],lock_proof=trade['condition'],
             observed_stop_requests=[deepcopy(r) for r in state['requests'].values()
                 if r['proposal']['card_id']==trade['cid'] and r['proposal']['leg']=='STOP' and r['phase']=='OBSERVED'])
+        if partial.is_doge(trade['source']):
+            proof.update(exit_trade=deepcopy(trade),
+                observed_exit_requests=[deepcopy(r) for r in state['requests'].values()
+                    if r['proposal']['card_id']==trade['cid'] and r['proposal']['leg']=='TAKE_PROFIT'
+                    and r['proposal']['action']['type']!='cancel' and r['phase']=='OBSERVED'])
         snap=boundary._owned_snapshot(owner,snap,trade['source'],proof,now)
         view=life.review([owner],snap,now_ms=now)
         allowed={'STOP_COVERAGE_MISSING','STOP_EXCEEDS_CARD_REMAINDER',
