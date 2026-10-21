@@ -330,6 +330,18 @@ def identity(raw, request, now_ms):
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
         raise DispatchError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
     leg=p['leg'];immediate=p['operation'] in ('CLOSE_PASSED_TAKE','EMERGENCY_CLOSE')
+    if p['operation'] in ('TIME_EXIT','PARTIAL_TAKE'):
+        # These markers are frozen in the durable proposal and checked against
+        # the authenticated source again at the signing boundary. They do not
+        # turn an arbitrary legacy STOP or TP into an immediate order.
+        import approved_alert_contract as approved
+        from .doge_partial_execution import RULE
+        if (p.get('source_version')!=approved.VERSION or p.get('source_rule_id')!=RULE
+                or p['symbol']!='DOGE'
+                or leg!=('STOP' if p['operation']=='TIME_EXIT' else 'TAKE_PROFIT')
+                or expected['r'] is not True or expected['t']!={'limit':{'tif':'Ioc'}}):
+            raise DispatchError('EXACT_APPROVED_DOGE_IMMEDIATE_INTENT_REQUIRED')
+        immediate=True
     typ='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
     # A fully executed TP can retain its original orderType while the venue
     # clears the active trigger fields. Bind the same signed limit intent;

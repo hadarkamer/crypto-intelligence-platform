@@ -25,7 +25,14 @@ POLICY_FIELDS = frozenset(('name', 'entry_kind', 'source_price'))
 RANK = {'ALERT': 1, 'CANCEL': 3}
 TEMPORAL = legacy.TEMPORAL
 HEX = legacy.HEX
-SPECS = legacy.SPECS
+DOGE_PARTIAL_RULE = 'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24'
+DOGE_SOURCE_CONFIG_SHA256 = 'd14e1ef6d8936143ce74e31b0d6015eb0d5051e030d12607413ea55f87b33c43'
+# Approved source observations only. This does not add a prospective-v1
+# adapter: its price/proof contract has different entry and exit semantics.
+SPECS = {**legacy.SPECS,
+    DOGE_PARTIAL_RULE: ('DOGE', 1., 3., .5, .8, False, legacy.TIMEFRAMES, False, 'BOTH')}
+DOGE_PARTIAL_POLICY_FIELDS = POLICY_FIELDS | frozenset((
+    'partial_take_price', 'partial_fraction', 'hold_until', 'stop_policy'))
 FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     'hype_row71205': ('HYPE_ROW71205_SHORT', 'HYPE'),
     'sol_g65': ('SOL_G65_K49_PROFIT_LOCK', 'SOL')}
@@ -102,16 +109,33 @@ def _validate_approved(message):
 
     policy, proof = value['policy'], value['proof']
     if value['family'] == 'maxpain':
-        legacy._keys(policy, POLICY_FIELDS, 'APPROVED_ALERT_POLICY')
-        require(policy == dict(name='APPROVED_ALERT_LIMIT_GTC_V1',
-                entry_kind='LIMIT_AFTER_ALERT',
-                source_price=f"HYPERLIQUID_{value['symbol']}_PERPETUAL_TRADE_1M"),
-                'APPROVED_ALERT_POLICY')
+        if value['rule_id'] == DOGE_PARTIAL_RULE:
+            legacy._keys(policy, DOGE_PARTIAL_POLICY_FIELDS, 'DOGE_PARTIAL_POLICY')
+            require(policy['name'] == 'DOGE_PARTIAL_TAKE_75_H24_V1'
+                    and policy['entry_kind'] == 'LIMIT_AFTER_ALERT'
+                    and policy['source_price'] == 'HYPERLIQUID_DOGE_PERPETUAL_TRADE_1M'
+                    and policy['partial_fraction'] == '0.75'
+                    and policy['stop_policy'] == 'KEEP_ORIGINAL', 'DOGE_PARTIAL_POLICY')
+            partial = positive(policy['partial_take_price'])
+            entry, take = positive(value['entry']), positive(value['take_profit'])
+            require(entry < partial < take if value['side'] == 'LONG'
+                    else take < partial < entry, 'DOGE_PARTIAL_PRICE_GEOMETRY')
+            require(moment_ms(policy['hold_until']) == times['approved_at'] - 60_000 + 86_400_000,
+                    'DOGE_PARTIAL_HOLDING_DEADLINE')
+        else:
+            legacy._keys(policy, POLICY_FIELDS, 'APPROVED_ALERT_POLICY')
+            require(policy == dict(name='APPROVED_ALERT_LIMIT_GTC_V1',
+                    entry_kind='LIMIT_AFTER_ALERT',
+                    source_price=f"HYPERLIQUID_{value['symbol']}_PERPETUAL_TRADE_1M"),
+                    'APPROVED_ALERT_POLICY')
         legacy._keys(proof, PROOF_FIELDS, 'APPROVED_ALERT_PROOF')
         require(proof['source_contract_version'] == SOURCE_CONTRACT
                 and isinstance(proof['source_config_sha256'], str)
                 and HEX.fullmatch(proof['source_config_sha256']) is not None,
                 'SOURCE_PROVENANCE')
+        if value['rule_id'] == DOGE_PARTIAL_RULE:
+            require(proof['source_config_sha256'] == DOGE_SOURCE_CONFIG_SHA256,
+                    'DOGE_PARTIAL_SOURCE_CONFIGURATION')
         require(isinstance(proof['cycle_id'], str) and 0 < len(proof['cycle_id']) <= 200
                 and proof['timeframe'] in legacy.TIMEFRAMES, 'APPROVED_ALERT_SOURCE_IDENTITY')
         target = positive(value['original_target'])

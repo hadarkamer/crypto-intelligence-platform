@@ -15,6 +15,7 @@ import time
 import uuid
 
 from . import card_lifecycle as life
+from . import doge_partial_execution as doge
 from . import experimental_live_release as releases
 from .experimental_execution_runtime import FINAL, _lane, _remaining, _working_entry_active
 from .experimental_live_state import TestnetExecutionState
@@ -232,15 +233,29 @@ class LiveSafetyProvider:
             lane = _lane(trade['account'], trade['symbol'])
             if not _fresh(state.get('snapshots', {}).get(lane, {}).get('at_ms'), self.clock()):
                 return False
-            for leg, price in (('STOP', trade['desired_stop']), ('TAKE_PROFIT', trade['prices']['take_profit'])):
-                owned = [row for oid, row in active if trade['order_legs'][oid] == leg]
+            split=doge.is_doge(trade['source'])
+            desired=(doge.desired_orders(trade) if split else
+                [('STOP',trade['desired_stop'],life.text(remaining)),
+                 ('TAKE_PROFIT',trade['prices']['take_profit'],life.text(remaining))])
+            if split and doge.timeout_due(trade['source'],self.clock()):
+                return False
+            expected={(leg,price) for leg,price,quantity in desired}
+            if split and any(trade['order_legs'][oid]!='ENTRY'
+                    and (trade['order_legs'][oid],row['wire_order']['p']) not in expected
+                    for oid,row in active):
+                return False
+            for leg, price, quantity in desired:
+                owned = [row for oid, row in active if trade['order_legs'][oid] == leg
+                    and (not split or row['wire_order']['p']==price)]
                 if len(owned) != 1:
                     return False
                 row = owned[0]
                 unfilled = life.number(row['wire_order']['s']) - sum(
                     (life.number(f['quantity']) for f in row['fills']), Decimal(0))
-                if (unfilled != remaining or row['wire_order']['r'] is not True
-                        or life.number(row['wire_order']['p']) != life.number(price)):
+                if (unfilled != life.number(quantity) or row['wire_order']['r'] is not True
+                        or life.number(row['wire_order']['p']) != life.number(price)
+                        or split and row['wire_order']['t']!=dict(
+                            trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp'))):
                     return False
         return True
 

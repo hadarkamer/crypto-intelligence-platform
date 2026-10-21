@@ -195,7 +195,9 @@ def _assess(bindings, snapshot, *, now_ms, previous):
                 final = False
                 if binding['kind'] != 'ENTRY':
                     working_exits[binding['kind']].append(_number(observed['quantity'])-fill_totals[oid])
-        protected = bool(remaining) and all(working_exits[k] == [remaining] for k in working_exits)
+        protected = (bool(remaining) and working_exits['STOP']==[remaining]
+            and bool(working_exits['TAKE_PROFIT'])
+            and sum(working_exits['TAKE_PROFIT'],Decimal(0))==remaining)
         allocations[cid] = dict(entered=format(card['entry'],'f'), exited=format(card['exit'],'f'),
             remaining=format(remaining,'f'), all_orders_final=final, quantity_coverage_observed=protected)
     if expected != actual_position:

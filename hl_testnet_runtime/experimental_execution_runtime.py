@@ -21,6 +21,7 @@ from .experimental_execution_state import ExecutionState, PostgresExecutionState
 from .risk_policy import budget, assert_new_entry_budget
 from .experimental_execution_prices import prepare as prepare_prices
 from . import experimental_shared_market as shared_market
+from . import doge_partial_execution as doge
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
@@ -304,6 +305,9 @@ class IsolatedExecutionRuntime:
             basis=life.digest(state['snapshots']),observed_at_ms=now)
         if operation == 'ENTRY' and trade.get('entry_risk'):
             proposal['entry_risk'] = deepcopy(trade['entry_risk'])
+        if doge.is_doge(trade['source']):
+            proposal['source_rule_id'] = trade['source']['rule_id']
+            proposal['source_version'] = trade['source']['version']
         return proposal
 
     def _order(self, state, trade, leg, quantity, price, meta, now, *, old_oid=None):
@@ -375,6 +379,11 @@ class IsolatedExecutionRuntime:
                 continue
             if any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') and r['proposal']['card_id']==trade['cid'] for r in state['requests'].values()):
                 continue
+            if doge.is_doge(trade['source']):
+                proposal = self._maintain_doge(state, trade, context, now)
+                if proposal is not None:
+                    return proposal
+                continue
             active = [(oid,o) for oid,o in trade['orders'].items() if o['status']=='OPEN']
             remaining = _remaining(trade)
             if remaining:
@@ -431,6 +440,119 @@ class IsolatedExecutionRuntime:
             for oid,o in active:
                 if (trade['order_legs'][oid]=='ENTRY' and retire) or (remaining==0 and trade['order_legs'][oid]!='ENTRY'):
                     return self._cancel(state,trade,oid,now)
+        return None
+
+    def _doge_ioc(self, state, trade, context, now, *, operation, quantity, price=None):
+        """One bounded, durably claimed reducing attempt; never replay unknowns."""
+        from .emergency_close import close_price, MAX_REQUESTS
+        attempts = [r for r in state['requests'].values()
+                    if r['proposal']['card_id'] == trade['cid']
+                    and r['proposal']['operation'] == operation]
+        if len(attempts) >= MAX_REQUESTS:
+            trade['exit_attempt_limit_reason'] = operation + '_RECONCILIATION_OR_LIMIT_REQUIRED'
+            return None
+        for request in attempts:
+            if request['phase'] == 'ABORTED_UNSENT' or (request['phase'] == 'OBSERVED'
+                    and request.get('terminal_state') == 'REJECTED_NO_ORDER'
+                    and request.get('observed_oid') is None):
+                continue
+            if (request['phase'] != 'OBSERVED'
+                    or trade['orders'].get(request['observed_oid'], {}).get('status') not in TERMINAL):
+                return None
+        sample = self._mark(trade, context, now, max_age=5000)
+        # A late partial TP keeps its exact frozen profit limit. Timeout/full
+        # safety closes use the established bounded marketable IOC price.
+        px = price or close_price(sample['mark_price'], trade['asset']['decimals'],
+                                  buy=trade['side'] == 'SHORT')
+        leg = 'TAKE_PROFIT' if operation == 'PARTIAL_TAKE' else 'STOP'
+        order = dict(a=trade['asset']['index'], b=trade['side']=='SHORT', p=px,
+            s=quantity, r=True, t=dict(limit=dict(tif='Ioc')),
+            c='0x'+life.digest([VERSION,trade['cid'],operation,len(attempts)])[:32])
+        result = self._proposal(state, trade, leg,
+            dict(type='order',orders=[order],grouping='na'), quantity, now, operation=operation)
+        result['sample'] = dict(mark_price=sample['mark_price'], at_ms=sample['at_ms'])
+        return result
+
+    def _maintain_doge(self, state, trade, context, now):
+        active = [(oid, row) for oid, row in trade['orders'].items() if row['status']=='OPEN']
+        entries = [(oid, row) for oid, row in active if trade['order_legs'][oid]=='ENTRY']
+        remaining = _remaining(trade)
+        if doge.timeout_due(trade['source'], now):
+            trade['entry_retired_reason'] = 'DOGE_HOLDING_DEADLINE'
+            if entries:
+                return self._cancel(state, trade, entries[0][0], now)
+            if remaining:
+                proposal = self._doge_ioc(state, trade, context, now, operation='TIME_EXIT',
+                                          quantity=life.text(remaining))
+                if proposal is not None:
+                    return proposal
+                # A bounded close can finish only part of the position. Once
+                # every attempt is terminal, retain/resize native protection
+                # for that proven remainder even if the IOC cap is exhausted.
+                # An observed but still-working IOC remains reconciliation-only.
+                if any(row['wire_order']['t']==dict(limit=dict(tif='Ioc'))
+                       for oid, row in active):
+                    return None
+        if remaining:
+            # No stop lock for this formula. Both native targets together own
+            # exactly the remaining filled quantity; the stop covers all of it.
+            trade['desired_stop'] = trade['prices']['stop']
+            wanted = doge.desired_orders(trade)
+            desired_takes = {Decimal(price) for leg, price, quantity in wanted if leg=='TAKE_PROFIT'}
+            for oid, row in active:
+                if (trade['order_legs'][oid]=='TAKE_PROFIT'
+                        and Decimal(row['wire_order']['p']) not in desired_takes):
+                    return self._cancel(state, trade, oid, now)
+            for leg, price, quantity in wanted:
+                own = [(oid, row) for oid, row in active if trade['order_legs'][oid]==leg
+                       and (leg=='STOP' or Decimal(row['wire_order']['p'])==Decimal(price))]
+                if len(own)>1:
+                    raise RuntimeError('MULTIPLE_ACTIVE_EXITS_REQUIRE_RECONCILIATION')
+                if (own and _number(own[0][1]['wire_order']['s'])
+                        - sum((_number(f['quantity']) for f in own[0][1]['fills']), Decimal(0)) == Decimal(quantity)
+                        and _number(own[0][1]['wire_order']['p']) == Decimal(price)):
+                    continue
+                sample = self._mark(trade, context, now)
+                mark = Decimal(sample['mark_price'])
+                stop, final = (Decimal(trade['prices'][key]) for key in ('stop','take_profit'))
+                full_crossed = (mark<=stop or mark>=final) if trade['side']=='LONG' else (mark>=stop or mark<=final)
+                if full_crossed:
+                    trade['emergency_reason'] = 'ORIGINAL_EXIT_CROSSED'
+                    if entries:
+                        return self._cancel(state, trade, entries[0][0], now)
+                    return self._doge_ioc(state, trade, context, now, operation='EMERGENCY_CLOSE',
+                                          quantity=life.text(remaining))
+                partial_crossed = (leg=='TAKE_PROFIT' and Decimal(price)!=final
+                                   and (mark>=Decimal(price) if trade['side']=='LONG' else mark<=Decimal(price)))
+                if partial_crossed:
+                    if entries:
+                        trade['entry_retired_reason'] = 'DOGE_PARTIAL_TARGET_REACHED'
+                        return self._cancel(state, trade, entries[0][0], now)
+                    if own:
+                        return self._cancel(state, trade, own[0][0], now)
+                    proposal = self._doge_ioc(state, trade, context, now, operation='PARTIAL_TAKE',
+                                              quantity=quantity, price=price)
+                    if proposal is not None:
+                        return proposal
+                    # The partial-target retry cap must not starve the other
+                    # frozen target or entry retirement. Unknown requests are
+                    # already fenced before this maintenance method runs.
+                    continue
+                return self._order(state, trade, leg, quantity, price, context['metadata'], now,
+                                   old_oid=own[0][0] if own else None)
+        source = state['sources'][trade['cid']]
+        retire = (not _working_entry_active(source, now) or bool(trade['exit_fills'])
+                  or trade.get('entry_retired_reason') is not None)
+        if entries and not retire:
+            mark = Decimal(self._mark(trade, context, now)['mark_price'])
+            low, high = sorted(Decimal(trade['prices'][key]) for key in ('stop','take_profit'))
+            retire = not low < mark < high
+            if retire:
+                trade['entry_retired_reason'] = 'APPROVED_ALERT_EXIT_ALREADY_REACHED'
+        for oid, row in active:
+            if (trade['order_legs'][oid]=='ENTRY' and retire
+                    or remaining==0 and trade['order_legs'][oid]!='ENTRY'):
+                return self._cancel(state, trade, oid, now)
         return None
 
     _r2732_initial = staticmethod(r2732_entry.initial)
@@ -553,6 +675,12 @@ class IsolatedExecutionRuntime:
                 prices=deepcopy(prepared['audit']))
         if entry_risk is not None:
             trade['entry_risk'] = entry_risk
+        if doge.is_doge(msg):
+            doge.partial_price(msg, decimals)
+            step = Decimal(1).scaleb(-decimals)
+            partial = (_number(quantity)*Decimal('.75')/step).to_integral_value(rounding=ROUND_DOWN)*step
+            if partial <= 0 or partial >= _number(quantity):
+                raise RuntimeError('DOGE_SPLIT_QUANTITY_UNREPRESENTABLE')
         # Reuse the independent current-risk defense with the same frozen terms.
         bracket=[]
         for leg,price in (('ENTRY',prices['entry']),('STOP',prices['stop']),('TAKE_PROFIT',prices['take_profit'])):
