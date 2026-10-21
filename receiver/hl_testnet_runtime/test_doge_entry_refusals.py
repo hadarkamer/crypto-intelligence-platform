@@ -2,7 +2,7 @@
 import unittest
 
 import approved_alert_contract as contract
-from approved_alert_fixtures import doge_partial_alert
+from doge_test_fixtures import doge_partial_alert
 from experimental_execution_fixtures import r2732_message
 from . import test_experimental_live_runtime as support
 

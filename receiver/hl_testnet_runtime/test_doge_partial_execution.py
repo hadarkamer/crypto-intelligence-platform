@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import approved_alert_contract as contract
-from approved_alert_fixtures import BASE, doge_partial_alert
+from approved_alert_fixtures import BASE
+from doge_test_fixtures import doge_partial_alert
 from . import doge_partial_execution as doge
 from . import experimental_execution_runtime as runtime
 from .experimental_execution_state import ExecutionState

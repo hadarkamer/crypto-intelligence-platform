@@ -86,7 +86,7 @@ def _fixed_exits_stable(trade, now):
     if any(leg=='ENTRY' for leg,order in active):
         return False
     if partial.is_doge(trade['source']):
-        if partial.time_exit_due(trade,now):
+        if partial.timeout_due(trade['source'],now):
             return False
         desired=partial.desired_orders(trade)
     else:

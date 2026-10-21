@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_DOWN, localcontext
 import approved_alert_contract as contract
 from . import card_lifecycle as life, price_precision
 
-RULE = 'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24'
+RULE = contract.DOGE_PARTIAL_RULE
 
 
 def is_doge(source):
@@ -33,10 +33,6 @@ def timeout_due(source, now):
     return is_doge(source) and now >= contract.moment_ms(source['policy']['hold_until'])
 
 
-def time_exit_due(trade, now):
-    return timeout_due(trade['source'], now)
-
-
 def _sum(rows):
     return sum((life.number(row['quantity'], positive=True) for row in rows), Decimal(0))
 
@@ -50,8 +46,6 @@ def take_orders(trade):
     if not remaining:
         return []
     final_price = trade['prices']['take_profit']
-    if not is_doge(trade['source']):
-        return [dict(price=final_price, quantity=life.text(remaining))]
     decimals = trade['asset']['decimals']
     partial = partial_price(trade['source'], decimals)
     with localcontext() as ctx:
@@ -76,6 +70,5 @@ def desired_orders(trade):
     if not takes:
         return []
     remaining = sum((Decimal(row['quantity']) for row in takes), Decimal(0))
-    stop = trade['prices']['stop'] if is_doge(trade['source']) else trade['desired_stop']
-    return [('STOP', stop, life.text(remaining))] + [
+    return [('STOP', trade['prices']['stop'], life.text(remaining))] + [
         ('TAKE_PROFIT', row['price'], row['quantity']) for row in takes]

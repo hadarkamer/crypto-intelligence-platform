@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import approved_alert_contract as contract
-from approved_alert_fixtures import doge_partial_alert
+from doge_test_fixtures import doge_partial_alert
 from . import card_lifecycle as life, doge_partial_execution as doge
 from . import experimental_execution_dispatch as boundary
 from . import experimental_execution_runtime as runtime

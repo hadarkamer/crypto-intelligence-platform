@@ -15,7 +15,7 @@ import experimental_execution_bridge as bridge
 import experimental_execution_transport as transport
 import doge_partial_experimental_worker as doge
 import sol_proximity_experimental_store as store
-from approved_alert_fixtures import doge_partial_alert
+from doge_test_fixtures import doge_partial_alert
 from approved_alert_producer_selftest import OutboxDatabase, approved_env
 import approved_alert_producer_selftest as pg_support
 from experimental_execution_source_audit_selftest import SCOPE, SUBSCRIPTION
@@ -179,7 +179,6 @@ class DogeApprovedTests(unittest.TestCase):
     def test_status_reports_separate_execution_bridge_truthfully(self):
         with patch.dict('os.environ',approved_env(),clear=True):
             status=doge.WORKER.status()
-        self.assertFalse(status['notification_only'])
         self.assertFalse(status['live_order_execution'])  # Producer does not submit exchange orders.
         self.assertEqual(status['execution_forwarding'],'APPROVED_ALERTS_CONFIGURED')
         with patch.dict('os.environ',{},clear=True):

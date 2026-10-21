@@ -72,8 +72,6 @@ class DogePartialWorker(parent.SolProximityWorker):
         return {**super().status(),'pending_ttl_hours':24,'holding_time_limit':24,'holding_time_limit_unit':'hours',
             'operational_state_capacity':1,'partial_take_fraction':.75,'partial_take_progress':.75,
             'stop_source_distance_multiple':1.,'profit_lock':False,'shared_target_guard_with':'DOGE_MAXPAIN_DIST15_25_LONG_TF',
-            'notification_only':not forwarding,
-            'position_sizing':'RECEIVER_FORMULA_BANKROLL' if forwarding else 'NOT_APPLICABLE_ALERT_ONLY',
             'execution_forwarding':'APPROVED_ALERTS_CONFIGURED' if forwarding else 'DISABLED_BRIDGE'}
 
 WORKER=DogePartialWorker()

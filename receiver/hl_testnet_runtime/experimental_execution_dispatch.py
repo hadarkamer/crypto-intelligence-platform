@@ -331,7 +331,7 @@ def review(request, context, *, now_ms):
             o=wire.requested_order(action)
             split=doge.is_doge(source) and p['leg']=='TAKE_PROFIT'
             if split:
-                trade=_doge_trade(owner,snap,source,context)
+                trade=context['exit_trade']  # Already verified by _owned_snapshot above.
                 targets={row['price']:life.number(row['quantity']) for row in doge.take_orders(trade)}
                 expected_quantity=targets.get(o['p'],Decimal(0))
             if life.number(p['quantity'],positive=True)!=expected_quantity:

@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_DOWN
 import unittest
 
 import approved_alert_contract as contract
-from approved_alert_fixtures import doge_partial_alert
+from doge_test_fixtures import doge_partial_alert
 from . import experimental_execution_runtime as core
 from . import experimental_execution_archive as archive
 from . import experimental_execution_cards as cards
