@@ -477,7 +477,7 @@ class IsolatedExecutionRuntime:
         active = [(oid, row) for oid, row in trade['orders'].items() if row['status']=='OPEN']
         entries = [(oid, row) for oid, row in active if trade['order_legs'][oid]=='ENTRY']
         remaining = _remaining(trade)
-        if doge.time_exit_due(trade, now):
+        if doge.timeout_due(trade['source'], now):
             trade['entry_retired_reason'] = 'DOGE_HOLDING_DEADLINE'
             if entries:
                 return self._cancel(state, trade, entries[0][0], now)
