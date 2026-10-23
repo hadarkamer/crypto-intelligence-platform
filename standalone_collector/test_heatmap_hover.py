@@ -385,6 +385,7 @@ class HoverTests(unittest.TestCase):
         if not runtime.exists():self.skipTest('prepare creates the installed runtime')
         capture=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
         self.assertEqual(capture.count('page.screenshot('),1)
+        self.assertIn("'width': 1024 if HEATMAP_MODEL == 3 else 1600",capture)
         self.assertIn("'height': 1300 if HEATMAP_MODEL == 3 else 1000",capture)
         self.assertIn('full_page=HEATMAP_MODEL != 3',capture)
         self.assertLess(capture.index('dismiss_cookie_banner(page, model=HEATMAP_MODEL)'),capture.index('page.screenshot('))
@@ -736,25 +737,27 @@ class HoverTests(unittest.TestCase):
         from playwright.sync_api import sync_playwright
         import math
         stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
-        html='''<canvas width="600" height="300" style="position:absolute;left:20px;top:40px"></canvas>
-        <div class="cg-toolti-box" style="position:absolute;left:630px;top:50px;display:none"></div>
+        html='''<canvas width="WIDTH" height="300" style="position:absolute;left:20px;top:40px"></canvas>
+        <div class="cg-toolti-box" style="position:absolute;left:30px;top:350px;display:none"></div>
         <script>{const c=document.querySelector('canvas'),t=document.querySelector('.cg-toolti-box');
-        const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,600,300);
+        const ctx=c.getContext('2d');ctx.fillStyle='rgb(68,1,84)';ctx.fillRect(0,0,c.width,300);
         c.onpointermove=e=>{const row=Math.floor(e.offsetY/HEIGHT);t.style.display='block';
           t.innerText='STAMP Price '+(1000-row)+' Liquidation Leverage '+(row+1)+'.00M'};
         c.onmouseleave=()=>t.style.display='none';}</script>'''.replace('STAMP',stamp)
         with sync_playwright() as pw,tempfile.TemporaryDirectory() as temp:
             browser=pw.chromium.launch(headless=True)
             try:
-                page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
-                for height in (1,1.5,3,5.71,10):
-                    page.set_content(html.replace('HEIGHT',str(height)))
+                page=browser.new_page(timezone_id='UTC')
+                for width,height in ((1600,5.71),(1024,1),(1024,1.5),(1024,3),(1024,5.71),(1024,10)):
+                    page.set_viewport_size({'width':width,'height':1300})
+                    page.set_content(html.replace('WIDTH',str(width-100)).replace('HEIGHT',str(height)))
                     image=Path(temp)/'grid.png';page.screenshot(path=str(image))
+                    geometry={'x':20,'y':40,'width':width-100,'height':300}
                     if height<2:
                         with self.assertRaisesRegex(HoverError,'hover_resolution_insufficient'):
-                            capture_column(page,image,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='48H')
+                            capture_column(page,image,geometry,model=3,timeframe='48H')
                     else:
-                        result=capture_column(page,image,{'x':20,'y':40,'width':600,'height':300},model=3,timeframe='48H')
+                        result=capture_column(page,image,geometry,model=3,timeframe='48H')
                         count=math.floor(299/height)+1
                         self.assertEqual([x['price'] for x in result['rows']],list(range(1000,1000-count,-1)))
                         self.assertEqual(result['total_value'],sum(range(1,count+1))*1e6)
