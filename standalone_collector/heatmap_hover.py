@@ -558,9 +558,14 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
                     pointerId:1,pointerType:'mouse',isPrimary:true,buttons:0}));
                 const text=await new Promise(resolve=>{
                     const until=Math.min(end,performance.now()+700);
+                    let timer;
+                    const finish=value=>{observer.disconnect();clearTimeout(timer);resolve(value)};
                     const check=()=>{const value=read(point.expected);
-                        if(value||performance.now()>=until)resolve(value);
-                        else setTimeout(check,25)};
+                        if(value||performance.now()>=until)finish(value)};
+                    // Read the displayed update before an expensive render delays timer polling.
+                    const observer=new MutationObserver(check);
+                    observer.observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true});
+                    timer=setTimeout(()=>finish(read(point.expected)),Math.max(1,until-performance.now()));
                     check();
                 });
                 if(!text)return null;
