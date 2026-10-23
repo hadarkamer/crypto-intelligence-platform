@@ -686,7 +686,7 @@ class HoverTests(unittest.TestCase):
             try:
                 page=browser.new_page(viewport={'width':900,'height':600},timezone_id='UTC')
                 for model,mode in ([(2,m) for m in ('normal','stuck','changed-time')] +
-                                   [(3,m) for m in ('normal','stuck','no-animation-frame','changed-time','synthetic-different','expired-model3')]):
+                                   [(3,m) for m in ('normal','stuck','no-animation-frame','delayed-poll','changed-time','synthetic-different','expired-model3')]):
                     fixture=html.replace('STUCK',str(mode=='stuck').lower())
                     if model==2:
                         fixture=fixture.replace('height="300"','height="340"')
@@ -695,11 +695,16 @@ class HoverTests(unittest.TestCase):
                         fixture=fixture.replace("if("+str(mode=='stuck').lower()+" && row===14)return;", "if(e.offsetY<40)return;if(shown&&e.offsetX>=596&&e.offsetX<597&&e.offsetY>=180&&e.offsetY<=184){t.style.display='block';t.innerText='"+stamp+" Open 986 High 987 Low 985 Close 986';return;}if("+str(mode=='stuck').lower()+" && row===14)return;")
                     if mode=='no-animation-frame':
                         # DOM updates continue while animation-frame callbacks
-                        # never run. Timer polling must still read every row.
+                        # never run. DOM observation must still read every row.
                         fixture=fixture.replace('<script>', '<script>window.requestAnimationFrame=()=>0;')
                         fixture=fixture.replace('let pending;', 'let pending,hidePending;')
                         fixture=fixture.replace('c.onpointermove=e=>{', 'c.onpointermove=e=>{clearTimeout(hidePending);')
                         fixture=fixture.replace("t.style.display='none';};", "hidePending=setTimeout(()=>t.style.display='none',80);};")
+                    if mode=='delayed-poll':
+                        # The source updates after 45ms; later polling timers are delayed by rendering.
+                        # Native calibration is unaffected. All interior rows and anchors must still pass.
+                        fixture=fixture.replace('let pending;', 'let pending,synthetic=false;const nativeTimeout=window.setTimeout;window.setTimeout=(callback,delay,...args)=>nativeTimeout(callback,synthetic&&delay===25?1000:delay,...args);')
+                        fixture=fixture.replace('c.onpointermove=e=>{', 'c.onpointermove=e=>{synthetic=!e.isTrusted;')
                     if mode=='changed-time':
                         fixture=fixture.replace("t.innerText='"+stamp+" Price '",
                             "t.innerText=(row===14?'2020-01-01 00:00':'"+stamp+"')+' Price '")
@@ -727,6 +732,7 @@ class HoverTests(unittest.TestCase):
                             self.assertEqual(snapshot['duration_seconds'],60)
                         else:
                             snapshot=capture_column(page,path,{'x':20,'y':40,'width':600,'height':340 if model==2 else 300},model=model,timeframe='24h')
+                        if mode=='delayed-poll':self.assertLess(snapshot['duration_seconds'],15)
                         self.assertEqual(len(snapshot['rows']),30)
                         self.assertEqual(snapshot['total_value'],30000000)
             finally:browser.close()
