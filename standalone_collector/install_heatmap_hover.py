@@ -60,9 +60,8 @@ def install(runtime: Path):
     text = path.read_text()
     text = once(text, "'locale': 'en-US',", "'locale': 'en-US', 'timezone_id': 'UTC',")
     # Chromium's beyond-viewport capture changed Model 3's displayed price axis
-    # (77k–87k -> 89k–99k). Fit its 800px plot plus header in the viewport.
-    # Reduce Model 3's rendering width without reducing vertical row resolution.
-    text = once(text, "'width': 1600", "'width': 1280 if HEATMAP_MODEL == 3 else 1600")
+    # (77k–87k -> 89k–99k). Keep the width and fit its 800px plot plus header in
+    # the viewport, then capture that viewport without beyond-viewport painting.
     text = once(text, "'height': 1000}", "'height': 1300 if HEATMAP_MODEL == 3 else 1000}")
     text = once(text, 'page.screenshot(path=str(path), full_page=True)',
         'page.screenshot(path=str(path), full_page=HEATMAP_MODEL != 3)')
