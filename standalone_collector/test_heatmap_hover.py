@@ -385,7 +385,7 @@ class HoverTests(unittest.TestCase):
         if not runtime.exists():self.skipTest('prepare creates the installed runtime')
         capture=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
         self.assertEqual(capture.count('page.screenshot('),1)
-        self.assertIn("'width': 1024 if HEATMAP_MODEL == 3 else 1600",capture)
+        self.assertIn("'width': 1280 if HEATMAP_MODEL == 3 else 1600",capture)
         self.assertIn("'height': 1300 if HEATMAP_MODEL == 3 else 1000",capture)
         self.assertIn('full_page=HEATMAP_MODEL != 3',capture)
         self.assertLess(capture.index('dismiss_cookie_banner(page, model=HEATMAP_MODEL)'),capture.index('page.screenshot('))
@@ -748,7 +748,7 @@ class HoverTests(unittest.TestCase):
             browser=pw.chromium.launch(headless=True)
             try:
                 page=browser.new_page(timezone_id='UTC')
-                for width,height in ((1600,5.71),(1024,1),(1024,1.5),(1024,3),(1024,5.71),(1024,10)):
+                for width,height in ((1600,5.71),(1280,1),(1280,1.5),(1280,3),(1280,5.71),(1280,10)):
                     page.set_viewport_size({'width':width,'height':1300})
                     page.set_content(html.replace('WIDTH',str(width-100)).replace('HEIGHT',str(height)))
                     image=Path(temp)/'grid.png';page.screenshot(path=str(image))
