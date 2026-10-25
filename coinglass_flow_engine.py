@@ -24,6 +24,9 @@ from bisect import bisect_left
 import os
 from pathlib import Path
 import sqlite3
+from functools import wraps
+
+import research_consumed_inputs as consumed_inputs
 
 import time_family_engine
 import market_session_baseline as session_baseline
@@ -63,6 +66,27 @@ GROUPS: Dict[str, Tuple[str, ...]] = {
 }
 MIN_BASELINE_SAMPLES = 100
 REFERENCE_TOLERANCE_MINUTES = 20
+
+
+def _observe_inputs(kind, argument_names):
+    """Observe the returned values; never fetch or change a scoring input."""
+    def decorate(function):
+        @wraps(function)
+        def observed(*args, **kwargs):
+            started = datetime.now(timezone.utc).isoformat()
+            result = function(*args, **kwargs)
+            arguments = {name: value for name, value in zip(argument_names, args)}
+            arguments.update({name: kwargs[name] for name in argument_names if name in kwargs})
+            if str(arguments.get("symbol") or "").upper() in {"ETH", "DOGE"}:
+                try:
+                    consumed_inputs.record(kind, {"arguments": arguments, "result": result,
+                        "call_started_at_utc": started,
+                        "call_finished_at_utc": datetime.now(timezone.utc).isoformat()})
+                except Exception:
+                    pass
+            return result
+        return observed
+    return decorate
 
 
 @dataclass(frozen=True)
@@ -125,6 +149,7 @@ def _as_utc(value: Any) -> Optional[datetime]:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+@_observe_inputs("flow_rows", ("symbol", "market"))
 def _load_rows(symbol: str, market: str) -> List[Dict[str, Any]]:
     table = _table(market)
     symbol = str(symbol or "").upper()
@@ -558,6 +583,7 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+@_observe_inputs("flow_analysis", ("symbol", "market"))
 def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     rows = _load_rows(symbol, market)
     quality = _quality(rows)
@@ -635,3 +661,4 @@ def stats(symbol: str, market: str) -> Dict[str, Any]:
         baseline = _baseline(rows, steps, current_end=rows[-1]["time"] if rows else None)
         result["windows"][label] = baseline.to_dict() if baseline else None
     return result
+

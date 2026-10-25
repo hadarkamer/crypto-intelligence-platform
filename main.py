@@ -69,6 +69,7 @@ import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
 import research_watch_score_capture
+import research_consumed_inputs
 import research_watch_decision_capture
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
@@ -4857,7 +4858,8 @@ async def run_watch_cycle(
                             {str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")}
                             | {"SOL"}
                         )
-                        snapshot = await asyncio.to_thread(market_confidence_engine.capture_snapshot, snapshot_symbols)
+                        with research_consumed_inputs.safe_collect() as consumed_inputs:
+                            snapshot = await asyncio.to_thread(market_confidence_engine.capture_snapshot, snapshot_symbols)
                         formula_timing["cvd_observations_by_symbol"] = {
                             symbol: value.get("timing_observation", {}) for symbol, value in snapshot.items()
                         }
@@ -4879,6 +4881,17 @@ async def run_watch_cycle(
                     except Exception as exc:
                         # Capture validation cannot suppress a valid alert.
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
+                    try:
+                        archive_context["metadata"]["consumed_inputs"] = await asyncio.to_thread(
+                            research_consumed_inputs.submit, watch_scan_id, consumed_inputs, rows=rows,
+                            snapshot={symbol: snapshot[symbol] for symbol in ("ETH", "DOGE") if symbol in snapshot},
+                            score_block=archive_context["metadata"]["operational_scores"],
+                        )
+                    except Exception as exc:
+                        archive_context["metadata"]["consumed_inputs"] = {
+                            "status": "FAILED", "reason": type(exc).__name__,
+                            "cycle_id": watch_scan_id,
+                        }
                     # Pure Combined evaluation uses exactly the original Watch
                     # input population. Delivery/lifecycle state is still read
                     # and mutated only at its original point below.
@@ -5360,6 +5373,7 @@ def max_pain_archive_status() -> Dict[str, Any]:
             ),
             "persistence": research_max_pain_archive.persistence_status(),
             "operational_scores": research_watch_score_capture.status(),
+            "consumed_inputs": research_consumed_inputs.status(),
         }
     )
     return json.loads(json.dumps(value, default=str))
@@ -8073,5 +8087,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 

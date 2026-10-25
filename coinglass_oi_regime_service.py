@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+from functools import wraps
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -23,6 +24,28 @@ import requests
 import time_family_engine
 
 import coinglass_history_backfill as history_reference
+import research_consumed_inputs as consumed_inputs
+
+
+def _observe_inputs(kind, argument_names):
+    """Record consumed values in an existing observation context only."""
+    def decorate(function):
+        @wraps(function)
+        def observed(*args, **kwargs):
+            started = datetime.now(timezone.utc).isoformat()
+            result = function(*args, **kwargs)
+            arguments = {name: value for name, value in zip(argument_names, args) if name is not None}
+            arguments.update({name: kwargs[name] for name in argument_names if name is not None and name in kwargs})
+            if str(arguments.get("symbol") or "").upper() in {"ETH", "DOGE"}:
+                try:
+                    consumed_inputs.record(kind, {"arguments": arguments, "result": result,
+                        "call_started_at_utc": started,
+                        "call_finished_at_utc": datetime.now(timezone.utc).isoformat()})
+                except Exception:
+                    pass
+            return result
+        return observed
+    return decorate
 
 try:
     import psycopg
@@ -280,6 +303,7 @@ def fetch_aggregated_oi_with_meta(symbol):
 def fetch_aggregated_oi(symbol):
     return float(fetch_aggregated_oi_with_meta(symbol)["value"])
 
+@_observe_inputs("oi_live_history", ("symbol",))
 def _history(symbol):
     init_db(); symbol=str(symbol or "").upper()
     sql="SELECT collected_at,price,open_interest_usd,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source FROM oi_regime_snapshots WHERE symbol=? ORDER BY collected_at ASC"
@@ -295,6 +319,7 @@ def _as_utc(v):
         return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(str(v).replace("Z","+00:00")).astimezone(timezone.utc)
 
+@_observe_inputs("oi_reference_selection", (None, "now", "minutes", "symbol"))
 def _reference_for_window(rows, now, minutes, symbol=None):
     """Choose the snapshot nearest to the requested window within tolerance.
 
@@ -340,6 +365,7 @@ def _reference_for_window(rows, now, minutes, symbol=None):
     ref["reference_target_time"] = target.isoformat()
     return ref
 
+@_observe_inputs("oi_window_results", ("symbol", "price", "oi", "now", None))
 def _window_results(symbol, price, oi, now=None, history_rows=None):
     now=now or datetime.now(timezone.utc); rows=_history(symbol) if history_rows is None else history_rows
     out={}
@@ -535,6 +561,7 @@ def collect_many(symbol_prices):
             out[symbol]={"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"נתוני Price + OI לא זמינים","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":str(exc),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
     return out
 
+@_observe_inputs("oi_regime", ("symbol",))
 def latest(symbol):
     symbol=str(symbol or "").upper(); rows=_history(symbol)
     if not rows: return {"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"אין נתוני Price + OI","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":"טרם נאספה דגימת Price + OI.","collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
@@ -591,3 +618,4 @@ def attach_to_opportunities(items):
         item["market_regime"]=cache[symbol]
         item["composite_conclusion"]=composite_conclusion(cache[symbol],str(item.get("side","")))
     return items
+
