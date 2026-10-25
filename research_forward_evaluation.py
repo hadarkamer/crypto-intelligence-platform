@@ -2,7 +2,7 @@
 
 This module has no database, network, account, notification or order interface.
 PASS means the supplied snapshot and observed closed-case quote windows agree;
-it never approves a strategy or claims source-eligibility/whole-stream replay.
+it never approves a strategy or claims formula-predicate/whole-stream replay.
 """
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from research_forward_source_audit import audit_source
 
-EVALUATOR_VERSION = "forward-evaluation-v1"
+EVALUATOR_VERSION = "forward-evaluation-v2"
 BOOKS = ("DOGE_only", "ETH_only", "first_per_parent")
 COMPLETED = {"OBSERVED_TARGET", "OBSERVED_STOP", "OBSERVED_TIMEOUT"}
 CHOICE_STATES = COMPLETED | {"PLANNED", "RESERVED", "OPEN", "BLOCKED_CAPACITY", "EXPIRED_NO_ENTRY_QUOTE"}
@@ -71,13 +72,14 @@ def stable_fingerprint(snapshot):
             active.pop("last_quote_received_utc", None)
         books[name] = {"choices": book.get("choices"), "closed": book.get("closed"),
                        "active": active, "reservation": book.get("reservation")}
-    first_seen = {key: value for key, value in (state.get("first_seen") or {}).items()
-                  if value.get("first_eligible_seen_utc") is not None}
+    first_seen = state.get("first_seen") or {}
     source_drift = sorted(key for key, value in (state.get("first_seen") or {}).items()
                           if value.get("last_ineligible_reason") == "POLICY_SOURCE_DRIFT")
     return _sha({"study_id": snapshot.get("study_id"), "policy_sha256": snapshot.get("policy_sha256"),
                  "config_sha256": snapshot.get("config_sha256"), "policy": policy,
-                 "books": books, "first_eligible_seen": first_seen,
+                 "books": books, "raw_first_seen": first_seen,
+                 "bootstrap_event_keys": state.get("bootstrap_event_keys"),
+                 "bootstrap_parent_ids": state.get("bootstrap_parent_ids"),
                  "source_drift": source_drift,
                  "last_observation_rejected": state.get("last_observation_rejected"),
                  "bootstrap_complete": state.get("bootstrap_complete"),
@@ -258,12 +260,13 @@ def _closed_path(case, quotes, policy, audit):
     return result
 
 
-def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=None):
+def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=None, source_evidence=None):
     """Audit supplied evidence and return finite JSON-compatible descriptions.
 
     A complete quote export for each closed case is a caller responsibility.
-    Bounds, context and declared gaps are checked; source candidate eligibility,
-    process-restart history and unobserved intragap prices are outside this scope.
+    Bounds/context/gaps and the supplied recorded source eligibility/choices are
+    checked. Formula predicates, full restart history and intragap prices are
+    outside this scope.
     """
     audit = _Audit()
     result = {"evaluator_version": EVALUATOR_VERSION, "status": "FAIL", "stage": "REVIEW_REQUIRED",
@@ -274,7 +277,9 @@ def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=No
               "dataset_fingerprint": None, "counts": {}, "books": {}, "cases": [],
               "audit_scope": {"frozen_policy_identity": True, "snapshot_arithmetic": True,
                               "provided_closed_case_observed_price_paths": True,
-                              "raw_source_eligibility_replayed": False, "complete_journal_replayed": False,
+                              "raw_source_eligibility_replayed": False, "source_choice_selection_replayed": False,
+                              "formula_predicates_recomputed": False, "upstream_capture_completeness_verified": False,
+                              "complete_journal_replayed": False,
                               "process_restart_history_replayed": False, "actual_exchange_execution": False},
               "limitations": ["Descriptive paper results only; no strategy approval or winner is selected.",
                               "Economic cases reused across books are correlated; BTC parents are the wave unit.",
@@ -426,12 +431,24 @@ def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=No
         result["changes"] = {"new_closed_case_count": len(set(unique) - previous_keys),
                              "previous_assessment_present": previous_assessment is not None}
         result["study_start_utc"] = policy["study_start_utc"]
+        source = audit_source(snapshot, source_evidence)
+        result["source_audit"] = source
+        for row in source["checks"]:
+            audit.check("RAW_SOURCE_" + row["code"], row["passed"])
+        if source["status"] == "PENDING_SOURCE_EVIDENCE":
+            audit.pending.append({"code": "MISSING_SOURCE_EVIDENCE" if source_evidence is None else "SOURCE_EVIDENCE_REQUIRES_REVIEW"})
     except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError):
         audit.check("MALFORMED_OR_INCOMPLETE_EVIDENCE", False)
     result["checks"], result["failures"], result["pending"] = audit.checks, audit.failures, audit.pending
-    result["status"] = "FAIL" if audit.failures else "PENDING_PRICE_DATA" if audit.pending else "PASS"
+    source_pending = any(p["code"] in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in audit.pending)
+    result["status"] = "FAIL" if audit.failures else "PENDING_SOURCE_EVIDENCE" if source_pending else "PENDING_PRICE_DATA" if audit.pending else "PASS"
+    source_passed = result["status"] == "PASS" and (result.get("source_audit") or {}).get("status") == "PASS"
+    result["audit_scope"]["raw_source_eligibility_replayed"] = source_passed
+    result["audit_scope"]["source_choice_selection_replayed"] = source_passed
     if result["status"] == "FAIL":
         result["stage"] = "REVIEW_REQUIRED"
+    elif result["status"] == "PENDING_SOURCE_EVIDENCE":
+        result["stage"] = "AWAITING_SOURCE_EVIDENCE"
     elif result["status"] == "PENDING_PRICE_DATA":
         result["stage"] = "AWAITING_PRICE_EVIDENCE"
     elif result["counts"].get("unique_active_cases") or result["counts"].get("book_reservations"):
@@ -452,5 +469,10 @@ def safe_summary(result):
             "source_updated_at_utc": result.get("source_updated_at_utc"),
             "counts": copy.deepcopy(result.get("counts", {})), "books": copy.deepcopy(result.get("books", {})),
             "checks": len(result.get("checks", [])), "failures": len(result.get("failures", [])),
-            "pending_price_windows": len(result.get("pending", [])), "trade_execution": False,
-            "notifications": False, "source_eligibility_replayed": False}
+            "pending_price_windows": sum(p.get("code") not in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
+            "pending_source_evidence": any(p.get("code") in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
+            "source_audit_status": (result.get("source_audit") or {}).get("status"),
+            "source_audit_summary": copy.deepcopy((result.get("source_audit") or {}).get("summary", {})),
+            "trade_execution": False, "notifications": False,
+            "source_eligibility_replayed": result.get("audit_scope", {}).get("raw_source_eligibility_replayed", False),
+            "formula_predicates_recomputed": False}

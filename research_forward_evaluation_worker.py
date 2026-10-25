@@ -25,6 +25,10 @@ LOCK_KEY = int.from_bytes(hashlib.sha256(b"forward-paper-descriptive-evaluation-
 MAX_QUOTE_PACKETS = 50000
 MAX_CASE_WINDOWS = 256
 MAX_EVIDENCE_SECONDS = 20
+MAX_SOURCE_PACKETS = 5000
+MAX_SOURCE_ROWS = 20000
+MAX_SOURCE_DECISIONS = 10000
+SOURCE_DECISION_KINDS = ("PARENT_CHOICE_FROZEN", "BOOTSTRAP_EXCLUDED", "INPUT_REJECTED", "POLICY_SOURCE_DRIFT")
 BASELINE_KEYS = ("study_id", "policy_sha256", "config_sha256", "study_start_utc")
 
 
@@ -54,6 +58,41 @@ def _time(value):
 
 def _object(value):
     return json.loads(value) if isinstance(value, str) else copy.deepcopy(value)
+
+
+def _implementation_identity(core):
+    """Bind persistent cache identity to every executable audit component."""
+    normalized = lambda path: hashlib.sha256(Path(path).read_text(encoding="utf8").replace("\r\n", "\n").encode()).hexdigest()
+    components = {"worker": normalized(__file__)}
+    core_path = getattr(core, "__file__", None)
+    components["core"] = normalized(core_path) if core_path else hashlib.sha256(core.EVALUATOR_VERSION.encode()).hexdigest()
+    source_path = Path(core_path).with_name("research_forward_source_audit.py") if core_path else None
+    if source_path is not None and source_path.exists():
+        components["source_audit"] = normalized(source_path)
+    elif core.EVALUATOR_VERSION == "forward-evaluation-v2":
+        raise ValueError("The v2 source-audit implementation is missing")
+    return _digest(components), components
+
+
+def _source_selection_marker(snapshot, counts):
+    """Quiet empty polls remain quiet; new meaningful source evidence does not."""
+    cutoff = int(snapshot["journal_seq"])
+    state = snapshot.get("state_json") or {}
+    inputs = int(counts["total_input_packets"])
+    rejected = int(counts["rejected_input_packets"])
+    candidate_total = int(counts["candidate_packets_total"])
+    marker = {key: counts.get(key) for key in (
+        "candidate_selected_packets_total", "candidate_nonempty_packets_total",
+        "candidate_bootstrap_packets_total", "candidate_packet_rows",
+        "max_candidate_selected_seq", "source_decision_rows_total",
+        "max_source_decision_seq", "rejected_input_packets", "candidate_invalid_rows_packets_total")}
+    marker["journal_prefix_contiguous"] = (int(counts["total_journal_rows"]) == cutoff and
+        int(counts.get("min_journal_seq") or 0) == 1 and int(counts.get("max_journal_seq") or 0) == cutoff)
+    marker["input_totals_consistent"] = (inputs == candidate_total + int(counts["quote_packets_total"]) and
+        inputs - rejected == int(state.get("observation_sequence", -1)))
+    marker["candidate_totals_consistent"] = candidate_total == (
+        int(counts["candidate_empty_packets_total"]) + int(counts["candidate_nonempty_packets_total"]))
+    return _digest(marker)
 
 
 def _connect(dsn):
@@ -127,6 +166,95 @@ class SourceRead:
         self.snapshot = snapshot
         self.server_time = server_time
         self.max_packets = max_packets
+        self._evidence_started = time.monotonic()
+        self._counts = None
+
+    def counts(self):
+        if self._counts is not None:
+            return copy.deepcopy(self._counts)
+        sql = """WITH base AS MATERIALIZED (
+            SELECT seq,kind,
+                CASE WHEN kind='INPUT_CANDIDATES' AND jsonb_typeof(payload_json->'rows')='array'
+                     THEN jsonb_array_length(payload_json->'rows') ELSE NULL END AS row_count,
+                CASE WHEN kind='INPUT_CANDIDATES' THEN COALESCE((payload_json->>'bootstrap')::boolean,false)
+                     ELSE false END AS bootstrap
+            FROM research_forward_paper_journal WHERE study_id=%s AND seq<=%s)
+            SELECT json_build_object(
+              'candidate_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES'),
+              'candidate_nonempty_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES' AND row_count>0),
+              'candidate_empty_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES' AND row_count=0),
+              'candidate_bootstrap_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES' AND bootstrap),
+              'candidate_selected_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES' AND (bootstrap OR row_count>0)),
+              'candidate_packet_rows',COALESCE(sum(row_count) FILTER(WHERE kind='INPUT_CANDIDATES'),0),
+              'candidate_invalid_rows_packets_total',count(*) FILTER(WHERE kind='INPUT_CANDIDATES' AND row_count IS NULL),
+              'quote_packets_total',count(*) FILTER(WHERE kind='INPUT_QUOTES'),
+              'total_input_packets',count(*) FILTER(WHERE kind IN('INPUT_CANDIDATES','INPUT_QUOTES')),
+              'rejected_input_packets',count(*) FILTER(WHERE kind='INPUT_REJECTED'),
+              'source_decision_rows_total',count(*) FILTER(WHERE kind IN('PARENT_CHOICE_FROZEN','BOOTSTRAP_EXCLUDED','INPUT_REJECTED','POLICY_SOURCE_DRIFT')),
+              'total_journal_rows',count(*),'min_journal_seq',min(seq),'max_journal_seq',max(seq),
+              'max_candidate_selected_seq',max(seq) FILTER(WHERE kind='INPUT_CANDIDATES' AND (bootstrap OR row_count>0)),
+              'max_source_decision_seq',max(seq) FILTER(WHERE kind IN('PARENT_CHOICE_FROZEN','BOOTSTRAP_EXCLUDED','INPUT_REJECTED','POLICY_SOURCE_DRIFT')))
+            FROM base"""
+        with self.connection.cursor() as cursor:
+            cursor.execute(sql, (STUDY_ID, int(self.snapshot["journal_seq"])))
+            row = cursor.fetchone()
+        counts = _object(row[0]) if row else None
+        if not isinstance(counts, dict) or counts.get("candidate_invalid_rows_packets_total", 0):
+            raise EvaluationStorageError("Malformed source candidate coverage")
+        self._counts = counts
+        return copy.deepcopy(counts)
+
+    def _records(self, sql, parameters, cap, label):
+        records = []
+        with self.connection.cursor(name="forward_evaluation_" + uuid4().hex) as cursor:
+            cursor.execute(sql, parameters)
+            while True:
+                if time.monotonic() - self._evidence_started > MAX_EVIDENCE_SECONDS:
+                    raise EvidenceLimitExceeded("Evidence read exceeded bounded duration")
+                batch = cursor.fetchmany(500)
+                if not batch:
+                    break
+                records.extend(_object(row[0]) for row in batch)
+                if len(records) > cap:
+                    raise EvidenceLimitExceeded(label + " evidence cap reached; nothing was truncated")
+        return records
+
+    def source_evidence(self, counts=None):
+        counts = counts or self.counts()
+        if (int(counts["candidate_selected_packets_total"]) > MAX_SOURCE_PACKETS or
+                int(counts["candidate_packet_rows"]) > MAX_SOURCE_ROWS or
+                int(counts["source_decision_rows_total"]) > MAX_SOURCE_DECISIONS):
+            raise EvidenceLimitExceeded("Source evidence cap reached; nothing was truncated")
+        packets_sql = """WITH ranked AS MATERIALIZED (
+            SELECT seq,kind,
+              COALESCE(sum(CASE WHEN kind='INPUT_REJECTED' THEN 1 ELSE 0 END)
+                OVER(ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) AS rejected_input_count_before
+            FROM research_forward_paper_journal WHERE study_id=%s AND seq<=%s),
+            inputs AS MATERIALIZED (
+              SELECT seq,row_number() OVER(ORDER BY seq) AS input_ordinal,
+                lead(seq) OVER(ORDER BY seq) AS next_input_seq
+              FROM ranked WHERE kind IN('INPUT_CANDIDATES','INPUT_QUOTES'))
+            SELECT json_build_object('seq',j.seq,'kind',j.kind,'utc',j.utc,'input_key',j.input_key,
+                'payload_json',j.payload_json,'payload_sha256',j.payload_sha256,'recorded_at_utc',j.recorded_at_utc,
+                'input_ordinal',i.input_ordinal,'rejected_input_count_before',r.rejected_input_count_before,
+                'observation_sequence',i.input_ordinal-r.rejected_input_count_before,'next_input_seq',i.next_input_seq)
+            FROM ranked r JOIN inputs i ON i.seq=r.seq
+              JOIN research_forward_paper_journal j ON j.study_id=%s AND j.seq=r.seq
+            WHERE r.kind='INPUT_CANDIDATES' AND
+              (COALESCE((j.payload_json->>'bootstrap')::boolean,false) OR jsonb_array_length(j.payload_json->'rows')>0)
+            ORDER BY j.seq LIMIT %s"""
+        decisions_sql = """SELECT json_build_object('seq',seq,'kind',kind,'utc',utc,'input_key',input_key,
+            'payload_json',payload_json,'payload_sha256',payload_sha256,'recorded_at_utc',recorded_at_utc)
+            FROM research_forward_paper_journal WHERE study_id=%s AND seq<=%s
+              AND kind IN('PARENT_CHOICE_FROZEN','BOOTSTRAP_EXCLUDED','INPUT_REJECTED','POLICY_SOURCE_DRIFT')
+            ORDER BY seq LIMIT %s"""
+        cutoff = int(self.snapshot["journal_seq"])
+        packets = self._records(packets_sql, (STUDY_ID, cutoff, STUDY_ID, MAX_SOURCE_PACKETS + 1), MAX_SOURCE_PACKETS, "Source packet")
+        decisions = self._records(decisions_sql, (STUDY_ID, cutoff, MAX_SOURCE_DECISIONS + 1), MAX_SOURCE_DECISIONS, "Source decision")
+        if len(packets) != int(counts["candidate_selected_packets_total"]) or len(decisions) != int(counts["source_decision_rows_total"]):
+            raise EvaluationStorageError("Source evidence coverage differs from bounded database counts")
+        return {"packets": packets, "decisions": decisions, "counts": counts,
+                "source_journal_seq": cutoff, "selection_complete": True}
 
     def quotes(self):
         windows = _case_windows(self.snapshot)
@@ -145,20 +273,7 @@ class SourceRead:
                 (j.payload_json->>'response_received_utc')::timestamptz
                 BETWEEN w.started AND w.finished)
             ORDER BY j.seq LIMIT %s"""
-        records = []
-        began = time.monotonic()
-        with self.connection.cursor(name="forward_evaluation_" + uuid4().hex) as cursor:
-            cursor.execute(sql, parameters)
-            while True:
-                if time.monotonic() - began > MAX_EVIDENCE_SECONDS:
-                    raise EvidenceLimitExceeded("Evidence read exceeded bounded duration")
-                batch = cursor.fetchmany(500)
-                if not batch:
-                    break
-                records.extend(_object(row[0]) for row in batch)
-                if len(records) > self.max_packets:
-                    raise EvidenceLimitExceeded("Evidence packet cap reached; nothing was truncated")
-        return records
+        return self._records(sql, parameters, self.max_packets, "Quote packet")
 
 
 class EvaluationStore:
@@ -336,6 +451,7 @@ class ForwardEvaluationWorker:
         self._executor = self._task = self._stop = None
         self._dsn = self._store = self._baseline = None
         self._code_sha = self._version = self._baseline_sha = None
+        self._code_components = None
         self._last_log = 0.0
         self._last_state = None
         self._health = {"study_id": STUDY_ID, "enabled": False, "configured": False,
@@ -412,9 +528,7 @@ class ForwardEvaluationWorker:
         if self._core is None:
             self._core = importlib.import_module("research_forward_evaluation")
         self._version = self._core.EVALUATOR_VERSION
-        source_path = getattr(self._core, "__file__", None)
-        source = Path(source_path).read_text(encoding="utf8").replace("\r\n", "\n") if source_path else self._version
-        self._code_sha = hashlib.sha256(source.encode()).hexdigest()
+        self._code_sha, self._code_components = _implementation_identity(self._core)
         self._baseline = json.loads((self.package / "baseline.json").read_text(encoding="utf8"))
         self._baseline_sha = _digest({key: self._baseline.get(key) for key in BASELINE_KEYS})
         self._store = self._store_factory(self._dsn)
@@ -424,7 +538,7 @@ class ForwardEvaluationWorker:
             self._log()
             return False
         self._publish(leader=True, evaluator_version=self._version, evaluator_source_sha256=self._code_sha,
-                      baseline_sha256=self._baseline_sha)
+                      evaluator_source_components=self._code_components, baseline_sha256=self._baseline_sha)
         return True
 
     def _cycle_owned(self):
@@ -461,8 +575,13 @@ class ForwardEvaluationWorker:
                 fingerprint = self._core.stable_fingerprint(snapshot)
                 if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
                     raise ValueError("Invalid evaluator fingerprint")
+                source_counts = source.counts()
+                source_marker = _source_selection_marker(snapshot, source_counts)
+                self._publish(source_candidate_packets_total=int(source_counts["candidate_packets_total"]),
+                              source_selected_packets_total=int(source_counts["candidate_selected_packets_total"]),
+                              source_selection_marker=source_marker)
                 dataset_sha = _digest({"source_fingerprint": fingerprint, "evaluator_source_sha256": self._code_sha,
-                                       "baseline_sha256": self._baseline_sha})
+                                       "baseline_sha256": self._baseline_sha, "source_selection_marker": source_marker})
                 cached = self._store.find_pass(self._version, dataset_sha)
                 if cached is not None:
                     if cached["assessment"].get("dataset_fingerprint") != fingerprint or cached["assessment"].get("evaluator_version") != self._version:
@@ -475,13 +594,14 @@ class ForwardEvaluationWorker:
                     self._log()
                     return
                 previous = self._store.latest(self._version, self._code_sha)
+                source_evidence = source.source_evidence(source_counts)
                 packets = source.quotes()
             # Close the repeatable read before CPU work or assessment writes.
             result = self._core.assess(snapshot, packets, expected_baseline=self._baseline,
-                                       previous_assessment=previous)
+                                       previous_assessment=previous, source_evidence=source_evidence)
             _json(result)  # Fail closed on nonfinite or unserializable audit output.
             status = result.get("status")
-            if status not in {"PASS", "FAIL", "PENDING_PRICE_DATA"}:
+            if status not in {"PASS", "FAIL", "PENDING_PRICE_DATA", "PENDING_SOURCE_EVIDENCE"}:
                 raise ValueError("Unknown assessment status")
             if result.get("dataset_fingerprint") != fingerprint or result.get("evaluator_version") != self._version:
                 raise ValueError("Assessment identity does not match its input")
@@ -490,8 +610,8 @@ class ForwardEvaluationWorker:
                           dataset_sha256=dataset_sha, last_assessment_utc=now,
                           assessment_source_journal_seq=int(snapshot["journal_seq"]), assessment_persisted=False,
                           assessment=self._core.safe_summary(result), last_error_type=None)
-            if status == "PENDING_PRICE_DATA":
-                self._publish(state="PENDING_PRICE_DATA", pending_attempts=self._health["pending_attempts"] + 1)
+            if status in {"PENDING_PRICE_DATA", "PENDING_SOURCE_EVIDENCE"}:
+                self._publish(state=status, pending_attempts=self._health["pending_attempts"] + 1)
                 self._log()
                 return
             metadata = {"version": self._version, "dataset_sha256": dataset_sha,
@@ -499,7 +619,13 @@ class ForwardEvaluationWorker:
                         "baseline_sha256": self._baseline_sha,
                         "source_journal_seq": int(snapshot["journal_seq"]), "policy_sha256": snapshot["policy_sha256"],
                         "runtime_commit": self._health["runtime_commit"],
-                        "evidence_sha256": _digest([[p.get("seq"), p.get("payload_sha256")] for p in packets])}
+                        "evidence_sha256": _digest({"quotes": [[p.get("seq"), p.get("payload_sha256")] for p in packets],
+                            "source_packets": [[p.get("seq"), p.get("payload_sha256"), p.get("input_ordinal"),
+                                p.get("rejected_input_count_before"), p.get("observation_sequence"), p.get("next_input_seq")]
+                                for p in source_evidence["packets"]],
+                            "source_decisions": [[p.get("seq"), p.get("payload_sha256")] for p in source_evidence["decisions"]],
+                            "source_counts": source_evidence["counts"],
+                            "source_journal_seq": source_evidence["source_journal_seq"]})}
             completed = self._store.persist(result, metadata)
             self._publish(state="AUDIT_PASSED" if status == "PASS" else "AUDIT_FAILED",
                           assessment_persisted=completed is not None,

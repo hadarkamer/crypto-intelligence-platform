@@ -4,11 +4,19 @@ import copy
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from research_forward_evaluation import assess, safe_summary, stable_fingerprint
+from research_forward_evaluation import assess as _production_assess, safe_summary, stable_fingerprint
+
+
+def assess(*args, **kwargs):
+    """Isolate snapshot/price unit tests; the real source integration is separate."""
+    with patch('research_forward_evaluation.audit_source', return_value={
+            'status': 'PASS', 'checks': [], 'failures': [], 'summary': {}}):
+        return _production_assess(*args, **kwargs)
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 def stamp(seconds): return (BASE + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
@@ -231,6 +239,19 @@ class EvaluationTests(unittest.TestCase):
         for text in ("DOGEforward-1","entry_midpoint","parent_id","input_key","first_seen"):
             self.assertNotIn(text,encoded)
         self.assertFalse(safe["strategy_approved"])
+
+    def test_real_missing_source_evidence_is_pending_and_never_claims_replay(self):
+        s,b=empty();r=_production_assess(s,[],expected_baseline=b)
+        self.assertEqual(r['status'],'PENDING_SOURCE_EVIDENCE')
+        self.assertFalse(r['audit_scope']['raw_source_eligibility_replayed'])
+        self.assertFalse(safe_summary(r)['source_eligibility_replayed'])
+
+    def test_fingerprint_detects_raw_ineligible_and_bootstrap_projection_changes(self):
+        s,b=empty()
+        for key,value in [('first_seen',{'doge:pending':{'first_eligible_seen_utc':None,'last_ineligible_reason':'PARENT_MEMBERSHIP'}}),
+                          ('bootstrap_event_keys',['doge:old']),('bootstrap_parent_ids',['old-parent'])]:
+            changed=copy.deepcopy(s);changed['state_json'][key]=value
+            self.assertNotEqual(stable_fingerprint(s),stable_fingerprint(changed))
 
 
 if __name__ == "__main__":

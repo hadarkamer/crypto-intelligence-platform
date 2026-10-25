@@ -25,7 +25,18 @@ def snapshot():
             "last_status": {"state": "OBSERVING", "leader": True,
                             "last_source_received_utc": (BASE - timedelta(seconds=2)).isoformat(),
                             "last_quote_received_utc": (BASE - timedelta(seconds=1)).isoformat()},
-            "state_json": {"books": {"DOGE_only": {"closed": []}}}}
+            "state_json": {"observation_sequence": 2, "books": {"DOGE_only": {"closed": []}}}}
+
+
+def coverage(cutoff=10):
+    return {"candidate_packets_total": 1, "candidate_nonempty_packets_total": 0,
+            "candidate_empty_packets_total": 1, "candidate_bootstrap_packets_total": 0,
+            "candidate_selected_packets_total": 0, "candidate_packet_rows": 0,
+            "candidate_invalid_rows_packets_total": 0, "quote_packets_total": 1,
+            "total_input_packets": 2, "rejected_input_packets": 0,
+            "source_decision_rows_total": 0, "total_journal_rows": cutoff,
+            "min_journal_seq": 1, "max_journal_seq": cutoff,
+            "max_candidate_selected_seq": None, "max_source_decision_seq": None}
 
 
 class FakeCore:
@@ -54,9 +65,13 @@ class FakeStoreFactory:
         self.snapshot = snapshot()
         self.server_time = BASE
         self.packets = [{"seq": 1, "payload_sha256": "quote-digest"}]
+        self.coverage = coverage()
+        self.source_packets = []
+        self.source_decisions = []
         self.rows = {}
         self.trace = []
         self.writes = 0
+        self.metadata = []
         self.closed = 0
         self.leader = True
         self.fail_after_commit = False
@@ -87,6 +102,17 @@ class FakeStoreFactory:
                         time.sleep(factory.slow_seconds)
                         return copy.deepcopy(factory.packets)
 
+                    def counts(self):
+                        factory.trace_call("coverage_read")
+                        return copy.deepcopy(factory.coverage)
+
+                    def source_evidence(self, counts):
+                        factory.trace_call("source_evidence_read")
+                        return {"packets": copy.deepcopy(factory.source_packets),
+                                "decisions": copy.deepcopy(factory.source_decisions),
+                                "counts": copy.deepcopy(counts), "selection_complete": True,
+                                "source_journal_seq": self.snapshot["journal_seq"]}
+
                 try:
                     yield Read()
                 finally:
@@ -105,6 +131,7 @@ class FakeStoreFactory:
 
             def persist(self, result, metadata):
                 factory.trace_call("persist")
+                factory.metadata.append(copy.deepcopy(metadata))
                 key = metadata["version"], metadata["dataset_sha256"]
                 prior = factory.rows.get(key)
                 if prior is None or prior["assessment"]["status"] != "PASS" and result["status"] == "PASS":
@@ -158,6 +185,11 @@ class WorkerTests(unittest.TestCase):
         self.assertLess(names.index("source_close"), names.index("persist"))
         self.assertEqual(self.worker.status()["state"], "AUDIT_PASSED")
         self.factory.snapshot["journal_seq"] = 200
+        self.factory.snapshot["state_json"]["observation_sequence"] += 190
+        for key in ("candidate_packets_total", "candidate_empty_packets_total", "quote_packets_total"):
+            self.factory.coverage[key] += 95
+        self.factory.coverage["total_input_packets"] += 190
+        self.factory.coverage["total_journal_rows"] = self.factory.coverage["max_journal_seq"] = 200
         self.cycle()
         self.assertEqual(self.factory.writes, 1)
         self.assertEqual(len(self.core.calls), 1)
@@ -165,6 +197,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.status()["state"], "WAITING_FOR_NEW_DATA")
         self.assertEqual(self.worker.status()["source_journal_seq"], 200)
         self.assertEqual(self.worker.status()["assessment_source_journal_seq"], 10)
+        self.assertEqual([x[0] for x in self.factory.trace].count("coverage_read"), 2)
+        self.assertEqual([x[0] for x in self.factory.trace].count("source_evidence_read"), 1)
 
     def test_pending_is_not_persisted_or_cached_and_can_complete(self):
         self.core.statuses = ["PENDING_PRICE_DATA", "PASS"]
@@ -175,6 +209,78 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(self.core.calls), 2)
         self.assertEqual(self.factory.writes, 1)
         self.assertEqual(self.worker.status()["state"], "AUDIT_PASSED")
+
+    def test_pending_source_evidence_is_also_retried_not_persisted(self):
+        self.core.statuses = ["PENDING_SOURCE_EVIDENCE", "PASS"]
+        self.cycle()
+        self.assertEqual(self.factory.writes, 0)
+        self.assertEqual(self.worker.status()["state"], "PENDING_SOURCE_EVIDENCE")
+        self.cycle()
+        self.assertEqual(len(self.core.calls), 2)
+        self.assertEqual(self.factory.writes, 1)
+
+    def test_new_nonempty_source_packet_invalidates_cache_without_core_projection_change(self):
+        self.cycle()
+        first = self.worker.status()["dataset_sha256"]
+        self.factory.coverage.update(candidate_nonempty_packets_total=1, candidate_empty_packets_total=0,
+                                     candidate_selected_packets_total=1, candidate_packet_rows=1,
+                                     max_candidate_selected_seq=2)
+        self.factory.source_packets = [{"seq": 2, "payload_sha256": "new", "input_ordinal": 1,
+                                        "rejected_input_count_before": 0, "observation_sequence": 1}]
+        self.cycle()
+        self.assertNotEqual(first, self.worker.status()["dataset_sha256"])
+        self.assertEqual(self.factory.writes, 2)
+        self.assertEqual(len(self.core.calls), 2)
+
+    def test_worker_and_source_audit_implementation_hashes_invalidate_cache(self):
+        source = self.package / "fixture_core.py"
+        source.write_text("core = True\n", encoding="utf8")
+        self.core.__file__ = str(source)
+        source_audit = self.package / "research_forward_source_audit.py"
+        source_audit.write_text("audit_v1 = True\n", encoding="utf8")
+        self.cycle()
+        first = self.worker.status()["dataset_sha256"]
+        self.worker._discard_owned()
+        source_audit.write_text("audit_v2 = True\n", encoding="utf8")
+        self.cycle()
+        second = self.worker.status()["dataset_sha256"]
+        self.assertNotEqual(first, second)
+        self.assertIn("source_audit", self.worker.status()["evaluator_source_components"])
+        self.worker._discard_owned()
+        worker_copy = self.package / "fixture_worker.py"
+        worker_copy.write_text("changed_worker = True\n", encoding="utf8")
+        with patch.object(module, "__file__", str(worker_copy)):
+            self.cycle()
+        self.assertNotEqual(second, self.worker.status()["dataset_sha256"])
+
+    def test_rejection_coverage_changes_marker_even_when_snapshot_recovers(self):
+        self.cycle()
+        first = self.worker.status()["dataset_sha256"]
+        self.factory.coverage["rejected_input_packets"] = 1
+        self.factory.snapshot["state_json"]["observation_sequence"] = 1
+        self.core.statuses = ["PENDING_SOURCE_EVIDENCE"]
+        self.cycle()
+        self.assertNotEqual(first, self.worker.status()["dataset_sha256"])
+        self.assertEqual(len(self.core.calls), 2)
+        self.assertEqual(self.worker.status()["state"], "PENDING_SOURCE_EVIDENCE")
+        self.assertEqual(self.factory.writes, 1)
+
+    def test_source_next_input_bounds_are_in_the_persisted_evidence_identity(self):
+        packet = {"seq": 2, "payload_sha256": "source-hash", "input_ordinal": 1,
+                  "rejected_input_count_before": 0, "observation_sequence": 1, "next_input_seq": 4}
+        self.factory.source_packets = [packet]
+        self.factory.coverage.update(candidate_nonempty_packets_total=1, candidate_empty_packets_total=0,
+                                     candidate_selected_packets_total=1, candidate_packet_rows=1,
+                                     max_candidate_selected_seq=2)
+        self.cycle()
+        evidence = self.core.calls[0][3]["source_evidence"]
+        expected = module._digest({"quotes": [[p.get("seq"), p.get("payload_sha256")] for p in self.factory.packets],
+            "source_packets": [[2, "source-hash", 1, 0, 1, 4]], "source_decisions": [],
+            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"]})
+        self.assertEqual(self.factory.metadata[0]["evidence_sha256"], expected)
+        self.assertNotEqual(expected, module._digest({"quotes": [[p.get("seq"), p.get("payload_sha256")] for p in self.factory.packets],
+            "source_packets": [[2, "source-hash", 1, 0, 1, 9]], "source_decisions": [],
+            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"]}))
 
     def test_failed_input_retries_and_only_upgrades_to_pass_once(self):
         self.core.statuses = ["FAIL", "FAIL", "PASS"]
@@ -255,14 +361,32 @@ class WorkerTests(unittest.TestCase):
 
     def test_actual_core_contract_assesses_and_quietly_reuses_verified_closed_case(self):
         import research_forward_evaluation as real_core
-        from research_forward_evaluation_selftest import empty, add_case, journals
-        source, baseline = empty()
-        _, packets = add_case(source)
+        from research_forward_source_audit_selftest import PaperStudy, policy, candidate, event, quote, capture
+        engine = PaperStudy(":memory:", policy(), resume=False)
+        try:
+            engine.observe_candidates(candidate("bootstrap", 1, [], True))
+            engine.observe_candidates(candidate("source", 10, [event()]))
+            engine.observe_quotes(quote("context", 50.2))
+            engine.observe_quotes(quote("entry", 60.2))
+            exit_packet = quote("exit", 70.2)
+            exit_packet["quotes"][0].update(bid="99.5", ask="99.5")
+            engine.observe_quotes(exit_packet)
+            source, evidence, baseline = capture(engine)
+            packets = []
+            for row in engine.db.execute("SELECT event_id,kind,utc,input_key,payload_json,payload_sha256 FROM journal WHERE kind='INPUT_QUOTES' ORDER BY event_id"):
+                record = dict(zip(("seq", "kind", "utc", "input_key", "payload_json", "payload_sha256"), row))
+                record["payload_json"] = json.loads(record["payload_json"])
+                packets.append(record)
+        finally:
+            engine.close()
         self.factory.snapshot = source
         self.factory.server_time = module._time(source["updated_at_utc"]) + timedelta(seconds=1)
         source["last_status"].update(state="OBSERVING", leader=True,
             last_source_received_utc=source["updated_at_utc"], last_quote_received_utc=source["updated_at_utc"])
-        self.factory.packets = journals(packets)
+        self.factory.packets = packets
+        self.factory.coverage = evidence["counts"]
+        self.factory.source_packets = evidence["packets"]
+        self.factory.source_decisions = evidence["decisions"]
         (self.package / "baseline.json").write_text(json.dumps(baseline), encoding="utf8")
         actual = self.make_worker(real_core)
         self.addCleanup(actual._discard_owned)
@@ -298,6 +422,12 @@ class FakeCursor:
             self.rows = [(copy.deepcopy(conn.snapshot), BASE)]
         elif "WITH WINDOWS" in upper:
             self.rows = [(copy.deepcopy(p),) for p in conn.quotes]
+        elif "'CANDIDATE_PACKETS_TOTAL'" in upper:
+            self.rows = [(copy.deepcopy(conn.coverage),)]
+        elif "WITH RANKED" in upper:
+            self.rows = [(copy.deepcopy(p),) for p in conn.source_packets]
+        elif "JSON_BUILD_OBJECT" in upper and "'PARENT_CHOICE_FROZEN'" in upper:
+            self.rows = [(copy.deepcopy(p),) for p in conn.source_decisions]
         elif upper.startswith("SELECT ASSESSMENT_JSON,COMPLETED"):
             self.rows = list(conn.cached_rows)
         elif upper.startswith("SELECT ASSESSMENT_JSON,ASSESSMENT_SHA256"):
@@ -320,6 +450,9 @@ class FakeConnection:
         self.acquired = acquired
         self.snapshot = snapshot()
         self.quotes = []
+        self.coverage = coverage()
+        self.source_packets = []
+        self.source_decisions = []
         self.cached_rows = []
         self.previous_rows = []
         self.fail_write = False
@@ -381,6 +514,73 @@ class StoreTests(unittest.TestCase):
             with store.source() as source:
                 source.quotes()
         self.assertTrue(conn.rolled_back and conn.closed)
+
+    def test_source_packet_selection_ordinals_decision_bounds_and_counts_share_read_snapshot(self):
+        conn = FakeConnection()
+        conn.coverage.update(candidate_packets_total=4, candidate_nonempty_packets_total=2,
+            candidate_empty_packets_total=2, candidate_bootstrap_packets_total=1,
+            candidate_selected_packets_total=3, candidate_packet_rows=4, quote_packets_total=4,
+            total_input_packets=8, rejected_input_packets=1, source_decision_rows_total=2,
+            max_candidate_selected_seq=9, max_source_decision_seq=10)
+        conn.source_packets = [
+            {"seq": 2, "input_ordinal": 1, "rejected_input_count_before": 0, "observation_sequence": 1,
+             "next_input_seq": 4, "payload_json": {"bootstrap": True, "rows": []}},
+            {"seq": 6, "input_ordinal": 3, "rejected_input_count_before": 1, "observation_sequence": 2,
+             "next_input_seq": 7, "payload_json": {"rows": [{"x": 1}, {"x": 2}]}},
+            {"seq": 9, "input_ordinal": 5, "rejected_input_count_before": 1, "observation_sequence": 4,
+             "next_input_seq": None, "payload_json": {"rows": [{"x": 3}, {"x": 4}]}}]
+        conn.source_decisions = [{"seq": 3, "kind": "BOOTSTRAP_EXCLUDED"}, {"seq": 5, "kind": "INPUT_REJECTED"}]
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with store.source() as source:
+            counts = source.counts()
+            evidence = source.source_evidence(counts)
+        self.assertEqual(evidence["source_journal_seq"], conn.snapshot["journal_seq"])
+        self.assertTrue(evidence["selection_complete"])
+        self.assertEqual(evidence["packets"], conn.source_packets)
+        self.assertEqual(evidence["decisions"], conn.source_decisions)
+        packet_sql, params, cursor_name = next(x for x in conn.statements if "WITH ranked" in x[0])
+        self.assertIn("row_number() OVER(ORDER BY seq)", packet_sql)
+        self.assertIn("lead(seq) OVER(ORDER BY seq) AS next_input_seq", packet_sql)
+        self.assertIn("WHERE kind IN('INPUT_CANDIDATES','INPUT_QUOTES')", packet_sql)
+        self.assertLess(packet_sql.index("row_number()"), packet_sql.index("WHERE r.kind='INPUT_CANDIDATES'"))
+        self.assertIn("i.input_ordinal-r.rejected_input_count_before", packet_sql)
+        self.assertIn("COALESCE((j.payload_json->>'bootstrap')::boolean,false)", packet_sql)
+        self.assertEqual(params, (module.STUDY_ID, 10, module.STUDY_ID, module.MAX_SOURCE_PACKETS+1))
+        self.assertTrue(cursor_name.startswith("forward_evaluation_"))
+        self.assertTrue(conn.rolled_back and conn.closed)
+        sqls = [x[0].lstrip().upper() for x in conn.statements]
+        self.assertEqual(sqls[0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        self.assertFalse(any(x.startswith(("INSERT", "UPDATE", "DELETE")) for x in sqls))
+
+    def test_source_selection_count_mismatch_never_claims_complete_evidence(self):
+        conn = FakeConnection()
+        conn.coverage.update(candidate_selected_packets_total=1)
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvaluationStorageError):
+            with store.source() as source:
+                source.source_evidence()
+        self.assertTrue(conn.closed and conn.rolled_back)
+
+    def test_source_packet_row_and_decision_caps_fail_before_partial_fetch(self):
+        for key, value in (("candidate_selected_packets_total", module.MAX_SOURCE_PACKETS+1),
+                           ("candidate_packet_rows", module.MAX_SOURCE_ROWS+1),
+                           ("source_decision_rows_total", module.MAX_SOURCE_DECISIONS+1)):
+            with self.subTest(key=key):
+                conn = FakeConnection(); conn.coverage[key] = value
+                store = module.EvaluationStore("private", connect=lambda _: conn)
+                with self.assertRaises(module.EvidenceLimitExceeded):
+                    with store.source() as source:
+                        source.source_evidence()
+                self.assertFalse(any("WITH ranked" in x[0] for x in conn.statements))
+                self.assertTrue(conn.closed and conn.rolled_back)
+
+    def test_malformed_candidate_rows_are_not_excluded_and_cached_as_success(self):
+        conn = FakeConnection(); conn.coverage["candidate_invalid_rows_packets_total"] = 1
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvaluationStorageError):
+            with store.source() as source:
+                source.counts()
+        self.assertTrue(conn.closed and conn.rolled_back)
 
     def test_cached_json_integrity_checked_before_pass_is_returned(self):
         conn = FakeConnection()
