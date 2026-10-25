@@ -18,16 +18,24 @@ from dataclasses import dataclass, asdict
 from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 import math
+import hashlib
+import pickle
 import os
 from pathlib import Path
 import sqlite3
 import time
+from collections import OrderedDict
+from contextlib import contextmanager
+from functools import wraps
+from threading import Lock
+from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
 import market_session_baseline as session_baseline
 import time_family_engine
+import research_consumed_inputs as consumed_inputs
 
 try:
     import psycopg
@@ -72,6 +80,92 @@ WINDOWS: Dict[str, int] = {
 }
 
 _REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
+# Receipts bind the exact returned cache object, including concurrent builds.
+# An evicted/missing receipt is a declared capture gap, never a fresh SQL read.
+_REFERENCE_INPUT_RECEIPTS = OrderedDict()
+_REFERENCE_INPUT_LOCK = Lock()
+_REFERENCE_INPUT_MAX_BYTES = 16 * 1024 * 1024
+_REFERENCE_INPUT_MAX_ENTRIES = 4
+
+
+def _local_input_guard(result):
+    # Process-local mutation guard only. Pickle is never loaded or persisted;
+    # portable evidence identities continue to use canonical JSON SHA-256.
+    return hashlib.sha256(pickle.dumps(result, protocol=5)).digest()
+
+
+def _observe_inputs(kind, argument_names):
+    def decorate(function):
+        @wraps(function)
+        def observed(*args, **kwargs):
+            started = datetime.now(timezone.utc).isoformat()
+            result = function(*args, **kwargs)
+            arguments = {name: value for name, value in zip(argument_names, args)}
+            arguments.update({name: kwargs[name] for name in argument_names if name in kwargs})
+            if str(arguments.get("symbol") or "").upper() in {"ETH", "DOGE"}:
+                try:
+                    consumed_inputs.record(kind, {"arguments": arguments, "result": result,
+                        "call_started_at_utc": started,
+                        "call_finished_at_utc": datetime.now(timezone.utc).isoformat()})
+                except Exception:
+                    pass
+            return result
+        return observed
+    return decorate
+
+
+@contextmanager
+def _safe_input_collection():
+    context = None
+    try:
+        context = consumed_inputs.collect()
+        collector = context.__enter__()
+    except Exception:
+        context, collector = None, None
+    try:
+        yield collector
+    finally:
+        if context is not None:
+            try:
+                context.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def _remember_reference_inputs(result, package, metadata):
+    try:
+        size = sum(len(obj.get("compressed_b64", "")) for obj in package.get("objects", {}).values())
+        if size > _REFERENCE_INPUT_MAX_BYTES:
+            return
+        with _REFERENCE_INPUT_LOCK:
+            _REFERENCE_INPUT_RECEIPTS[id(result)] = (result, package,
+                {**metadata, "result_sha256": consumed_inputs.digest(result)}, size,
+                _local_input_guard(result))
+            while (len(_REFERENCE_INPUT_RECEIPTS) > _REFERENCE_INPUT_MAX_ENTRIES or
+                   sum(item[3] for item in _REFERENCE_INPUT_RECEIPTS.values()) > _REFERENCE_INPUT_MAX_BYTES):
+                _REFERENCE_INPUT_RECEIPTS.popitem(last=False)
+    except Exception:
+        pass
+
+
+def _use_reference_inputs(symbol, result, cache_hit):
+    try:
+        with _REFERENCE_INPUT_LOCK:
+            receipt = _REFERENCE_INPUT_RECEIPTS.get(id(result))
+            if receipt is not None and receipt[0] is result:
+                _REFERENCE_INPUT_RECEIPTS.move_to_end(id(result))
+            else:
+                receipt = None
+        if receipt is not None and _local_input_guard(result) != receipt[4]:
+            receipt = None
+        if receipt is None:
+            consumed_inputs.record("capture_gap", {"symbol": symbol,
+                "source": "oi_baseline_cache", "reason": "MISSING_EXACT_GENERATION_RECEIPT"})
+        else:
+            consumed_inputs.merge(receipt[1], {**receipt[2], "cache_hit": cache_hit,
+                "used_at_utc": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
 
 
 def reference_cache_memory_counts() -> Dict[str, int]:
@@ -534,6 +628,7 @@ def backfill_all(days: int = BACKFILL_DAYS) -> Dict[str, Dict[str, Any]]:
     return {symbol: backfill_symbol(symbol, days=days) for symbol in TARGET_SYMBOLS}
 
 
+@_observe_inputs("oi_baseline_rows", ("symbol",))
 def _history_rows(symbol: str) -> List[Dict[str, Any]]:
     init_db()
     symbol = str(symbol or "").upper()
@@ -659,6 +754,7 @@ def _blend_distribution(active: Dict[str, Any], weekend: Dict[str, Any], global_
 
 
 
+@_observe_inputs("oi_historical_before", ("symbol", "target_time"))
 def historical_point_at_or_before(symbol: str, target_time: datetime) -> Optional[Dict[str, Any]]:
     """Return the newest backfilled 30m candle at or before ``target_time``.
 
@@ -702,6 +798,7 @@ def historical_point_at_or_before(symbol: str, target_time: datetime) -> Optiona
     }
 
 
+@_observe_inputs("oi_historical_nearest", ("symbol", "target_time"))
 def historical_point_nearest(symbol: str, target_time: datetime) -> Optional[Dict[str, Any]]:
     """Return the backfilled 30m candle nearest to ``target_time``.
 
@@ -762,6 +859,7 @@ def historical_point_nearest(symbol: str, target_time: datetime) -> Optional[Dic
         "source": "historical_backfill",
     }
 
+@_observe_inputs("oi_baseline_calculation", ("symbol",))
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
     """Build composition-aware Price/OI historical reference samples.
 
@@ -845,9 +943,28 @@ def get_reference_ranges(symbol: str, refresh: bool = False) -> Dict[str, Any]:
     """
     symbol = str(symbol or "").strip().upper()
     if not refresh and symbol in _REFERENCE_CACHE:
-        return _REFERENCE_CACHE[symbol]
-    result = calculate_reference_ranges(symbol)
+        result = _REFERENCE_CACHE[symbol]
+        if symbol in {"ETH", "DOGE"}:
+            _use_reference_inputs(symbol, result, True)
+        return result
+    if symbol in {"ETH", "DOGE"}:
+        started = datetime.now(timezone.utc).isoformat()
+        with _safe_input_collection() as collector:
+            result = calculate_reference_ranges(symbol)
+        try:
+            if collector is not None:
+                package = collector.package()
+                metadata = {"source": "oi_baseline_cache", "symbol": symbol,
+                    "generation_id": str(uuid4()), "computed_started_at_utc": started,
+                    "computed_finished_at_utc": datetime.now(timezone.utc).isoformat()}
+                _remember_reference_inputs(result, package, metadata)
+        except Exception:
+            pass
+    else:
+        result = calculate_reference_ranges(symbol)
     _REFERENCE_CACHE[symbol] = result
+    if symbol in {"ETH", "DOGE"}:
+        _use_reference_inputs(symbol, result, False)
     return result
 
 
@@ -891,6 +1008,7 @@ def strength_from_distribution(change_pct: Optional[float], distribution: Dict[s
     }
 
 
+@_observe_inputs("oi_window_reference", ("symbol", "label", "window_start", "window_end"))
 def reference_for_window(
     symbol: str,
     label: str,
@@ -936,3 +1054,4 @@ def reference_for_window(
 
 def calculate_all_reference_ranges() -> Dict[str, Dict[str, Any]]:
     return {symbol: get_reference_ranges(symbol, refresh=True) for symbol in TARGET_SYMBOLS}
+

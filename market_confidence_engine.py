@@ -15,14 +15,84 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import time
+import hashlib
+import pickle
+from collections import OrderedDict
+from contextlib import contextmanager
+from threading import Lock
+from uuid import uuid4
 from typing import Any, Dict, List, Optional, Tuple
 
 import coinglass_flow_engine
 import coinglass_oi_regime_service
 import time_family_engine
+import research_consumed_inputs as consumed_inputs
 
 _FLOW_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _FLOW_CACHE_TTL_SECONDS = 300
+_FLOW_INPUT_RECEIPTS = OrderedDict()
+_FLOW_INPUT_LOCK = Lock()
+_FLOW_INPUT_MAX_BYTES = 16 * 1024 * 1024
+_FLOW_INPUT_MAX_ENTRIES = 4
+
+
+def _local_input_guard(result):
+    # Never loaded or persisted: only a fast process-local mutation guard.
+    return hashlib.sha256(pickle.dumps(result, protocol=5)).digest()
+
+
+@contextmanager
+def _safe_input_collection():
+    context = None
+    try:
+        context = consumed_inputs.collect()
+        collector = context.__enter__()
+    except Exception:
+        context, collector = None, None
+    try:
+        yield collector
+    finally:
+        if context is not None:
+            try:
+                context.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def _remember_flow_inputs(cache_entry, package, metadata):
+    try:
+        size = sum(len(obj.get("compressed_b64", "")) for obj in package.get("objects", {}).values())
+        if size > _FLOW_INPUT_MAX_BYTES:
+            return
+        with _FLOW_INPUT_LOCK:
+            _FLOW_INPUT_RECEIPTS[id(cache_entry)] = (cache_entry, package,
+                {**metadata, "result_sha256": consumed_inputs.digest(cache_entry[1])}, size,
+                _local_input_guard(cache_entry[1]))
+            while (len(_FLOW_INPUT_RECEIPTS) > _FLOW_INPUT_MAX_ENTRIES or
+                   sum(item[3] for item in _FLOW_INPUT_RECEIPTS.values()) > _FLOW_INPUT_MAX_BYTES):
+                _FLOW_INPUT_RECEIPTS.popitem(last=False)
+    except Exception:
+        pass
+
+
+def _use_flow_inputs(symbol, cache_entry, cache_hit):
+    try:
+        with _FLOW_INPUT_LOCK:
+            receipt = _FLOW_INPUT_RECEIPTS.get(id(cache_entry))
+            if receipt is not None and receipt[0] is cache_entry:
+                _FLOW_INPUT_RECEIPTS.move_to_end(id(cache_entry))
+            else:
+                receipt = None
+        if receipt is not None and _local_input_guard(cache_entry[1]) != receipt[4]:
+            receipt = None
+        if receipt is None:
+            consumed_inputs.record("capture_gap", {"symbol": symbol,
+                "source": "flow_cache", "reason": "MISSING_EXACT_GENERATION_RECEIPT"})
+        else:
+            consumed_inputs.merge(receipt[1], {**receipt[2], "cache_hit": cache_hit,
+                "used_at_utc": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
 
 
 def clear_flow_cache(symbol: Optional[str] = None) -> None:
@@ -34,6 +104,8 @@ def clear_flow_cache(symbol: Optional[str] = None) -> None:
     """
     if symbol is None:
         _FLOW_CACHE.clear()
+        with _FLOW_INPUT_LOCK:
+            _FLOW_INPUT_RECEIPTS.clear()
     else:
         _FLOW_CACHE.pop(str(symbol or "").upper(), None)
 
@@ -43,9 +115,32 @@ def _cached_flow(symbol: str) -> Dict[str, Any]:
     now = time.monotonic()
     cached = _FLOW_CACHE.get(symbol)
     if cached and now - cached[0] <= _FLOW_CACHE_TTL_SECONDS:
+        if symbol in {"ETH", "DOGE"}:
+            _use_flow_inputs(symbol, cached, True)
         return deepcopy(cached[1])
-    result = coinglass_flow_engine.analyze_symbol(symbol)
-    _FLOW_CACHE[symbol] = (now, deepcopy(result))
+    if symbol in {"ETH", "DOGE"}:
+        started = datetime.now(timezone.utc).isoformat()
+        with _safe_input_collection() as collector:
+            result = coinglass_flow_engine.analyze_symbol(symbol)
+            try:
+                consumed_inputs.record("flow_cached_generation", {"arguments": {"symbol": symbol},
+                    "result": result, "call_started_at_utc": started,
+                    "call_finished_at_utc": datetime.now(timezone.utc).isoformat()})
+            except Exception:
+                pass
+        cached = (now, deepcopy(result))
+        try:
+            if collector is not None:
+                _remember_flow_inputs(cached, collector.package(), {"source": "flow_cache", "symbol": symbol,
+                    "generation_id": str(uuid4()), "computed_started_at_utc": started,
+                    "computed_finished_at_utc": datetime.now(timezone.utc).isoformat()})
+        except Exception:
+            pass
+        _FLOW_CACHE[symbol] = cached
+        _use_flow_inputs(symbol, cached, False)
+    else:
+        result = coinglass_flow_engine.analyze_symbol(symbol)
+        _FLOW_CACHE[symbol] = (now, deepcopy(result))
     return result
 
 
@@ -405,3 +500,4 @@ def attach_to_opportunities(
         item["market_evidence"] = combine(symbol, expected, regime_cache[symbol], flow_cache[symbol], maxpain_score)
         item["maxpain_confirmation"] = item["market_evidence"].get("confirmation") or {}
     return items
+
