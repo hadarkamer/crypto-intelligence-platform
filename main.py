@@ -60,6 +60,7 @@ import research_source_freshness
 import research_btc_wave_report_worker
 import research_formula_ordered_worker
 import research_forward_paper_worker
+import research_forward_evaluation_worker
 import research_ordered_experimental_worker
 import research_snapshot_sync_worker
 import google_sheets_sync
@@ -1789,10 +1790,25 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
     except Exception as exc:
         results["forward-paper"] = {"started": False, "error_type": type(exc).__name__}
     print(f"[forward-paper] startup={results['forward-paper']}", flush=True)
+    try:
+        started = await research_forward_evaluation_worker.start_worker(
+            database_url=DATABASE_URL, enabled=bool(schema_ready),
+            runtime_commit=os.getenv("RENDER_GIT_COMMIT", ""),
+        )
+        results["forward-evaluation"] = {
+            "started": bool(started), "status": research_forward_evaluation_worker.status(),
+        }
+    except Exception as exc:
+        results["forward-evaluation"] = {"started": False, "error_type": type(exc).__name__}
+    print(f"[forward-evaluation] startup={results['forward-evaluation']}", flush=True)
     return results
 
 
 async def _stop_ordered_research_workers() -> None:
+    try:
+        await research_forward_evaluation_worker.stop_worker()
+    except Exception as exc:
+        print(f"[forward-evaluation] shutdown error_type={type(exc).__name__}", flush=True)
     try:
         await research_forward_paper_worker.stop_worker()
     except Exception as exc:
@@ -6651,6 +6667,7 @@ async def health(request):
         "btc_wave_report": research_btc_wave_report_worker.WORKER.status(),
         "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
         "forward_paper": research_forward_paper_worker.status(),
+        "forward_evaluation": research_forward_evaluation_worker.status(),
         "ordered_experimental": research_ordered_experimental_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
         "google_sheets_delivery": google_sheets_sync.status(),
