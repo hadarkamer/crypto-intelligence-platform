@@ -1,8 +1,9 @@
 """Pure descriptive audit of the frozen prospective paper study.
 
 This module has no database, network, account, notification or order interface.
-PASS means the supplied snapshot and observed closed-case quote windows agree;
-it never approves a strategy or claims formula-predicate/whole-stream replay.
+PASS means the supplied snapshot, recorded source choices, retained positive
+match predicates and observed closed-case quote windows agree. It never
+approves a strategy or claims raw-market or whole-stream reconstruction.
 """
 from __future__ import annotations
 
@@ -13,8 +14,9 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from research_forward_source_audit import audit_source
+from research_forward_predicate_audit import audit_predicates
 
-EVALUATOR_VERSION = "forward-evaluation-v2"
+EVALUATOR_VERSION = "forward-evaluation-v3"
 BOOKS = ("DOGE_only", "ETH_only", "first_per_parent")
 COMPLETED = {"OBSERVED_TARGET", "OBSERVED_STOP", "OBSERVED_TIMEOUT"}
 CHOICE_STATES = COMPLETED | {"PLANNED", "RESERVED", "OPEN", "BLOCKED_CAPACITY", "EXPIRED_NO_ENTRY_QUOTE"}
@@ -260,13 +262,13 @@ def _closed_path(case, quotes, policy, audit):
     return result
 
 
-def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=None, source_evidence=None):
+def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=None, source_evidence=None, predicate_evidence=None):
     """Audit supplied evidence and return finite JSON-compatible descriptions.
 
     A complete quote export for each closed case is a caller responsibility.
     Bounds/context/gaps and the supplied recorded source eligibility/choices are
-    checked. Formula predicates, full restart history and intragap prices are
-    outside this scope.
+    checked. Predicates use retained first-positive maps queried later, without
+    reconstructing raw market inputs, full restart history or intragap prices.
     """
     audit = _Audit()
     result = {"evaluator_version": EVALUATOR_VERSION, "status": "FAIL", "stage": "REVIEW_REQUIRED",
@@ -279,6 +281,13 @@ def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=No
                               "provided_closed_case_observed_price_paths": True,
                               "raw_source_eligibility_replayed": False, "source_choice_selection_replayed": False,
                               "formula_predicates_recomputed": False, "upstream_capture_completeness_verified": False,
+                              "predicates_recomputed_from_retained_match_features": False,
+                              "raw_market_features_reconstructed": False,
+                              "full_candidate_population_recomputed": False,
+                              "first_seen_feature_capture_verified": False,
+                              "feature_capture_at_original_reader_receipt": False,
+                              "historical_database_immutability_proven": False,
+                              "unchanged_since_first_successful_v3_capture": False,
                               "complete_journal_replayed": False,
                               "process_restart_history_replayed": False, "actual_exchange_execution": False},
               "limitations": ["Descriptive paper results only; no strategy approval or winner is selected.",
@@ -286,6 +295,10 @@ def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=No
                               "Provided quote windows must be complete. Receipt/entry/exit bounds are checked.",
                               "Quote sampling does not reveal intragap first-touch or executable fills.",
                               "Stored restart/path flags are retained; restart history is not independently replayed."]}
+    result["limitations"].extend([
+        "Formula predicate replay uses retained first-positive match features queried later; the legacy predicate flag has this limited meaning.",
+        "Raw market inputs, negative candidate population, original prior scan membership and feature visibility at the original reader receipt are not reconstructed.",
+        "Application write paths retain first-match maps; historical database immutability is not proven."])
     try:
         result["dataset_fingerprint"] = stable_fingerprint(snapshot)
         policy, state = _object(snapshot["policy_json"]), _object(snapshot["state_json"])
@@ -437,18 +450,31 @@ def assess(snapshot, quote_packets, *, expected_baseline, previous_assessment=No
             audit.check("RAW_SOURCE_" + row["code"], row["passed"])
         if source["status"] == "PENDING_SOURCE_EVIDENCE":
             audit.pending.append({"code": "MISSING_SOURCE_EVIDENCE" if source_evidence is None else "SOURCE_EVIDENCE_REQUIRES_REVIEW"})
+        predicates = audit_predicates(snapshot, source_evidence, predicate_evidence, previous_assessment=previous_assessment)
+        result["predicate_audit"] = predicates
+        for row in predicates["checks"]:
+            audit.check("FORMULA_PREDICATE_" + row["code"], row["passed"], case_id=row.get("event_key"))
+        if predicates["status"] == "PENDING_PREDICATE_EVIDENCE":
+            audit.pending.append({"code": "MISSING_PREDICATE_EVIDENCE" if predicate_evidence is None else "PREDICATE_EVIDENCE_REQUIRES_REVIEW"})
     except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError):
         audit.check("MALFORMED_OR_INCOMPLETE_EVIDENCE", False)
     result["checks"], result["failures"], result["pending"] = audit.checks, audit.failures, audit.pending
     source_pending = any(p["code"] in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in audit.pending)
-    result["status"] = "FAIL" if audit.failures else "PENDING_SOURCE_EVIDENCE" if source_pending else "PENDING_PRICE_DATA" if audit.pending else "PASS"
+    predicate_pending = any(p["code"] in {"MISSING_PREDICATE_EVIDENCE", "PREDICATE_EVIDENCE_REQUIRES_REVIEW"} for p in audit.pending)
+    result["status"] = "FAIL" if audit.failures else "PENDING_SOURCE_EVIDENCE" if source_pending else "PENDING_PREDICATE_EVIDENCE" if predicate_pending else "PENDING_PRICE_DATA" if audit.pending else "PASS"
     source_passed = result["status"] == "PASS" and (result.get("source_audit") or {}).get("status") == "PASS"
     result["audit_scope"]["raw_source_eligibility_replayed"] = source_passed
     result["audit_scope"]["source_choice_selection_replayed"] = source_passed
+    predicates_passed = result["status"] == "PASS" and (result.get("predicate_audit") or {}).get("status") == "PASS"
+    result["audit_scope"]["formula_predicates_recomputed"] = predicates_passed
+    result["audit_scope"]["predicates_recomputed_from_retained_match_features"] = predicates_passed
+    result["audit_scope"]["unchanged_since_first_successful_v3_capture"] = predicates_passed and (result.get("predicate_audit") or {}).get("coverage", {}).get("unchanged_since_first_successful_v3_capture", False)
     if result["status"] == "FAIL":
         result["stage"] = "REVIEW_REQUIRED"
     elif result["status"] == "PENDING_SOURCE_EVIDENCE":
         result["stage"] = "AWAITING_SOURCE_EVIDENCE"
+    elif result["status"] == "PENDING_PREDICATE_EVIDENCE":
+        result["stage"] = "AWAITING_PREDICATE_EVIDENCE"
     elif result["status"] == "PENDING_PRICE_DATA":
         result["stage"] = "AWAITING_PRICE_EVIDENCE"
     elif result["counts"].get("unique_active_cases") or result["counts"].get("book_reservations"):
@@ -469,10 +495,17 @@ def safe_summary(result):
             "source_updated_at_utc": result.get("source_updated_at_utc"),
             "counts": copy.deepcopy(result.get("counts", {})), "books": copy.deepcopy(result.get("books", {})),
             "checks": len(result.get("checks", [])), "failures": len(result.get("failures", [])),
-            "pending_price_windows": sum(p.get("code") not in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
+            "pending_price_windows": sum(p.get("code") not in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW", "MISSING_PREDICATE_EVIDENCE", "PREDICATE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
             "pending_source_evidence": any(p.get("code") in {"MISSING_SOURCE_EVIDENCE", "SOURCE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
             "source_audit_status": (result.get("source_audit") or {}).get("status"),
             "source_audit_summary": copy.deepcopy((result.get("source_audit") or {}).get("summary", {})),
+            "pending_predicate_evidence": any(p.get("code") in {"MISSING_PREDICATE_EVIDENCE", "PREDICATE_EVIDENCE_REQUIRES_REVIEW"} for p in result.get("pending", [])),
+            "predicate_audit_status": (result.get("predicate_audit") or {}).get("status"),
+            "predicate_audit_summary": copy.deepcopy((result.get("predicate_audit") or {}).get("summary", {})),
             "trade_execution": False, "notifications": False,
             "source_eligibility_replayed": result.get("audit_scope", {}).get("raw_source_eligibility_replayed", False),
-            "formula_predicates_recomputed": False}
+            "formula_predicates_recomputed": result.get("audit_scope", {}).get("formula_predicates_recomputed", False),
+            "predicates_recomputed_from_retained_match_features": result.get("audit_scope", {}).get("predicates_recomputed_from_retained_match_features", False),
+            "raw_market_features_reconstructed": False,
+            "unchanged_since_first_successful_v3_capture": result.get("audit_scope", {}).get("unchanged_since_first_successful_v3_capture", False),
+            "feature_capture_at_original_reader_receipt": False}
