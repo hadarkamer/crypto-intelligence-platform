@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import research_consumed_inputs as consumed_inputs
+
 
 ROOT = Path(__file__).resolve().parent
 TIMEFRAMES = ('12h', '24h', '48h', '3d', '1w', '2w', '1m')
@@ -169,7 +171,7 @@ class PureCombinedBoundaryTests(unittest.TestCase):
 
 class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
     async def run_cycle(self, *, capture_error=False, precompute_error=False, dual_error=False,
-                        general=True, empty=False):
+                        general=True, empty=False, consumed_error=False):
         scope = helper_scope()
         order, archives, captures = [], [], []
         items = [] if empty else [item(), item(timeframe='24h', score=99, distance=None), item('ADA', score=99)]
@@ -246,6 +248,14 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         def specials(*args, **kwargs):
             order.append('special_lifecycle')
             return []
+        def consumed_submit(cycle_id, collector, **kwargs):
+            order.append('capture_consumed_inputs')
+            self.assertIs(kwargs['rows'], rows)
+            self.assertEqual(kwargs['snapshot'], {})
+            self.assertIs(kwargs['score_block'], base_bundle)
+            if consumed_error:
+                raise ValueError('fixture consumed-input capture failure')
+            return {'status': 'STUBBED_CAPTURE', 'collector_available': collector is not None}
         scope['market_confidence_engine'].capture_snapshot = Mock(return_value={})
         scope['research_event_runtime'] = SimpleNamespace(
             set_watch_context=Mock(side_effect=context_scope['set_watch_context']),
@@ -259,6 +269,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             'collect_live_rows_for_watch': collect, '_ensure_watch_derivatives_ready': AsyncMock(return_value={}),
             'research_watch_score_capture': SimpleNamespace(failure=failed,
                 prepare=Mock(return_value=(items, {}, {})), build_bundle=Mock(return_value=base_bundle)),
+            'research_consumed_inputs': SimpleNamespace(safe_collect=consumed_inputs.safe_collect,
+                submit=Mock(side_effect=consumed_submit)),
             'research_watch_decision_capture': SimpleNamespace(failure=failed,
                 error_reason=lambda exc: type(exc).__name__, build_bundle=Mock(side_effect=decision_bundle)),
             'dual_cvd65_delivery': SimpleNamespace(record_watch=AsyncMock(side_effect=dual_record), drain=AsyncMock(return_value=0)),
@@ -370,6 +382,29 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['combined_sent'], 1)
         self.assertTrue(bot.bot.send_message.await_count)
 
+    async def test_consumed_input_submission_failure_preserves_delivery(self):
+        scope, result, order, archives, captures, bot, base = await self.run_cycle(consumed_error=True)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(archives[0]['consumed_inputs']['status'], 'FAILED')
+        self.assertEqual(archives[0]['consumed_inputs']['reason'], 'ValueError')
+        self.assertIs(archives[0]['operational_scores'], base)
+        scope['research_consumed_inputs'].submit.assert_called_once()
+        scope['dual_cvd65_delivery'].record_watch.assert_awaited_once()
+        self.assertEqual(result['combined_sent'], 1)
+        self.assertTrue(bot.bot.send_message.await_count)
+
+    async def test_consumed_input_context_setup_failure_preserves_delivery(self):
+        with patch.object(consumed_inputs, 'Collector', side_effect=RuntimeError('fixture capture setup failure')):
+            scope, result, order, archives, captures, bot, base = await self.run_cycle()
+        self.assertTrue(result['ok'], result)
+        self.assertFalse(archives[0]['consumed_inputs']['collector_available'])
+        scope['research_consumed_inputs'].submit.assert_called_once()
+        self.assertIsNone(scope['research_consumed_inputs'].submit.call_args.args[1])
+        self.assertIs(archives[0]['operational_scores'], base)
+        scope['dual_cvd65_delivery'].record_watch.assert_awaited_once()
+        self.assertEqual(result['combined_sent'], 1)
+        self.assertTrue(bot.bot.send_message.await_count)
+
     async def test_successfully_empty_precompute_is_observed_and_never_recomputed(self):
         scope, result, order, archives, captures, bot, base = await self.run_cycle(empty=True)
         self.assertTrue(result['ok'], result)
@@ -408,3 +443,4 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
