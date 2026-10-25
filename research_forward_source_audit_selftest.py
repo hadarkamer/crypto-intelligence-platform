@@ -16,11 +16,22 @@ MARKERS = ['alert_time_utc','delivered_at_utc','event_created_at_utc','match_cre
 def stamp(seconds):return (BASE+timedelta(seconds=seconds)).isoformat().replace('+00:00','Z')
 def digest(v):return hashlib.sha256(json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
 
+def definitions():
+    result=[]
+    for symbol in ('DOGE','ETH'):
+        conditions=([{'feature':'sequence.30m.liquidity.entry_ordinal','operator':'==','value':2}] if symbol=='DOGE' else
+                    [{'feature':family+'.aligned_score','operator':'>=','value':65} for family in ('price_oi','futures_cvd')])
+        key=symbol.lower()+'-c'
+        definition={'candidate':{'formula_id':key,'conditions':conditions,
+                    'research_orientation':'NORMAL' if symbol=='DOGE' else 'INVERSE'},'formula_version':'test-formula'}
+        result.append({'candidate_key':key,'definition':definition,'definition_sha256':digest(definition),'formula_version':'test-formula'})
+    return result
+
 def policy():
     return {'version':'synthetic-source-contract','study_start_utc':stamp(0),
             'books':['DOGE_only','ETH_only','first_per_parent'], 'required_markers':MARKERS,
-            'scopes':[{'scope_key':'doge','candidate_key':'doge-c','symbol':'DOGE','direction':'SHORT','window_minutes':720,'candidate_definition_sha256':'doge-definition','formula_version':'test-formula'},
-                      {'scope_key':'eth','candidate_key':'eth-c','symbol':'ETH','direction':'LONG','window_minutes':60,'candidate_definition_sha256':'eth-definition','formula_version':'test-formula'}],
+            'scopes':[{'scope_key':'doge','candidate_key':'doge-c','symbol':'DOGE','direction':'SHORT','window_minutes':720,'candidate_definition_sha256':definitions()[0]['definition_sha256'],'formula_version':'test-formula'},
+                      {'scope_key':'eth','candidate_key':'eth-c','symbol':'ETH','direction':'LONG','window_minutes':60,'candidate_definition_sha256':definitions()[1]['definition_sha256'],'formula_version':'test-formula'}],
             'barrier_bps':50,'net_cost_pp':.1,'entry_expiry_seconds':90,'quote_max_elapsed_seconds':5,
             'max_quote_gap_seconds':30,'quote_source':'BINANCE_SPOT_BOOK_TICKER'}
 
@@ -28,11 +39,13 @@ def event(event_id=1,symbol='DOGE',parent='p1',at=5,marker=None):
     marker=at if marker is None else marker
     r={'scope_key':symbol.lower(),'candidate_key':symbol.lower()+'-c','symbol':symbol,
        'formula_direction':'SHORT' if symbol=='DOGE' else 'LONG', 'event_id':event_id,'source_event_id':event_id,
-       'candidate_definition_sha256':symbol.lower()+'-definition','candidate_formula_version':'test-formula',
+       'candidate_definition_sha256':definitions()[0 if symbol=='DOGE' else 1]['definition_sha256'],'candidate_formula_version':'test-formula',
        'event_kind':'ALERT','delivery_status':'DELIVERED','membership_status':'LIVE','parent_evidence_eligible':True,
        'btc_parent_movement_id':parent,'parent_start_time_utc':stamp(.5),'match_source_time_utc':stamp(at)}
     r.update({key:stamp(marker) for key in MARKERS})
     r['alert_time_utc']=stamp(at);r['parent_confirmed_at_utc']=stamp(.5);r['btc_observed_close_utc']=stamp(at-.1)
+    r.update({'source_direction':'SHORT','sheet_snapshot_id':'scan-'+str(event_id),'current_price':100,
+              'event_type':'MAX_PAIN_ALERT' if symbol=='DOGE' else 'PRICE_OI_ALERT'})
     return r
 
 def candidate(poll,received,rows,bootstrap=False,requested=None):
@@ -90,6 +103,32 @@ def source_fixture():
         return capture(engine)
     finally:engine.close()
 
+def predicate_envelope(s,e):
+    """Artificial retained positive maps, separate from source gate evidence."""
+    matches={}
+    for packet in e['packets']:
+        for row in packet['payload_json']['rows']:
+            key=row['scope_key']+':'+str(row['event_id'])
+            features={'event.symbol':row['symbol'],'event.analysis_direction':row['source_direction'],
+                      'event.event_type':row['event_type']}
+            if row['symbol']=='DOGE':
+                features.update({'sequence.30m.liquidity.entry_ordinal':2,
+                    'sequence.30m.liquidity.prior_scans_same_symbol_direction':1,'sequence.capture_status':'READY',
+                    'sequence.current_families':'LIQUIDITY','liquidity.capture_status':'VALID',
+                    'liquidity.source_contract':'MAX_PAIN_CAPTURED_AMOUNTS_V1','liquidity.selected_share_pct':60,
+                    'liquidity.selected_amount':60,'liquidity.opposite_amount':40,'liquidity.alignment':'SUPPORTS'})
+            else:
+                for family,score in [('price_oi',70),('futures_cvd',80)]:
+                    features.update({family+'.aligned_score':score,family+'.total_score':score,family+'.direction':'SHORT'})
+            matches[key]={'scope_key':row['scope_key'],'candidate_key':row['candidate_key'],'event_id':row['event_id'],
+                'match_present':True,'source_present':True,'symbol':row['symbol'],'direction':row['formula_direction'],
+                'alert_time_utc':row['match_source_time_utc'],'snapshot_id':row['sheet_snapshot_id'],'entry_price':row['current_price'],
+                'created_at_utc':row['match_created_at_utc'],'decision_features':features,'source_direction':row['source_direction'],
+                'source_symbol':row['symbol'],'source_alert_time_utc':row['alert_time_utc']}
+    return {'matches':list(matches.values()),'definitions':definitions(),'expected_keys':sorted(matches),
+            'counts':{'expected_positive_keys':len(matches),'matched_rows':len(matches),'definition_rows':2},
+            'source_journal_seq':s['journal_seq'],'read_utc':stamp(100),'extraction_complete':True}
+
 
 class SourceTests(unittest.TestCase):
     def setUp(self):
@@ -103,11 +142,12 @@ class SourceTests(unittest.TestCase):
 
     def test_empty_bootstrap_and_full_core_integration(self):
         from research_forward_evaluation import assess,safe_summary
-        s,e,b=source_fixture();a=assess(s,[],expected_baseline=b,source_evidence=e)
+        s,e,b=source_fixture();a=assess(s,[],expected_baseline=b,source_evidence=e,predicate_evidence=predicate_envelope(s,e))
         self.assertEqual(a['status'],'PASS',a['failures'])
         self.assertTrue(a['audit_scope']['raw_source_eligibility_replayed'])
         self.assertTrue(a['audit_scope']['source_choice_selection_replayed'])
-        self.assertFalse(a['audit_scope']['formula_predicates_recomputed'])
+        self.assertTrue(a['audit_scope']['formula_predicates_recomputed'])
+        self.assertFalse(a['audit_scope']['raw_market_features_reconstructed'])
         self.assertFalse(a['audit_scope']['complete_journal_replayed'])
         self.assertTrue(safe_summary(a)['source_eligibility_replayed'])
 

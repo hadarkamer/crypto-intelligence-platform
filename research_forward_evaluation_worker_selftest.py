@@ -68,6 +68,11 @@ class FakeStoreFactory:
         self.coverage = coverage()
         self.source_packets = []
         self.source_decisions = []
+        self.predicate_evidence_value = {"matches": [{"scope_key": "doge", "event_id": 1,
+            "decision_features": {"condition": 2, "non_condition": "retained"}, "source_direction": "SHORT"}],
+            "definitions": [{"candidate_key": "doge-c", "formula_version": "v1", "definition": {"value": 1}}],
+            "expected_keys": ["doge:1"], "counts": {"expected_positive_keys": 1,
+            "matched_rows": 1, "definition_rows": 1}, "extraction_complete": True}
         self.rows = {}
         self.trace = []
         self.writes = 0
@@ -113,6 +118,13 @@ class FakeStoreFactory:
                                 "counts": copy.deepcopy(counts), "selection_complete": True,
                                 "source_journal_seq": self.snapshot["journal_seq"]}
 
+                    def predicate_evidence(self):
+                        factory.trace_call("predicate_evidence_read")
+                        result = copy.deepcopy(factory.predicate_evidence_value)
+                        result.update(source_journal_seq=self.snapshot["journal_seq"],
+                                      read_utc=self.server_time.isoformat())
+                        return result
+
                 try:
                     yield Read()
                 finally:
@@ -128,6 +140,14 @@ class FakeStoreFactory:
             def latest(self, *_):
                 factory.trace_call("latest")
                 return copy.deepcopy(next(reversed(factory.rows.values()))["assessment"]) if factory.rows else None
+
+            def latest_pass(self, version, policy_sha):
+                factory.trace_call("latest_pass")
+                for row in reversed(factory.rows.values()):
+                    result = row["assessment"]
+                    if result["status"] == "PASS" and result["evaluator_version"] == version and result["policy_sha256"] == policy_sha:
+                        return copy.deepcopy(result)
+                return None
 
             def persist(self, result, metadata):
                 factory.trace_call("persist")
@@ -199,6 +219,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.status()["assessment_source_journal_seq"], 10)
         self.assertEqual([x[0] for x in self.factory.trace].count("coverage_read"), 2)
         self.assertEqual([x[0] for x in self.factory.trace].count("source_evidence_read"), 1)
+        self.assertEqual([x[0] for x in self.factory.trace].count("predicate_evidence_read"), 2)
+        names = [x[0] for x in self.factory.trace]
+        self.assertLess(names.index("predicate_evidence_read"), names.index("find_pass"))
 
     def test_pending_is_not_persisted_or_cached_and_can_complete(self):
         self.core.statuses = ["PENDING_PRICE_DATA", "PASS"]
@@ -219,6 +242,47 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(self.core.calls), 2)
         self.assertEqual(self.factory.writes, 1)
 
+    def test_pending_predicate_evidence_is_retried_without_persistence(self):
+        self.core.statuses = ["PENDING_PREDICATE_EVIDENCE", "PASS"]
+        self.cycle()
+        self.assertEqual(self.factory.writes, 0)
+        self.assertEqual(self.worker.status()["state"], "PENDING_PREDICATE_EVIDENCE")
+        self.cycle()
+        self.assertEqual(len(self.core.calls), 2)
+        self.assertEqual(self.factory.writes, 1)
+
+    def test_each_current_retained_field_invalidates_pass_before_cache_lookup(self):
+        mutations = (
+            lambda e: e["matches"][0]["decision_features"].update(non_condition="changed"),
+            lambda e: e["definitions"][0]["definition"].update(value=2),
+            lambda e: e["definitions"][0].update(formula_version="v2"),
+            lambda e: e["matches"][0].update(source_direction="LONG"),
+            lambda e: e["matches"][0].update(source_symbol="ETH"),
+        )
+        self.cycle()
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                before = self.worker.status()["dataset_sha256"]
+                calls = len(self.core.calls)
+                mutate(self.factory.predicate_evidence_value)
+                self.cycle()
+                self.assertNotEqual(before, self.worker.status()["dataset_sha256"])
+                self.assertEqual(len(self.core.calls), calls + 1)
+
+    def test_new_predicate_read_time_and_cutoff_alone_reuse_cached_pass(self):
+        self.cycle()
+        before = self.worker.status()["dataset_sha256"]
+        self.factory.server_time += timedelta(seconds=1)
+        self.factory.snapshot["journal_seq"] = 12
+        self.factory.snapshot["state_json"]["observation_sequence"] = 4
+        self.factory.coverage.update(total_journal_rows=12, max_journal_seq=12,
+                                    candidate_packets_total=2, candidate_empty_packets_total=2,
+                                    quote_packets_total=2, total_input_packets=4)
+        self.cycle()
+        self.assertEqual(before, self.worker.status()["dataset_sha256"])
+        self.assertEqual(len(self.core.calls), 1)
+        self.assertEqual([x[0] for x in self.factory.trace].count("predicate_evidence_read"), 2)
+
     def test_new_nonempty_source_packet_invalidates_cache_without_core_projection_change(self):
         self.cycle()
         first = self.worker.status()["dataset_sha256"]
@@ -238,6 +302,8 @@ class WorkerTests(unittest.TestCase):
         self.core.__file__ = str(source)
         source_audit = self.package / "research_forward_source_audit.py"
         source_audit.write_text("audit_v1 = True\n", encoding="utf8")
+        predicate_audit = self.package / "research_forward_predicate_audit.py"
+        predicate_audit.write_text("predicate_v1 = True\n", encoding="utf8")
         self.cycle()
         first = self.worker.status()["dataset_sha256"]
         self.worker._discard_owned()
@@ -246,12 +312,18 @@ class WorkerTests(unittest.TestCase):
         second = self.worker.status()["dataset_sha256"]
         self.assertNotEqual(first, second)
         self.assertIn("source_audit", self.worker.status()["evaluator_source_components"])
+        self.assertIn("predicate_audit", self.worker.status()["evaluator_source_components"])
+        self.worker._discard_owned()
+        predicate_audit.write_text("predicate_v2 = True\n", encoding="utf8")
+        self.cycle()
+        third = self.worker.status()["dataset_sha256"]
+        self.assertNotEqual(second, third)
         self.worker._discard_owned()
         worker_copy = self.package / "fixture_worker.py"
         worker_copy.write_text("changed_worker = True\n", encoding="utf8")
         with patch.object(module, "__file__", str(worker_copy)):
             self.cycle()
-        self.assertNotEqual(second, self.worker.status()["dataset_sha256"])
+        self.assertNotEqual(third, self.worker.status()["dataset_sha256"])
 
     def test_rejection_coverage_changes_marker_even_when_snapshot_recovers(self):
         self.cycle()
@@ -276,11 +348,13 @@ class WorkerTests(unittest.TestCase):
         evidence = self.core.calls[0][3]["source_evidence"]
         expected = module._digest({"quotes": [[p.get("seq"), p.get("payload_sha256")] for p in self.factory.packets],
             "source_packets": [[2, "source-hash", 1, 0, 1, 4]], "source_decisions": [],
-            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"]})
+            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"],
+            "predicate_evidence": self.core.calls[0][3]["predicate_evidence"]})
         self.assertEqual(self.factory.metadata[0]["evidence_sha256"], expected)
         self.assertNotEqual(expected, module._digest({"quotes": [[p.get("seq"), p.get("payload_sha256")] for p in self.factory.packets],
             "source_packets": [[2, "source-hash", 1, 0, 1, 9]], "source_decisions": [],
-            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"]}))
+            "source_counts": evidence["counts"], "source_journal_seq": evidence["source_journal_seq"],
+            "predicate_evidence": self.core.calls[0][3]["predicate_evidence"]}))
 
     def test_failed_input_retries_and_only_upgrades_to_pass_once(self):
         self.core.statuses = ["FAIL", "FAIL", "PASS"]
@@ -359,9 +433,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.factory.writes, 0)
         self.core.assess = original
 
-    def test_actual_core_contract_assesses_and_quietly_reuses_verified_closed_case(self):
+    def test_actual_core_contract_pins_retained_evidence_retries_drift_and_recovers(self):
         import research_forward_evaluation as real_core
-        from research_forward_source_audit_selftest import PaperStudy, policy, candidate, event, quote, capture
+        from research_forward_source_audit_selftest import PaperStudy, policy, candidate, event, quote, capture, predicate_envelope
         engine = PaperStudy(":memory:", policy(), resume=False)
         try:
             engine.observe_candidates(candidate("bootstrap", 1, [], True))
@@ -377,6 +451,8 @@ class WorkerTests(unittest.TestCase):
                 record = dict(zip(("seq", "kind", "utc", "input_key", "payload_json", "payload_sha256"), row))
                 record["payload_json"] = json.loads(record["payload_json"])
                 packets.append(record)
+            engine.observe_candidates(candidate("new-source", 80, [event(event_id=2, parent="p2", at=75)]))
+            newer_source, newer_evidence, _ = capture(engine)
         finally:
             engine.close()
         self.factory.snapshot = source
@@ -387,6 +463,7 @@ class WorkerTests(unittest.TestCase):
         self.factory.coverage = evidence["counts"]
         self.factory.source_packets = evidence["packets"]
         self.factory.source_decisions = evidence["decisions"]
+        self.factory.predicate_evidence_value = predicate_envelope(source, evidence)
         (self.package / "baseline.json").write_text(json.dumps(baseline), encoding="utf8")
         actual = self.make_worker(real_core)
         self.addCleanup(actual._discard_owned)
@@ -397,6 +474,53 @@ class WorkerTests(unittest.TestCase):
         self.cycle(actual)
         self.assertEqual(actual.status()["state"], "WAITING_FOR_NEW_DATA")
         self.assertEqual(self.factory.writes, 1)
+        original = copy.deepcopy(self.factory.predicate_evidence_value)
+        # Every formula condition still passes; only an unrelated retained map
+        # field changes. The successful prior record remains the pin baseline.
+        self.factory.predicate_evidence_value["matches"][0]["decision_features"]["test.non_condition"] = 123
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "AUDIT_FAILED")
+        failed = next(reversed(self.factory.rows.values()))["assessment"]
+        self.assertEqual([failure["code"] for failure in failed["predicate_audit"]["failures"]], ["RETAINED_RECORD_UNCHANGED"])
+        self.assertEqual(self.factory.writes, 2)
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "AUDIT_FAILED")
+        self.assertEqual(self.factory.writes, 2)
+        self.assertEqual(actual.status()["assessment"]["predicate_audit_summary"]["previous_pinned_keys"], 1)
+        self.factory.predicate_evidence_value = original
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "WAITING_FOR_NEW_DATA")
+        self.assertEqual(self.factory.writes, 2)
+        self.assertEqual([name for name, _ in self.factory.trace].count("latest_pass"), 5)
+        # A later successful capture adds a positive key. Restoring the older
+        # exact input must not erase that newer pin via its existing PASS cache.
+        newer_source["last_status"].update(state="OBSERVING", leader=True,
+            last_source_received_utc=newer_source["updated_at_utc"], last_quote_received_utc=newer_source["updated_at_utc"])
+        self.factory.snapshot = newer_source
+        self.factory.coverage = newer_evidence["counts"]
+        self.factory.source_packets = newer_evidence["packets"]
+        self.factory.source_decisions = newer_evidence["decisions"]
+        self.factory.predicate_evidence_value = predicate_envelope(newer_source, newer_evidence)
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "AUDIT_PASSED")
+        self.assertEqual(self.factory.writes, 3)
+        self.factory.snapshot = source
+        self.factory.coverage = evidence["counts"]
+        self.factory.source_packets = evidence["packets"]
+        self.factory.source_decisions = evidence["decisions"]
+        self.factory.predicate_evidence_value = original
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "AUDIT_FAILED")
+        self.assertTrue(actual.status()["pin_context_identity_applied"])
+        self.assertEqual(self.factory.writes, 4)
+        failed = next(reversed(self.factory.rows.values()))["assessment"]
+        self.assertIn("PREVIOUS_POSITIVE_REMAINS_PRESENT", [f["code"] for f in failed["predicate_audit"]["failures"]])
+        self.assertEqual(failed["worker_evaluation_context"]["input_dataset_sha256"],
+                         actual.status()["input_dataset_sha256"])
+        self.assertIsNotNone(failed["worker_evaluation_context"]["prospective_pin_baseline_sha256"])
+        self.cycle(actual)
+        self.assertEqual(actual.status()["state"], "AUDIT_FAILED")
+        self.assertEqual(self.factory.writes, 4)
 
 
 class FakeCursor:
@@ -422,6 +546,15 @@ class FakeCursor:
             self.rows = [(copy.deepcopy(conn.snapshot), BASE)]
         elif "WITH WINDOWS" in upper:
             self.rows = [(copy.deepcopy(p),) for p in conn.quotes]
+        elif "PREDICATE_DEFINITIONS" in upper or "PREDICATE_MATCHES" in upper:
+            records = conn.definition_rows if "PREDICATE_DEFINITIONS" in upper else conn.match_rows
+            if upper.startswith("SELECT COUNT(*)"):
+                byte_count = conn.predicate_bytes_override
+                if byte_count is None:
+                    byte_count = sum(len(module._json(r).encode()) for r in records)
+                self.rows = [(len(records), byte_count)]
+            else:
+                self.rows = [(copy.deepcopy(r),) for r in records]
         elif "'CANDIDATE_PACKETS_TOTAL'" in upper:
             self.rows = [(copy.deepcopy(conn.coverage),)]
         elif "WITH RANKED" in upper:
@@ -453,6 +586,9 @@ class FakeConnection:
         self.coverage = coverage()
         self.source_packets = []
         self.source_decisions = []
+        self.definition_rows = []
+        self.match_rows = []
+        self.predicate_bytes_override = None
         self.cached_rows = []
         self.previous_rows = []
         self.fail_write = False
@@ -467,6 +603,22 @@ class FakeConnection:
 
 
 class StoreTests(unittest.TestCase):
+    def predicate_connection(self):
+        conn = FakeConnection()
+        conn.snapshot["policy_json"]["scopes"] = [
+            {"scope_key": "doge", "candidate_key": "doge-c"},
+            {"scope_key": "eth", "candidate_key": "eth-c"}]
+        # Includes both an old bootstrap and an incomplete first observation.
+        conn.snapshot["state_json"]["first_seen"] = {"doge:1": {"bootstrap": True}, "eth:2": {"incomplete": True}}
+        conn.definition_rows = [{"candidate_key": key, "definition_present": True,
+            "formula_version": "v1", "definition_sha256": "retained-hash", "definition": {"all": "retained"}}
+            for key in ("doge-c", "eth-c")]
+        conn.match_rows = [{"scope_key": scope, "candidate_key": scope+"-c", "event_id": event,
+            "match_present": True, "source_present": True, "decision_features": {"condition": 2, "extra": 9},
+            "source_direction": "SHORT", "source_symbol": scope.upper(), "source_alert_time_utc": BASE.isoformat()}
+            for scope,event in (("doge", 1), ("eth", 2))]
+        return conn
+
     def test_default_driver_bounds_and_timezone(self):
         connect = Mock(return_value=object())
         with patch.dict("sys.modules", {"psycopg": SimpleNamespace(connect=connect)}):
@@ -552,6 +704,96 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sqls[0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         self.assertFalse(any(x.startswith(("INSERT", "UPDATE", "DELETE")) for x in sqls))
 
+    def test_retained_predicates_left_join_all_first_seen_keys_in_same_read_only_snapshot(self):
+        conn = self.predicate_connection()
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with store.source() as source:
+            evidence = source.predicate_evidence()
+        self.assertEqual(evidence["expected_keys"], ["doge:1", "eth:2"])
+        self.assertEqual(evidence["counts"], {"expected_positive_keys": 2, "matched_rows": 2, "definition_rows": 2})
+        self.assertEqual(evidence["matches"], conn.match_rows)
+        self.assertEqual(evidence["definitions"], conn.definition_rows)
+        self.assertEqual(evidence["source_journal_seq"], 10)
+        self.assertEqual(evidence["read_utc"], BASE.isoformat())
+        self.assertTrue(evidence["extraction_complete"])
+        sql = "\n".join(row[0] for row in conn.statements)
+        self.assertIn("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", sql)
+        self.assertIn("LEFT JOIN research_ordered_formula_matches", sql)
+        self.assertIn("LEFT JOIN research_events", sql)
+        self.assertIn("LEFT JOIN research_ordered_formula_candidates", sql)
+        for field in ("m.decision_features", "e.direction AS source_direction", "e.symbol AS source_symbol",
+                      "e.alert_time_utc AS source_alert_time_utc", "c.formula_version,c.definition_sha256,c.definition"):
+            self.assertIn(field, sql)
+        self.assertIn("octet_length(row_to_json(p)::text)", sql)
+        self.assertNotIn("feature_screens", sql)
+        self.assertTrue(conn.rolled_back and conn.closed)
+        self.assertFalse(any(s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for s, _, _ in conn.statements))
+
+    def test_missing_retained_match_and_definition_are_preserved_as_explicit_left_rows(self):
+        conn = self.predicate_connection()
+        conn.match_rows[0] = {"scope_key": "doge", "candidate_key": "doge-c", "event_id": 1,
+                              "match_present": False, "source_present": False, "decision_features": None}
+        conn.definition_rows[0] = {"candidate_key": "doge-c", "definition_present": False,
+                                   "formula_version": None, "definition_sha256": None, "definition": None}
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with store.source() as source:
+            evidence = source.predicate_evidence()
+        self.assertEqual(len(evidence["matches"]), 2)
+        self.assertEqual(len(evidence["definitions"]), 2)
+        self.assertEqual(evidence["counts"]["matched_rows"], 1)
+        self.assertEqual(evidence["counts"]["definition_rows"], 1)
+        self.assertIs(evidence["matches"][0]["match_present"], False)
+
+    def test_predicate_row_limit_is_checked_before_any_wide_data_query(self):
+        conn = self.predicate_connection()
+        conn.snapshot["state_json"]["first_seen"] = {"doge:"+str(i): {} for i in range(module.MAX_PREDICATE_ROWS)}
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvidenceLimitExceeded):
+            with store.source() as source:
+                source.predicate_evidence()
+        self.assertFalse(any("PREDICATE_" in s for s, _, _ in conn.statements))
+
+    def test_predicate_byte_budget_fails_during_server_preflight_before_wide_fetch(self):
+        conn = self.predicate_connection()
+        conn.predicate_bytes_override = module.MAX_PREDICATE_BYTES + 1
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvidenceLimitExceeded):
+            with store.source() as source:
+                source.predicate_evidence()
+        self.assertTrue(any("PREDICATE_DEFINITIONS" in s for s, _, _ in conn.statements))
+        self.assertFalse(any(s.startswith("SELECT row_to_json(p)") for s, _, _ in conn.statements))
+        self.assertTrue(conn.closed and conn.rolled_back)
+
+    def test_duplicate_retained_rows_exceed_exact_requested_bound(self):
+        conn = self.predicate_connection()
+        conn.match_rows.append(copy.deepcopy(conn.match_rows[0]))
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvidenceLimitExceeded):
+            with store.source() as source:
+                source.predicate_evidence()
+        self.assertFalse(any(s.startswith("SELECT row_to_json(p)") and "PREDICATE_MATCHES" in s
+                             for s, _, _ in conn.statements))
+
+    def test_predicate_fetch_shares_existing_evidence_deadline(self):
+        conn = self.predicate_connection()
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        with self.assertRaises(module.EvidenceLimitExceeded):
+            with store.source() as source:
+                source._evidence_started = time.monotonic() - module.MAX_EVIDENCE_SECONDS - 1
+                source.predicate_evidence()
+        self.assertFalse(any("PREDICATE_" in s for s, _, _ in conn.statements))
+
+    def test_unknown_or_noncanonical_raw_positive_id_never_gets_silently_dropped(self):
+        for key in ("unknown:1", "doge:01", "doge:-1", "doge:"+str(1 << 63)):
+            with self.subTest(key=key):
+                conn = self.predicate_connection()
+                conn.snapshot["state_json"]["first_seen"] = {key: {}}
+                store = module.EvaluationStore("private", connect=lambda _: conn)
+                with self.assertRaises(module.EvaluationStorageError):
+                    with store.source() as source:
+                        source.predicate_evidence()
+                self.assertFalse(any("PREDICATE_" in s for s, _, _ in conn.statements))
+
     def test_source_selection_count_mismatch_never_claims_complete_evidence(self):
         conn = FakeConnection()
         conn.coverage.update(candidate_selected_packets_total=1)
@@ -595,6 +837,29 @@ class StoreTests(unittest.TestCase):
         conn.previous_rows = [(result, "wrong-digest")]
         with self.assertRaises(module.EvaluationStorageError):
             store.latest("v1", "source-code")
+        store.close()
+
+    def test_latest_successful_pin_requires_verified_pass_version_and_policy_without_code_filter(self):
+        conn = FakeConnection()
+        store = module.EvaluationStore("private", connect=lambda _: conn)
+        store.acquire()
+        result = {"status": "PASS", "evaluator_version": "forward-evaluation-v3", "policy_sha256": "frozen"}
+        conn.previous_rows = [(result, module._digest(result))]
+        self.assertEqual(store.latest_pass("forward-evaluation-v3", "frozen"), result)
+        sql, parameters, _ = conn.statements[-1]
+        self.assertIn("audit_status='PASS'", sql)
+        self.assertIn("policy_sha256=%s", sql)
+        self.assertNotIn("evaluator_source_sha256", sql)
+        self.assertEqual(parameters, (module.STUDY_ID, "forward-evaluation-v3", "frozen"))
+        for key, value in (("status", "FAIL"), ("evaluator_version", "old"), ("policy_sha256", "other")):
+            with self.subTest(key=key):
+                altered = {**result, key: value}
+                conn.previous_rows = [(altered, module._digest(altered))]
+                with self.assertRaises(module.EvaluationStorageError):
+                    store.latest_pass("forward-evaluation-v3", "frozen")
+        conn.previous_rows = [(result, "corrupted")]
+        with self.assertRaises(module.EvaluationStorageError):
+            store.latest_pass("forward-evaluation-v3", "frozen")
         store.close()
 
     def test_persistence_sql_only_upgrades_failed_rows_and_sanitizes_errors(self):

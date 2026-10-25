@@ -13,8 +13,10 @@ from research_forward_evaluation import assess as _production_assess, safe_summa
 
 
 def assess(*args, **kwargs):
-    """Isolate snapshot/price unit tests; the real source integration is separate."""
+    """Isolate price units; real source/predicate integration is separate."""
     with patch('research_forward_evaluation.audit_source', return_value={
+            'status': 'PASS', 'checks': [], 'failures': [], 'summary': {}}), patch(
+            'research_forward_evaluation.audit_predicates', return_value={
             'status': 'PASS', 'checks': [], 'failures': [], 'summary': {}}):
         return _production_assess(*args, **kwargs)
 
