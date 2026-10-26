@@ -25,6 +25,10 @@ import maxpain_cvd_short_alert
 import google_sheets_sync
 import research_event_capture
 import research_event_store
+try:
+    import research_combined_liquidity_shadow as combined_liquidity_shadow
+except Exception:
+    combined_liquidity_shadow = None
 
 SCORE_CONFIRMATION_THRESHOLD = 65.0
 SCORE_CONFIRMATION_RESET_THRESHOLD = 60.0
@@ -218,6 +222,7 @@ def _emit(
     delivery_status: str = "",
     delivery_attempted_at_utc: Any = None,
     delivered_at_utc: Any = None,
+    combined_liquidity_source: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     """Always retain a bounded memory copy; persist only on an explicit live hook.
 
@@ -256,6 +261,30 @@ def _emit(
                 )
             except Exception as exc:
                 print(f"[google-sheets] alert enqueue failed open: {exc!r}", flush=True)
+        # This independent observation is never part of the event body or the
+        # existing feature contract. Only the queue-accepted branch submits
+        # an observation; durable source insertion remains unconfirmed here.
+        if (event.event_kind == "ALERT" and event.symbol == "DOGE"
+                and event.event_type == "COMBINED_CONFIRMATION"
+                and str(delivery_status or "").strip().upper() == "DELIVERED"
+                and combined_liquidity_source is not None):
+            try:
+                if combined_liquidity_shadow is not None:
+                    if queued:
+                        combined_liquidity_shadow.submit_producer_capture(
+                            event, combined_liquidity_source,
+                            event_writer_queue_accepted=bool(queued),
+                            capture_stage=capture_stage,
+                            delivery_status=delivery_status,
+                            delivery_attempted_at_utc=delivery_attempted_at_utc,
+                            delivered_at_utc=delivered_at_utc,
+                        )
+                    else:
+                        combined_liquidity_shadow.record_skip("SOURCE_NOT_QUEUED")
+            except Exception:
+                # Observation failure cannot suppress or replace the original
+                # sink/queue result, delivery action or caller exception.
+                pass
     return bool(remembered or queued)
 
 
@@ -834,6 +863,7 @@ def capture_combined_confirmation(
             delivery_status=delivery_status,
             delivery_attempted_at_utc=delivery_attempted_at_utc,
             delivered_at_utc=delivered_at_utc,
+            **({"combined_liquidity_source": top_item} if event.symbol == "DOGE" else {}),
         )
     except Exception as exc:
         print(f"[research-dry-run] combined capture failed: {exc!r}", flush=True)
@@ -987,8 +1017,18 @@ def status() -> Dict[str, Any]:
         "tracked_magnet_states": len(_MAGNET_STATE),
         "tracked_combined_states": len(_COMBINED_STATE),
         "persistence": persistence,
+        "combined_liquidity_shadow": _combined_liquidity_shadow_status(),
     })
     return base
+
+
+def _combined_liquidity_shadow_status() -> Dict[str, Any]:
+    try:
+        if combined_liquidity_shadow is not None:
+            return combined_liquidity_shadow.status()
+    except Exception:
+        pass
+    return {"state": "UNAVAILABLE", "enrolled_in_existing_study": False}
 
 
 def events(limit: int = 50) -> List[Dict[str, Any]]:
