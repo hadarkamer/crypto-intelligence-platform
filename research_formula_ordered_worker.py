@@ -1,6 +1,7 @@
 """Recurring descriptive Formula evidence over ordered v7 and causal BTC parents."""
 from __future__ import annotations
 import asyncio
+from contextlib import contextmanager
 import json
 from datetime import datetime,timezone
 import os
@@ -14,6 +15,10 @@ import research_ordered_validation_store as validation_store
 import research_ordered_inverse_store as inverse_store
 import research_ordered_experimental_store as experimental_store
 import research_ordered_experimental_worker as experimental_worker
+try:
+    import research_doge_sequence_capture as doge_sequence_capture
+except Exception:
+    doge_sequence_capture = None
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -30,6 +35,52 @@ _ROW_LIMIT=max(100,min(5000,int(os.getenv('RESEARCH_ORDERED_FORMULA_ROW_LIMIT','
 _PASS_SECONDS=max(10,min(50,float(os.getenv('RESEARCH_ORDERED_FORMULA_PASS_SECONDS','40'))))
 _STATEMENT_TIMEOUT_MS=max(15000,min(60000,int(os.getenv('RESEARCH_ORDERED_FORMULA_STATEMENT_TIMEOUT_MS','30000'))))
 _LOCK_ID=588794583090203387
+
+
+@contextmanager
+def _sequence_capture_observation():
+    """Keep observation payloads out of intake summaries and health metrics."""
+    context = observation = None
+    try:
+        if doge_sequence_capture is not None:
+            context = doge_sequence_capture.observe()
+            observation = context.__enter__()
+    except Exception:
+        context = None
+    try:
+        yield observation
+    except BaseException:
+        try:
+            if doge_sequence_capture is not None and observation is not None:
+                doge_sequence_capture.discard(observation)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            if context is not None:
+                # Body failures are explicitly discarded above. No observer
+                # exit can suppress or replace the original worker failure.
+                context.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def _sequence_capture_submit(observation):
+    try:
+        if doge_sequence_capture is not None and observation is not None:
+            doge_sequence_capture.submit_after_commit(observation)
+    except Exception:
+        pass
+
+
+def _sequence_capture_status():
+    try:
+        if doge_sequence_capture is not None:
+            return doge_sequence_capture.status()
+    except Exception:
+        pass
+    return {'state':'UNAVAILABLE','live_effect':'NONE'}
 
 
 _TIMING_PREFIX = '[ORDERED_FORMULA_TIMING]'
@@ -165,6 +216,7 @@ class ResearchFormulaOrderedWorker:
             'question_map_count':len(questions.question_map()),'feature_version':questions.VERSION,
             'live_effect':'NONE','remaining_validation':'New v3 freezes use an exactly bound acceptance policy; later genuine BTC waves and complete captured features are required. A separate authorized experimental notification worker never executes trades.',
             'sheet_publication':store.publication.status(),
+            'doge_sequence_inputs':_sequence_capture_status(),
             'metrics':dict(self.metrics)}
 
     async def start(self)->bool:
@@ -248,16 +300,21 @@ class ResearchFormulaOrderedWorker:
                 catalog=store.register_catalog(conn)
                 _timing_phase(timing, 'intake')
                 self.metrics['last_stage']='INGEST_MATCHES'
-                summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
-                _timing_phase(timing, 'inverse')
-                self.metrics['last_stage']='INVERSE_RECONCILIATION'
-                inverse_available=inverse_store.available(conn)
-                if inverse_available:
-                    for event_id in sorted(set(summary.pop('inverse_source_event_ids',[]))|set(store.inverse_reconciliation_ids(conn,limit=32))):
-                        inverse_store.request_inverse(conn,{'event_id':event_id},now=now)
-                else:
-                    summary['inverse_status']='BLOCKED_MISSING_MIGRATION_033'
-                conn.commit()
+                with _sequence_capture_observation() as observation:
+                    summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
+                    _timing_phase(timing, 'inverse')
+                    self.metrics['last_stage']='INVERSE_RECONCILIATION'
+                    inverse_available=inverse_store.available(conn)
+                    if inverse_available:
+                        for event_id in sorted(set(summary.pop('inverse_source_event_ids',[]))|set(store.inverse_reconciliation_ids(conn,limit=32))):
+                            inverse_store.request_inverse(conn,{'event_id':event_id},now=now)
+                    else:
+                        summary['inverse_status']='BLOCKED_MISSING_MIGRATION_033'
+                    conn.commit()
+                # The existing intake+inverse transaction is durable at this
+                # point and the frozen observation is closed. A later scope
+                # failure cannot roll it back; no earlier failure can enqueue.
+                _sequence_capture_submit(observation)
                 _timing_phase(timing, 'queue')
                 self.metrics['last_stage']='PREPARE_SCOPE_QUEUE'
                 validation_available=validation_store.schema_status(conn)['schema_present']

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
 from uuid import uuid4
@@ -10,6 +11,10 @@ import research_sheet_outbox
 import research_sheet_publication as publication
 import research_ordered_question_catalog as questions
 import research_ordered_question_store as question_store
+try:
+    import research_doge_sequence_capture as doge_sequence_capture
+except Exception:
+    doge_sequence_capture = None
 
 PARENT_POLICY = 'btc-parent-close-reversal-200bps-v1'
 WORKER_KEY = 'ordered-v7-captured-questions-periods-v3'
@@ -21,6 +26,75 @@ PERIODS = {
 }
 SOURCE_START_UTC = min(PERIODS.values())
 REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes','research_ordered_question_map','research_ordered_feature_screens','research_ordered_question_runs','research_event_scan_cursors','research_ordered_scope_schedule_state')
+
+
+def _sequence_capture_record(kind, payload):
+    """Observation failures cannot change the existing research transaction."""
+    try:
+        if doge_sequence_capture is not None and (
+                kind == 'current_events' or _sequence_capture_active()):
+            doge_sequence_capture.record(kind, payload)
+    except Exception:
+        pass
+
+
+def _sequence_capture_active():
+    try:
+        observation = doge_sequence_capture.current() if doge_sequence_capture is not None else None
+        return observation is not None and observation.doge_event_count > 0
+    except Exception:
+        return False
+
+
+def _sequence_capture_tick():
+    try:
+        if not _sequence_capture_active():
+            return None, None
+        return datetime.now(timezone.utc).isoformat(), time.perf_counter_ns()
+    except Exception:
+        return None, None
+
+
+def _sequence_capture_read(conn, read_id, phase, started, rows, **details):
+    # A named metadata cursor and the subsequent projection SELECTs are
+    # different reads. These brackets describe the calls actually consumed;
+    # they do not imply a shared database snapshot or a measured COMMIT time.
+    try:
+        if not _sequence_capture_active():
+            return
+        finished = _sequence_capture_tick()
+        isolation = getattr(conn, 'isolation_level', None)
+        _sequence_capture_record('history_read', {
+            'read_id': read_id, 'phase': phase,
+            'started_at_utc': started[0], 'finished_at_utc': finished[0],
+            'started_monotonic_ns': started[1], 'finished_monotonic_ns': finished[1],
+            'configured_isolation_level': getattr(isolation, 'name', isolation),
+            'database_snapshot_claim': 'NONE; server default is unmeasured when configured isolation is null',
+            'rows': rows, **details,
+        })
+    except Exception:
+        pass
+
+
+def _sequence_capture_is_doge(event):
+    try:
+        return str(event.get('symbol') or '').upper() == 'DOGE'
+    except Exception:
+        return False
+
+
+def _sequence_capture_candidate(outcomes, candidate, event, matched):
+    try:
+        inverse = candidate.get('research_orientation') == 'INVERSE'
+        outcomes.append({
+            'candidate_key': candidate['formula_id'], 'matched': bool(matched),
+            'orientation': 'INVERSE' if inverse else 'NORMAL',
+            'source_direction': event['direction'],
+            'routed_direction': ({'LONG':'SHORT','SHORT':'LONG'}[event['direction']]
+                                 if inverse else event['direction']) if matched else None,
+        })
+    except Exception:
+        pass
 
 
 def canonical(value: Any) -> str:
@@ -182,9 +256,20 @@ def load_sequence_history(conn:Any,changed:Mapping[int,Mapping[str,Any]])->tuple
           AND e.direction IN ('LONG','SHORT')
         ORDER BY e.event_id'''
     history=[]
-    with conn.cursor(name='ordered_sequence_'+uuid4().hex) as source_cursor:
-        source_cursor.execute(query,tuple(value for interval in merged for value in interval))
-        while source:=source_cursor.fetchmany(512):
+    source_cursor_name='ordered_sequence_'+uuid4().hex
+    parameters=tuple(value for interval in merged for value in interval)
+    with conn.cursor(name=source_cursor_name) as source_cursor:
+        read_started=_sequence_capture_tick()
+        source_cursor.execute(query,parameters)
+        _sequence_capture_read(conn,source_cursor_name,'metadata_execute',read_started,[],
+            source_cursor_name=source_cursor_name,query=query,parameters=parameters,requested_windows=merged)
+        while True:
+            read_started=_sequence_capture_tick()
+            source=source_cursor.fetchmany(512)
+            _sequence_capture_read(conn,source_cursor_name,'metadata_fetch',read_started,source,
+                source_cursor_name=source_cursor_name,fetch_size=512,exhausted=not bool(source))
+            if not source:
+                break
             stats['sequence_source_pages']+=1
             stats['sequence_source_rows']+=len(source)
             source_by_id={old['event_id']:old for old in source}
@@ -193,8 +278,13 @@ def load_sequence_history(conn:Any,changed:Mapping[int,Mapping[str,Any]])->tuple
                 raise RuntimeError('bounded causal sequence source order changed')
             for start in range(0,len(ids),64):
                 batch=ids[start:start+64]
-                projected=conn.execute('''WITH picked AS MATERIALIZED (
-                    SELECT unnest(%s::bigint[]) AS event_id) '''+_EVENT_PROJECT,(batch,)).fetchall()
+                projection_query='''WITH picked AS MATERIALIZED (
+                    SELECT unnest(%s::bigint[]) AS event_id) '''+_EVENT_PROJECT
+                read_started=_sequence_capture_tick()
+                projected=conn.execute(projection_query,(batch,)).fetchall()
+                _sequence_capture_read(conn,source_cursor_name,'projection',read_started,projected,
+                    source_cursor_name=source_cursor_name,query=projection_query,parameters=(batch,),
+                    requested_event_ids=batch)
                 if [event['event_id'] for event in projected]!=batch or any(
                     any(event[key]!=source_by_id[event['event_id']][key]
                         for key in ('symbol','direction','alert_time_utc'))
@@ -333,25 +423,50 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
                 event['causal_past_features']=past_features.flatten_event_features(past[event_id],event['direction'])
                 event['causal_past_feature_sha256']=past[event_id].get('feature_sha256')
     changed = question_store.new_feature_events(conn,unique)
+    # Only events the existing screen adapter actually elected to recompute
+    # enter this observation. Recording never forces a historical rescreen.
+    _sequence_capture_record('current_events',{'events':[
+        event for event in changed.values() if _sequence_capture_is_doge(event)]})
+    _sequence_capture_record('catalog',{'candidates':catalog})
     sequence_source={}
     history,sequence_stats=load_sequence_history(conn,changed)
     for prior in history:
         base=evaluator.extract_event_features(prior)
         base.update(questions.extended_features(prior))
         sequence_source[prior['event_id']]=(prior,base)
+    if _sequence_capture_active():
+        _sequence_capture_record('history_base',{'pairs':list(sequence_source.values())})
     features_by_id, inverse_requests = {}, set()
     for event in changed.values():
         symbols.add(event['symbol'])
         features = evaluator.extract_event_features(event)
         features.update(questions.extended_features(event))
         features.update(event.get('causal_past_features') or {})
-        features.update(questions.sequence_features(event,features,[value for key,value in sequence_source.items() if key!=event['event_id']]))
+        sequence_prior=[value for key,value in sequence_source.items() if key!=event['event_id']]
+        capture_doge=_sequence_capture_is_doge(event) and _sequence_capture_active()
+        if capture_doge:
+            # record() freezes the actual event, base dictionary and exact
+            # list now, before sequence_features or later screens can mutate
+            # them. Other symbols in the forwarded list remain part of it.
+            _sequence_capture_record('sequence_call_input',{
+                'event_id':event['event_id'],'event':event,
+                'base_features':features,'prior':sequence_prior,
+                'called_at_utc':_sequence_capture_tick()[0],
+            })
+        sequence_started=_sequence_capture_tick() if capture_doge else (None,None)
+        sequence_result=questions.sequence_features(event,features,sequence_prior)
+        sequence_finished=_sequence_capture_tick() if capture_doge else (None,None)
+        features.update(sequence_result)
         features_by_id[event['event_id']]=features
         if not any(name.endswith('.aligned_score') and value is not None for name,value in features.items()):
             missing_features += 1
         features_json = None
+        candidate_outcomes=[]
         for candidate in catalog:
-            if evaluator.matches(candidate,features,event['direction']):
+            matched=evaluator.matches(candidate,features,event['direction'])
+            if capture_doge:
+                _sequence_capture_candidate(candidate_outcomes,candidate,event,matched)
+            if matched:
                 snapshot = event.get('engine_snapshot') or {}
                 inverse=candidate.get('research_orientation')=='INVERSE'
                 if inverse: inverse_requests.add(event['event_id'])
@@ -360,6 +475,13 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
                     features_json = canonical(features)
                 records.append((candidate['formula_id'],event['event_id'],event['symbol'],direction,event['alert_time_utc'],
                                 snapshot.get('sheet_snapshot_id') or event['event_fingerprint'],event['current_price'],features_json))
+        if capture_doge:
+            _sequence_capture_record('sequence_call_output',{
+                'event_id':event['event_id'],'sequence_features':sequence_result,
+                'final_features':features,'candidate_outcomes':candidate_outcomes,
+                'started_at_utc':sequence_started[0],'finished_at_utc':sequence_finished[0],
+                'started_monotonic_ns':sequence_started[1],'finished_monotonic_ns':sequence_finished[1],
+            })
     screens=question_store.record_screens(conn,changed,features_by_id,catalog,now=now,inverse_requested=inverse_requests)
     for refresh in past_refresh:
         # ACK is conditional on the captured version and commits atomically
@@ -372,6 +494,15 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         with conn.cursor() as cur:
             cur.executemany('''INSERT INTO research_ordered_formula_matches(candidate_key,event_id,symbol,direction,alert_time_utc,snapshot_id,entry_price,decision_features)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key,event_id) DO NOTHING''',records)
+    if _sequence_capture_active():
+        _sequence_capture_record('routing',{
+            'rule':'ON CONFLICT(candidate_key,event_id) DO NOTHING',
+            'insert_outcome':'UNOBSERVED_INSERT_OR_EXISTING',
+            'candidate_hits':[
+                {'candidate_key':record[0],'event_id':record[1],
+                 'source_direction':changed[record[1]]['direction'],'routed_direction':record[3]}
+                for record in records if record[2]=='DOGE'],
+        })
     scope_discovery=discover_scope_cells(conn,catalog,
         {(record[0],record[2],record[3]) for record in records})
     return {'events_checked':len(changed),'fresh_unscreened_events_selected':len(recent_ids),'screen_feature_version':questions.VERSION,'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats,**scope_discovery}
