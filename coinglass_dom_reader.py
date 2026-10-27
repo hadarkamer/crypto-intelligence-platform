@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -111,7 +112,7 @@ def _parse_number(value):
     s = s.replace("$", "")
     s = s.replace("%", "")
     s = s.replace("≈", "")
-    s = s.replace("+", "")
+    s = s.replace("+", "").replace("−", "-")
     s = s.strip()
 
     multiplier = 1.0
@@ -129,7 +130,8 @@ def _parse_number(value):
         s = s[:-1]
 
     try:
-        return float(s) * multiplier
+        value = float(s) * multiplier
+        return value if math.isfinite(value) else None
     except Exception:
         return None
 
@@ -146,73 +148,48 @@ def _is_symbol_token(x: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9]{2,12}", x))
 
 
-def _parse_body_maxpain_rows(lines: list[str], timeframe: str) -> list[dict]:
-    """Parse CoinGlass Liquidation Max Pain body text.
-
-    Expected repeating pattern after headers:
-    rank, symbol, price,
-    short_max_pain_px, short_amount, short_distance_usd, short_distance_pct, emoji,
-    long_max_pain_px, long_amount, long_distance_usd, long_distance_pct, emoji
-    """
+def _parse_maxpain_table_rows(tables: list[dict], timeframe: str) -> list[dict]:
+    """Read named table columns; never interpret body-text offsets as prices."""
+    required = ("#", "Symbol", "Price · 24h", "Long pain below", "Short pain above")
+    matches = []
+    for table in tables:
+        headers = [re.sub(r"\s+", " ", h).strip(" ↑↓") for h in table["headers"]]
+        if all(headers.count(name) == 1 for name in required):
+            matches.append((table, {name: headers.index(name) for name in required}))
+    if len(matches) != 1:
+        raise ValueError("unrecognized Max Pain table columns")
+    table, columns = matches[0]
     rows = []
     now = datetime.now(timezone.utc).isoformat()
-
-    # Start after the Max Pain table header if possible.
-    start = 0
-    for i in range(len(lines) - 7):
-        window = lines[i:i+8]
-        if (
-            "Ranking" in window
-            and "Symbol" in window
-            and "Price" in window
-            and "Short Max Pain" in window
-            and "Long Max Pain" in window
-        ):
-            start = i + 8
-            break
-
-    i = start
-    while i < len(lines) - 11:
-        rank = lines[i].strip()
-        symbol = lines[i + 1].strip().upper()
-
-        if not rank.isdigit() or not _is_symbol_token(symbol):
-            i += 1
+    for cells in table["rows"]:
+        # Loading/empty-state rows span the table and contain no price fields.
+        if len(cells) != len(table["headers"]):
             continue
-
-        price = _parse_number(lines[i + 2])
-        short_px = _parse_number(lines[i + 3])
-        short_amount = _parse_number(lines[i + 4])
-        short_dist_abs = _parse_number(lines[i + 5])
-        short_dist_pct = _parse_number(lines[i + 6])
-        long_px = _parse_number(lines[i + 8])
-        long_amount = _parse_number(lines[i + 9])
-        long_dist_abs = _parse_number(lines[i + 10])
-        long_dist_pct = _parse_number(lines[i + 11])
-
-        if price is not None and short_px is not None and long_px is not None:
-            rows.append({
-                "collected_at_utc": now,
-                "timeframe": timeframe,
-                "source": "dom_body_maxpain",
-                "rank": int(rank),
-                "symbol": symbol,
-                "price": price,
-                "max_short_price": short_px,
-                "short_amount_usd": short_amount,
-                "short_distance_usd": short_dist_abs,
-                "short_distance_pct": short_dist_pct,
-                "max_long_price": long_px,
-                "long_amount_usd": long_amount,
-                "long_distance_usd": long_dist_abs,
-                "long_distance_pct": long_dist_pct,
-                "raw_cells": lines[i:i+13],
-                "extra": None,
-            })
-            i += 13
-        else:
-            i += 1
-
+        rank = cells[columns["#"]]["text"].strip()
+        symbol = cells[columns["Symbol"]]["primary"].strip().upper()
+        price_cell = cells[columns["Price · 24h"]]
+        long_cell = cells[columns["Long pain below"]]
+        short_cell = cells[columns["Short pain above"]]
+        price_texts = [cell["primary"] for cell in (price_cell, short_cell, long_cell)]
+        prices = [_parse_number(value) for value in price_texts]
+        amounts = [_parse_number(cell["amount"]) for cell in (short_cell, long_cell)]
+        if (not rank.isdigit() or not _is_symbol_token(symbol)
+                or any("%" in value for value in price_texts)
+                or any(value is None or value <= 0 for value in prices)
+                or any(value is None or value < 0 for value in amounts)):
+            continue
+        price, short_px, long_px = prices
+        rows.append({
+            "collected_at_utc": now, "timeframe": timeframe,
+            "source": "dom_body_maxpain", "rank": int(rank), "symbol": symbol,
+            "price": price, "max_short_price": short_px, "max_long_price": long_px,
+            "short_amount_usd": amounts[0], "long_amount_usd": amounts[1],
+            "short_distance_usd": short_px - price,
+            "short_distance_pct": (short_px / price - 1) * 100,
+            "long_distance_usd": price - long_px,
+            "long_distance_pct": (1 - long_px / price) * 100,
+            "raw_cells": [cell["text"] for cell in cells], "extra": None,
+        })
     return rows
 
 
@@ -251,15 +228,20 @@ async def _click_timeframe(page, timeframe: str) -> bool:
 
 
 async def _extract_tables(page) -> List[Dict[str, Any]]:
-    """Extract all real HTML tables currently visible/rendered."""
+    """Read the ranking table's cell boundaries, including nested price/amount fields."""
     return await page.evaluate(
         """
-        () => [...document.querySelectorAll('table')].map((table, index) => ({
-            index,
+        () => [...document.querySelectorAll('#mp-table table')].map(table => ({
             headers: [...table.querySelectorAll('thead th')].map(th => th.innerText.trim()),
-            rows: [...table.querySelectorAll('tbody tr')]
-                .map(row => [...row.querySelectorAll('td')].map(td => td.innerText.trim()))
-                .filter(row => row.some(cell => cell && cell.trim() !== ''))
+            rows: [...table.querySelectorAll('tbody tr')].map(row =>
+                [...row.querySelectorAll('td')].map(td => {
+                    const value = td.querySelector('b');
+                    return {
+                        text: td.innerText.trim(),
+                        primary: (value || td.querySelector('span') || td).innerText.trim(),
+                        amount: value?.nextElementSibling?.innerText.trim() || ''
+                    };
+                }))
         }))
         """
     )
@@ -362,69 +344,32 @@ def _rows_fingerprint(rows: List[Dict[str, Any]]) -> str:
 
 
 async def _active_timeframe_label(page) -> Optional[str]:
-    """Best-effort detection of the currently selected timeframe tab."""
+    """Require agreement between the Window selector and the ranking heading."""
     return await page.evaluate(
-        """
+        r"""
         () => {
-            const labels = ['12 hour','24 hour','48 hour','3 day','1 week','2 week','1 month'];
-            const nodes = [...document.querySelectorAll('button, [role="tab"], div, span')];
-            for (const el of nodes) {
-                const text = (el.innerText || el.textContent || '').trim();
-                if (!labels.includes(text)) continue;
-
-                const cls = String(el.className || '').toLowerCase();
-                const ariaSelected = el.getAttribute('aria-selected');
-                const dataState = el.getAttribute('data-state');
-                const style = getComputedStyle(el);
-
-                if (
-                    ariaSelected === 'true' ||
-                    dataState === 'active' ||
-                    cls.includes('active') ||
-                    cls.includes('selected') ||
-                    cls.includes('current') ||
-                    style.borderColor === 'rgb(65, 132, 230)' ||
-                    style.color === 'rgb(65, 132, 230)'
-                ) {
-                    return text;
-                }
-            }
-            return null;
+            const selected = document.querySelector('[aria-label="Window"] [role="combobox"]');
+            const heading = document.querySelector('#mp-table-h');
+            const label = el => el?.innerText.match(/\b(12H|24H|48H|3D|1W|2W|1M)\b/)?.[1];
+            const value = label(selected);
+            return value && value === label(heading) ? value.toLowerCase() : null;
         }
         """
     )
 
 
 async def _click_timeframe_verified(page, timeframe: str) -> bool:
-    """Click the requested tab using several selectors."""
-    label_map = {
-        "12h": "12 hour",
-        "24h": "24 hour",
-        "48h": "48 hour",
-        "3d": "3 day",
-        "1w": "1 week",
-        "2w": "2 week",
-        "1m": "1 month",
-    }
-    label = label_map.get(timeframe, timeframe)
-
-    candidates = [
-        page.get_by_role("tab", name=label, exact=True),
-        page.get_by_role("button", name=label, exact=True),
-        page.get_by_text(label, exact=True),
-        page.locator("button").filter(has_text=label),
-        page.locator('[role="tab"]').filter(has_text=label),
-    ]
-
-    for locator in candidates:
-        try:
-            target = locator.first
-            await target.scroll_into_view_if_needed(timeout=2000)
-            await target.click(timeout=4000, force=True)
+    """Select the existing Window dropdown's exact option."""
+    try:
+        selector = page.locator('[aria-label="Window"] [role="combobox"]')
+        await selector.wait_for(state="visible", timeout=4000)
+        if await _active_timeframe_label(page) == timeframe:
             return True
-        except Exception:
-            continue
-    return False
+        await selector.click(timeout=4000)
+        await page.locator('[role="listbox"]').get_by_text(timeframe.upper(), exact=True).click(timeout=4000)
+        return True
+    except PlaywrightTimeoutError:
+        return False
 
 
 async def read_timeframe(
@@ -442,71 +387,58 @@ async def read_timeframe(
     - reject a fingerprint already accepted for another timeframe;
     - validate row count and unique symbols before accepting.
     """
-    label_map = {
-        "12h": "12 hour", "24h": "24 hour", "48h": "48 hour",
-        "3d": "3 day", "1w": "1 week", "2w": "2 week", "1m": "1 month",
-    }
-    expected_label = label_map.get(timeframe, timeframe)
     forbidden_fingerprints = forbidden_fingerprints or {}
-
-    baseline_lines = await _extract_body_lines(page, limit=1200)
-    baseline_rows = _parse_body_maxpain_rows(baseline_lines, "baseline")
-    baseline_fp = _rows_fingerprint(baseline_rows) if baseline_rows else None
-
     last_debug: Dict[str, Any] = {}
-    for attempt in range(1, 4):
-        clicked = await _click_timeframe_verified(page, timeframe)
-        stable_fp = None
-        stable_count = 0
-
-        for poll in range(1, 25):
-            await page.wait_for_timeout(750)
-            lines = await _extract_body_lines(page, limit=1400)
-            rows = _parse_body_maxpain_rows(lines, timeframe)
-            fingerprint = _rows_fingerprint(rows) if rows else None
-            active_label = await _active_timeframe_label(page)
-
-            symbols = [str(r.get("symbol") or "") for r in rows]
-            unique_symbols = len(symbols) == len(set(symbols))
-            row_count_ok = len(rows) >= 30
-            active_ok = active_label == expected_label
-            baseline_changed = timeframe == "24h" or baseline_fp is None or fingerprint != baseline_fp
-            previous_changed = previous_fingerprint is None or fingerprint != previous_fingerprint
-            duplicate_of = next(
-                (tf for tf, fp in forbidden_fingerprints.items() if fingerprint and fp == fingerprint),
-                None,
-            )
-
-            if fingerprint and fingerprint == stable_fp:
-                stable_count += 1
-            else:
-                stable_fp = fingerprint
-                stable_count = 1 if fingerprint else 0
-
-            last_debug = {
-                "parsed_count": len(rows), "attempt": attempt, "poll": poll,
-                "active_label": active_label, "expected_label": expected_label,
-                "fingerprint": fingerprint, "baseline_fingerprint": baseline_fp,
-                "previous_fingerprint": previous_fingerprint, "clicked": clicked,
-                "active_ok": active_ok, "baseline_changed": baseline_changed,
-                "previous_changed": previous_changed, "stable_count": stable_count,
-                "unique_symbols": unique_symbols, "row_count_ok": row_count_ok,
-                "duplicate_of": duplicate_of, "body_preview": lines[:120],
-            }
-
-            if (
-                active_ok and baseline_changed and previous_changed and
-                stable_count >= 2 and unique_symbols and row_count_ok and not duplicate_of
-            ):
-                return {
-                    "timeframe": timeframe, "clicked": clicked, "verified": True,
-                    "rows": rows, "fingerprint": fingerprint, "debug": last_debug,
-                }
-
-        await page.wait_for_timeout(1000)
-
+    try:
+        baseline_rows = _parse_maxpain_table_rows(await _extract_tables(page), "baseline")
+    except ValueError as exc:
+        return {"timeframe": timeframe, "verified": False, "rows": [],
+                "error": str(exc), "retryable": False, "debug": {}}
+    baseline_fp = _rows_fingerprint(baseline_rows) if baseline_rows else None
+    baseline_label = await _active_timeframe_label(page)
+    clicked = await _click_timeframe_verified(page, timeframe)
+    if not clicked:
+        return {"timeframe": timeframe, "verified": False, "rows": [],
+                "error": "Max Pain Window option unavailable", "retryable": False, "debug": {}}
+    stable_fp = None
+    stable_count = 0
+    # Fresh-page retries already exist; do not multiply them by another retry loop.
+    for poll in range(1, 25):
+        await page.wait_for_timeout(750)
+        try:
+            rows = _parse_maxpain_table_rows(await _extract_tables(page), timeframe)
+        except ValueError as exc:
+            return {"timeframe": timeframe, "verified": False, "rows": [],
+                    "error": str(exc), "retryable": False, "debug": last_debug}
+        fingerprint = _rows_fingerprint(rows) if rows else None
+        active_label = await _active_timeframe_label(page)
+        symbols = [str(r.get("symbol") or "") for r in rows]
+        unique_symbols = len(symbols) == len(set(symbols))
+        row_count_ok = len(rows) >= 30
+        active_ok = active_label == timeframe
+        baseline_changed = baseline_label == timeframe or baseline_fp is None or fingerprint != baseline_fp
+        previous_changed = previous_fingerprint is None or fingerprint != previous_fingerprint
+        duplicate_of = next(
+            (tf for tf, fp in forbidden_fingerprints.items() if fingerprint and fp == fingerprint), None,
+        )
+        if fingerprint and fingerprint == stable_fp:
+            stable_count += 1
+        else:
+            stable_fp = fingerprint
+            stable_count = 1 if fingerprint else 0
+        last_debug = {
+            "parsed_count": len(rows), "poll": poll, "active_label": active_label,
+            "expected_label": timeframe, "clicked": clicked, "active_ok": active_ok,
+            "baseline_changed": baseline_changed, "previous_changed": previous_changed,
+            "stable_count": stable_count, "unique_symbols": unique_symbols,
+            "row_count_ok": row_count_ok, "duplicate_of": duplicate_of,
+        }
+        if (active_ok and baseline_changed and previous_changed and stable_count >= 2
+                and unique_symbols and row_count_ok and not duplicate_of):
+            return {"timeframe": timeframe, "clicked": clicked, "verified": True,
+                    "rows": rows, "fingerprint": fingerprint, "debug": last_debug}
     return {
-        "timeframe": timeframe, "clicked": False, "verified": False, "rows": [],
+        "timeframe": timeframe, "clicked": clicked, "verified": False, "rows": [],
         "fingerprint": None,
         "error": "timeframe failed active-tab/content/stability/uniqueness verification",
         "debug": last_debug,
@@ -585,6 +517,9 @@ async def _retry_timeframe_on_fresh_page(
                 previous_fingerprint=previous_fingerprint,
                 forbidden_fingerprints=forbidden_fingerprints,
             )
+
+            if last_result.get("retryable") is False:
+                return last_result
 
             if last_result.get("verified") and last_result.get("rows"):
                 print(
@@ -706,6 +641,9 @@ async def collect_coinglass_dom_snapshot(
                             f"debug={json.dumps(debug, ensure_ascii=False)[:1800]}",
                             flush=True,
                         )
+                        if result.get("retryable") is False:
+                            missing.extend(tf for tf in collection_order if tf not in by_timeframe)
+                            break
             finally:
                 await context.close()
                 _record_dom_memory("context_close", context)
