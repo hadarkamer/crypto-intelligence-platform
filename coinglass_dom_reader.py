@@ -21,7 +21,6 @@ import asyncio
 import json
 import math
 import re
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -31,72 +30,6 @@ import runtime_memory_diagnostics
 
 COINGLASS_URL = "https://www.coinglass.com/liquidation-maxpain"
 DEFAULT_TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
-
-
-@dataclass
-class DomRow:
-    collected_at_utc: str
-    timeframe: str
-    source: str
-    symbol: str
-    raw_cells: List[str]
-    price: Optional[float] = None
-    max_short_price: Optional[float] = None
-    max_long_price: Optional[float] = None
-    short_amount_usd: Optional[float] = None
-    long_amount_usd: Optional[float] = None
-    extra: Optional[Dict[str, Any]] = None
-
-
-def _to_float(value: str | None) -> Optional[float]:
-    if value is None:
-        return None
-    s = str(value).strip().replace(",", "").replace("$", "").replace("%", "")
-    if not s or s in {"-", "--", "none", "None", "null"}:
-        return None
-
-    multiplier = 1.0
-    last = s[-1:].upper()
-    if last == "K":
-        multiplier = 1_000
-        s = s[:-1]
-    elif last == "M":
-        multiplier = 1_000_000
-        s = s[:-1]
-    elif last == "B":
-        multiplier = 1_000_000_000
-        s = s[:-1]
-    elif last == "T":
-        multiplier = 1_000_000_000_000
-        s = s[:-1]
-
-    try:
-        return float(s) * multiplier
-    except ValueError:
-        return None
-
-
-def _looks_like_symbol(value: str) -> bool:
-    if not value:
-        return False
-    value = value.strip()
-    # Most crypto symbols are uppercase letters/numbers, 2-12 chars.
-    return bool(re.fullmatch(r"[A-Z0-9]{2,12}", value))
-
-
-def _normalize_timeframe(tf: str) -> str:
-    aliases = {
-        "12 hour": "12h",
-        "24 hour": "24h",
-        "48 hour": "48h",
-        "3 day": "3d",
-        "1 week": "1w",
-        "2 week": "2w",
-        "1 month": "1m",
-    }
-    return aliases.get(tf.strip().lower(), tf.strip())
-
-
 
 
 def _parse_number(value):
@@ -193,40 +126,6 @@ def _parse_maxpain_table_rows(tables: list[dict], timeframe: str) -> list[dict]:
     return rows
 
 
-async def _click_timeframe(page, timeframe: str) -> bool:
-    """Try to select a timeframe in the CoinGlass UI."""
-    labels = {
-        "12h": ["12 hour", "12h", "12 Hour"],
-        "24h": ["24 hour", "24h", "24 Hour"],
-        "48h": ["48 hour", "48h", "48 Hour"],
-        "3d": ["3 day", "3d", "3 Day"],
-        "1w": ["1 week", "1w", "1 Week"],
-        "2w": ["2 week", "2w", "2 Week"],
-        "1m": ["1 month", "1m", "1 Month"],
-    }.get(timeframe, [timeframe])
-
-    for label in labels:
-        try:
-            locator = page.get_by_text(label, exact=True).first
-            await locator.click(timeout=2500)
-            await page.wait_for_timeout(1200)
-            return True
-        except Exception:
-            pass
-
-    # Fallback: some buttons are not exact text matches.
-    for label in labels:
-        try:
-            locator = page.locator(f"text={label}").first
-            await locator.click(timeout=2500)
-            await page.wait_for_timeout(1200)
-            return True
-        except Exception:
-            pass
-
-    return False
-
-
 async def _extract_tables(page) -> List[Dict[str, Any]]:
     """Read the ranking table's cell boundaries, including nested price/amount fields."""
     return await page.evaluate(
@@ -245,88 +144,6 @@ async def _extract_tables(page) -> List[Dict[str, Any]]:
         }))
         """
     )
-
-
-async def _extract_body_lines(page, limit: int = 2000) -> List[str]:
-    """Extract visible body text lines as a fallback for virtualized/non-table UI."""
-    return await page.evaluate(
-        f"""
-        () => document.body.innerText
-            .split('\\n')
-            .map(x => x.trim())
-            .filter(Boolean)
-            .slice(0, {limit})
-        """
-    )
-
-
-def _parse_market_table_rows(timeframe: str, tables: List[Dict[str, Any]], collected_at: str) -> List[DomRow]:
-    """
-    Parse standard market table rows when available.
-    This is not Max Pain yet, but it is useful as a stable fallback and future data source.
-    """
-    out: List[DomRow] = []
-    for table in tables:
-        headers = table.get("headers") or []
-        rows = table.get("rows") or []
-        if "Assets" not in headers or "Price" not in headers:
-            continue
-
-        for cells in rows:
-            # Common structure seen in DevTools:
-            # ['', 'BTC', '$63072', '+2.65%', '0.0066%', '$71.96B', ...]
-            symbol = next((c for c in cells if _looks_like_symbol(c)), "")
-            if not symbol:
-                continue
-            price_cell = cells[cells.index(symbol) + 1] if cells.index(symbol) + 1 < len(cells) else None
-            out.append(
-                DomRow(
-                    collected_at_utc=collected_at,
-                    timeframe=timeframe,
-                    source="dom_market_table",
-                    symbol=symbol,
-                    raw_cells=cells,
-                    price=_to_float(price_cell),
-                    extra={"headers": headers},
-                )
-            )
-    return out
-
-
-def _parse_body_lines_for_symbols(timeframe: str, lines: List[str], collected_at: str) -> List[DomRow]:
-    """
-    Generic fallback parser for text-based/virtualized pages.
-    It groups likely symbols with the following numeric/text lines.
-    This is intentionally conservative; Max Pain-specific mapping should be added once
-    the exact visible order of Max Pain fields is captured.
-    """
-    rows: List[DomRow] = []
-    i = 0
-    while i < len(lines):
-        if _looks_like_symbol(lines[i]):
-            symbol = lines[i]
-            raw = lines[i : min(i + 12, len(lines))]
-            # First money-like value after symbol is usually current price in market tables.
-            price = None
-            for item in raw[1:]:
-                if item.startswith("$"):
-                    price = _to_float(item)
-                    break
-            rows.append(
-                DomRow(
-                    collected_at_utc=collected_at,
-                    timeframe=timeframe,
-                    source="dom_body_text",
-                    symbol=symbol,
-                    raw_cells=raw,
-                    price=price,
-                )
-            )
-            i += len(raw)
-        else:
-            i += 1
-    return rows
-
 
 
 def _rows_fingerprint(rows: List[Dict[str, Any]]) -> str:
