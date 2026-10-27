@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import html
 import json
@@ -7,7 +6,6 @@ import os
 import re
 import sqlite3
 import time
-import zlib
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -15,13 +13,10 @@ from typing import Optional, List, Dict, Any, Mapping, Sequence
 
 from aiohttp import web
 from dotenv import load_dotenv
-import requests
 from tabulate import tabulate
 from telegram import Update
 from telegram.error import TimedOut
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
 import alert_engine
@@ -104,31 +99,12 @@ DB_PATH = os.getenv("DB_PATH", "coinglass.db")
 PORT = int(os.getenv("PORT", "10000"))
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
-COINGLASS_API_URL = os.getenv("COINGLASS_API_URL", "https://fapi.coinglass.com/api/liqHeatMap/list")
-TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
-COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
-MAX_SECONDS_PER_TIMEFRAME = int(os.getenv("MAX_SECONDS_PER_TIMEFRAME", "120"))
-RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TRADINGVIEW_WEBHOOK_SECRET = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "")
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
 NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
-API_TIMEFRAME_MAP = {
-    "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
-    "1w": "7d", "2w": "14d", "1m": "30d",
-}
-TIMEFRAME_LABELS = {
-    "12h": "12 hour",
-    "24h": "24 hour",
-    "48h": "48 hour",
-    "3d": "3 day",
-    "1w": "1 week",
-    "2w": "2 week",
-    "1m": "1 month",
-}
-NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
@@ -159,7 +135,6 @@ ALERT_COMMAND_LOCK = None
 PROCESSED_UPDATE_IDS = set()
 PROCESSED_UPDATE_ORDER = []
 MAX_PROCESSED_UPDATE_IDS = 500
-ALERT_ACTIVE = False
 CONFIRMATION_STATE: Dict[str, str] = {}
 SCORE_CONFIRMATION_STATE: Dict[str, bool] = {}
 FORMULA_ALERT_SENT_KEYS: Dict[str, None] = {}
@@ -206,7 +181,6 @@ MIN_DISPLAY_DISTANCE_PCT = float(
     os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.8")
 )
 RTL_MARK = "\u200f"
-WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
     "last_scan_utc": None,
     "next_scan_utc": None,
@@ -519,10 +493,6 @@ def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
     return rows[0]["value"] if rows else default
 
 
-def watch_enabled() -> bool:
-    return get_setting("watch_enabled", "0") == "1"
-
-
 def _watch_desired_state() -> Dict[str, Any]:
     """Return the complete durable Watch intent as one atomic JSON value."""
     chat_id = WATCH_RUNTIME.get("chat_id")
@@ -689,12 +659,6 @@ def _restore_watch_runtime() -> None:
     WATCH_RUNTIME["last_error"] = get_setting("watch_last_error") or None
 
 
-def _actual_watch_active() -> bool:
-    return WATCH_TASK is not None and not WATCH_TASK.done()
-
-
-
-
 def insert_snapshots(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
@@ -735,30 +699,6 @@ def insert_snapshots(rows: List[Dict[str, Any]]) -> int:
 
     return len(rows)
 
-def parse_number(value: str) -> Optional[float]:
-    if value is None:
-        return None
-
-    raw = value.replace(",", "").replace("$", "").strip()
-    match = re.search(r"-?\d+(\.\d+)?", raw)
-    if not match:
-        return None
-
-    num = float(match.group(0))
-    lower = raw.lower()
-    if lower.endswith("k"):
-        num *= 1_000
-    elif lower.endswith("m"):
-        num *= 1_000_000
-    elif lower.endswith("b"):
-        num *= 1_000_000_000
-    return num
-
-def pct_change(new, old):
-    if new is None or old is None or old == 0:
-        return None
-    return ((new - old) / old) * 100
-
 def distance_pct(price, target):
     if price is None or target is None or price == 0:
         return None
@@ -768,31 +708,6 @@ def distance_abs(price, target):
     if price is None or target is None:
         return None
     return abs(target - price)
-
-def alert_level(delta_short_pct, delta_long_pct):
-    values = [abs(v) for v in [delta_short_pct, delta_long_pct] if v is not None]
-    if not values:
-        return "none"
-    max_delta = max(values)
-    if max_delta >= 7:
-        return "high"
-    if max_delta >= 3:
-        return "medium"
-    if max_delta >= 1:
-        return "low"
-    return "none"
-
-def previous_row(symbol, timeframe, before_collected_at):
-    rows = query(
-        """
-        SELECT * FROM max_pain_snapshots
-        WHERE symbol = ? AND timeframe = ? AND collected_at < ?
-        ORDER BY collected_at DESC
-        LIMIT 1
-        """,
-        (symbol, timeframe, before_collected_at)
-    )
-    return rows[0] if rows else None
 
 def enrich_rows(rows):
     """Enrich rows without overwriting CoinGlass distance percentages.
@@ -825,131 +740,6 @@ def enrich_rows(rows):
         output.append(row)
     return output
 
-
-def aes_decrypt_raw(ciphertext_b64: str, key: str) -> bytes:
-    encrypted = base64.b64decode(ciphertext_b64)
-    cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
-    return unpad(cipher.decrypt(encrypted), AES.block_size)
-
-def gzip_to_text(raw: bytes) -> str:
-    return zlib.decompress(raw, 16 + zlib.MAX_WBITS).decode("utf-8")
-
-def decode_coinglass_payload(ciphertext_b64: str, key: str):
-    return json.loads(gzip_to_text(aes_decrypt_raw(ciphertext_b64, key)))
-
-def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
-    """
-    Keep retrying a timeframe until it succeeds or until MAX_SECONDS_PER_TIMEFRAME is reached.
-    This avoids losing data because of transient CoinGlass encryption/cache mismatches,
-    but still prevents the bot from hanging forever.
-    """
-    api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
-    deadline = time.time() + MAX_SECONDS_PER_TIMEFRAME
-    attempt = 0
-    last_error = None
-
-    while time.time() < deadline:
-        attempt += 1
-
-        headers = {
-            "accept": "application/json",
-            "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
-            "origin": "https://www.coinglass.com",
-            "referer": "https://www.coinglass.com/",
-            "language": "en",
-            "encryption": "true",
-            "cache-control": "no-cache",
-            "pragma": "no-cache",
-            "connection": "close",
-            "cache-ts-v2": str(int(time.time() * 1000)),
-            "user-agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
-        }
-
-        try:
-            with requests.Session() as session:
-                response = session.get(
-                    COINGLASS_API_URL,
-                    params={
-                        "range": api_range,
-                        "_": f"{int(time.time() * 1000)}-{attempt}",
-                    },
-                    headers=headers,
-                    timeout=12,
-                )
-
-            response.raise_for_status()
-            payload = response.json()
-
-            if payload.get("code") != "0" or "data" not in payload:
-                raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
-
-            if response.headers.get("encryption") != "true":
-                data = payload["data"]
-                return data if isinstance(data, list) else json.loads(data)
-
-            temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
-            real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
-            return decode_coinglass_payload(payload["data"], real_key)
-
-        except Exception as e:
-            last_error = e
-            remaining = max(0, int(deadline - time.time()))
-            print(f"[collector] {timeframe} attempt {attempt} failed: {e}; retrying in {RETRY_SLEEP_SECONDS}s; {remaining}s left")
-            time.sleep(RETRY_SLEEP_SECONDS)
-
-    raise TimeoutError(f"{timeframe} failed after {attempt} attempts over {MAX_SECONDS_PER_TIMEFRAME}s. Last error: {last_error}")
-
-async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
-    api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
-    output = []
-
-    for idx, item in enumerate(api_rows[:TOP_COINS_LIMIT], start=1):
-        output.append({
-            "collected_at": collected_at,
-            "source": SOURCE_NAME,
-            "collector_version": COLLECTOR_VERSION,
-            "scrape_duration_seconds": scrape_duration,
-            "is_valid": True if use_postgres() else 1,
-            "validation_errors": None,
-            "symbol": str(item.get("symbol", "")).upper(),
-            "rank": idx,
-            "timeframe": timeframe,
-            "current_price": item.get("price"),
-            "short_max_pain": item.get("maxShortLiquidationPrice"),
-            "long_max_pain": item.get("maxLongLiquidationPrice"),
-            "short_liquidation_amount": item.get("maxShortLiquidationLevel"),
-            "long_liquidation_amount": item.get("maxLongLiquidationLevel"),
-        })
-
-    return output
-
-def normalize_current_prices(rows):
-    """
-    Use one current price per symbol for the whole snapshot.
-
-    The API returns a price inside each timeframe response. Because we collect ranges
-    sequentially, the last successful response is the freshest price we fetched now.
-    Therefore, for each symbol, use the latest price from the current collection,
-    not a fixed timeframe such as 24h.
-    """
-    price_by_symbol = {}
-
-    for row in rows:
-        symbol = row.get("symbol")
-        price = row.get("current_price")
-        if symbol and price is not None:
-            price_by_symbol[symbol] = price
-
-    for row in rows:
-        symbol = row.get("symbol")
-        if symbol in price_by_symbol:
-            row["current_price"] = price_by_symbol[symbol]
-
-    return rows
 
 def validate_snapshot(rows):
     """Validate the filtered Binance-backed snapshot.
@@ -1553,7 +1343,7 @@ def fmt_price(value):
     if value is None:
         return "-"
     try:
-        from decimal import Decimal, InvalidOperation
+        from decimal import Decimal
         d = Decimal(str(value))
     except Exception:
         return str(value)
@@ -1570,11 +1360,6 @@ def fmt(value, digits=2):
     if isinstance(value, float):
         return f"{value:,.{digits}f}"
     return str(value)
-
-def short_time(value):
-    s = str(value)
-    return s[11:16] if len(s) >= 16 else s
-
 
 def raw_latest_snapshot_rows():
     """Latest saved Binance-backed snapshot with validation metadata."""
@@ -1594,36 +1379,10 @@ def raw_latest_snapshot_rows():
     )
 
 
-def latest_snapshot_live_result():
-    rows = raw_latest_snapshot_rows()
-    return {
-        "rows": rows,
-        "price_result": {
-            "source": "binance_saved_at_collect",
-            "found_count": len({r["symbol"] for r in rows}) if rows else 0,
-            "missing_count": 0,
-            "fetched_at_utc": "-",
-        },
-        "skipped_symbols": [],
-    }
-
-
 def latest_snapshot_rows():
     return raw_latest_snapshot_rows()
 
 
-
-def side_from_row(row):
-    """Return which Max Pain side is closer for one row."""
-    ds = row["distance_short_pct"]
-    dl = row["distance_long_pct"]
-    if ds is None or dl is None:
-        return None
-    return "SHORT" if abs(ds) <= abs(dl) else "LONG"
-
-def safe_avg(values):
-    vals = [v for v in values if v is not None]
-    return sum(vals) / len(vals) if vals else None
 
 def tf_order_value(tf: str) -> int:
     try:
@@ -1896,11 +1655,6 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = query("SELECT MAX(collected_at) AS latest_time, COUNT(*) AS rows_count FROM max_pain_snapshots")
-    r = rows[0]
-    await update.message.reply_text(f"Snapshot אחרון: {r['latest_time']}\\nמספר שורות: {r['rows_count']}")
-
 async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("שימוש: /coin BTC")
@@ -1955,334 +1709,6 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-
-async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("שימוש: /range BTC 24h")
-        return
-
-    symbol = context.args[0].upper()
-    timeframe = context.args[1].lower()
-
-    rows = [
-        r for r in latest_snapshot_rows()
-        if str(r["symbol"]).upper() == symbol
-        and str(r["timeframe"]).lower() == timeframe
-    ]
-
-    if not rows:
-        await update.message.reply_text(
-            f"לא נמצאו נתוני Binance חיים עבור {symbol}/{timeframe}."
-        )
-        return
-
-    r = rows[0]
-    table = [[
-        fmt_price(r["current_price"]),
-        fmt_price(r["short_max_pain"]),
-        fmt_price(r["long_max_pain"]),
-        fmt(r["short_liquidation_amount"], 0),
-        fmt(r["long_liquidation_amount"], 0),
-        fmt(r["distance_short_pct"]),
-        fmt(r["distance_long_pct"]),
-        r.get("closest_side"),
-    ]]
-
-    text = tabulate(
-        table,
-        headers=["BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
-        tablefmt="plain",
-    )
-
-    await update.message.reply_text(
-        f"Price source: {r.get('price_source', 'binance')}\n"
-        f"Fetched UTC: {r.get('price_fetched_at_utc', '-')}\n"
-        f"<pre>{html.escape(text)}</pre>",
-        parse_mode="HTML",
-    )
-
-
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        limit = int(context.args[0]) if context.args else 10
-    except Exception:
-        limit = 10
-    limit = max(1, min(50, limit))
-
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים חיים זמינים. הריצו /collect ואז נסו שוב.")
-        return
-
-    candidates = []
-    for r in rows:
-        ds = r.get("distance_short_pct")
-        dl = r.get("distance_long_pct")
-        if ds is None or dl is None:
-            continue
-        closest_side = "SHORT" if abs(ds) <= abs(dl) else "LONG"
-        closest_distance = min(abs(ds), abs(dl))
-        candidates.append((closest_distance, closest_side, r))
-
-    candidates.sort(key=lambda item: item[0])
-    selected = candidates[:limit]
-
-    table = [[
-        r["symbol"],
-        r["timeframe"],
-        side,
-        fmt_price(r["current_price"]),
-        fmt_price(r["short_max_pain"]),
-        fmt_price(r["long_max_pain"]),
-        fmt(r["distance_short_pct"]),
-        fmt(r["distance_long_pct"]),
-    ] for distance, side, r in selected]
-
-    text = tabulate(
-        table,
-        headers=["Coin", "TF", "Side", "BinancePx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
-        tablefmt="plain",
-    )
-    await update.message.reply_text(
-        "כל המרחקים חושבו מחדש לפי מחיר Binance חי.\n"
-        f"<pre>{html.escape(text)}</pre>",
-        parse_mode="HTML",
-    )
-
-
-async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display coins whose closest Max Pain side is consistent across timeframes."""
-    min_hits = 7
-    limit = 20
-
-    if context.args:
-        try:
-            min_hits = max(1, min(7, int(context.args[0])))
-        except Exception:
-            min_hits = 7
-    if len(context.args) >= 2:
-        try:
-            limit = max(1, min(50, int(context.args[1])))
-        except Exception:
-            limit = 20
-
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
-        return
-
-    results = analysis.calculate_consensus(rows, min_hits=min_hits, limit=limit)
-    if not results:
-        await update.message.reply_text(f"לא נמצאו מטבעות עם קונצנזוס של {min_hits}/7. נסו /consensus 6")
-        return
-
-    table = [[
-        r["symbol"],
-        r["side"],
-        f'{r["hits"]}/{r["total"]}',
-        fmt(r["avg_dist"]),
-        r["tfs"],
-    ] for r in results]
-
-    output = tabulate(table, headers=["Coin", "Side", "Score", "AvgDist%", "TFs"], tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display average percentage gap between Short/Long Max Pain."""
-    limit = 20
-    if context.args:
-        try:
-            limit = max(1, min(50, int(context.args[0])))
-        except Exception:
-            limit = 20
-
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לחישוב. הריצו /collect קודם.")
-        return
-
-    results = analysis.calculate_gap(rows, limit=limit)
-    if not results:
-        await update.message.reply_text("אין מספיק נתונים לחישוב Gap.")
-        return
-
-    table = [[
-        r["symbol"],
-        f'{r["count"]}/7',
-        fmt(r["avg_gap"]),
-        fmt(r.get("avg_gap_abs")),
-        f'{r["max_gap_tf"]}:{fmt(r["max_gap"])}',
-        f'{r["min_gap_tf"]}:{fmt(r["min_gap"])}',
-    ] for r in results]
-
-    output = tabulate(table, headers=["Coin", "TFs", "AvgGap%", "AvgGap$", "MaxGap", "MinGap"], tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display liquidation amount balance.
-
-    Usage:
-    - /liqsum            market totals by timeframe + TOTAL
-    - /liqsum top [n]    top coins by total liquidity across all timeframes
-    - /liqsum BTC        liquidity balance for a specific coin by timeframe + TOTAL
-    """
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתוני נזילות. הריצו /collect קודם.")
-        return
-
-    # /liqsum top [limit]
-    if context.args and context.args[0].lower() == "top":
-        limit = 20
-        if len(context.args) >= 2:
-            try:
-                limit = max(1, min(50, int(context.args[1])))
-            except Exception:
-                limit = 20
-
-        results = analysis.calculate_liquidity_by_coin(rows, limit=limit)
-        if not results:
-            await update.message.reply_text("אין נתוני נזילות להצגה.")
-            return
-
-        table = [[
-            r["symbol"],
-            f'{r["count"]}/7',
-            fmt(r["total"], 0),
-            fmt(r["short_total"], 0),
-            fmt(r["long_total"], 0),
-            r["dominant"],
-            fmt(r["ratio"]),
-        ] for r in results]
-
-        output = tabulate(
-            table,
-            headers=["Coin", "TFs", "Total$", "Short$", "Long$", "Dominant", "Ratio"],
-            tablefmt="plain",
-        )
-        await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-        return
-
-    # /liqsum BTC
-    if context.args:
-        symbol = context.args[0].upper()
-        result = analysis.calculate_liquidity_for_symbol_by_timeframe(rows, symbol)
-        tf_rows = result["timeframes"]
-        if not tf_rows:
-            await update.message.reply_text(f"לא נמצאו נתוני נזילות עבור {symbol}.")
-            return
-    else:
-        result = analysis.calculate_liquidity_balance(rows)
-        tf_rows = result["timeframes"]
-
-    if not tf_rows:
-        await update.message.reply_text("אין נתוני נזילות להצגה.")
-        return
-
-    table = []
-    for r in tf_rows + [result["total"]]:
-        table.append([
-            r["timeframe"],
-            fmt(r["short_total"], 0),
-            fmt(r["long_total"], 0),
-            r["dominant"],
-            fmt(r["diff"], 0),
-            fmt(r["ratio"]),
-        ])
-
-    output = tabulate(
-        table,
-        headers=["TF", "Short$", "Long$", "Dominant", "Long-Short$", "Ratio"],
-        tablefmt="plain",
-    )
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display overall market bias by timeframe and total.
-
-    LONG means more coins are closer to their Long Max Pain side.
-    SHORT means more coins are closer to their Short Max Pain side.
-    """
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
-        return
-
-    result = analysis.calculate_market_bias(rows)
-    tf_rows = result.get("timeframes", [])
-    overall = result.get("overall", {})
-
-    if not tf_rows:
-        await update.message.reply_text("אין מספיק נתונים לחישוב Market Bias.")
-        return
-
-    table = []
-    for r in tf_rows:
-        table.append([
-            r["timeframe"],
-            r["bias"],
-            r["long_count"],
-            r["short_count"],
-            fmt(r["long_pct"]),
-            fmt(r["short_pct"]),
-        ])
-
-    table.append([
-        "TOTAL",
-        overall.get("bias"),
-        overall.get("long_count"),
-        overall.get("short_count"),
-        fmt(overall.get("long_pct")),
-        fmt(overall.get("short_pct")),
-    ])
-
-    output = tabulate(
-        table,
-        headers=["TF", "Bias", "LONG", "SHORT", "Long%", "Short%"],
-        tablefmt="plain",
-    )
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-
-async def btc_like(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display coins whose closest Max Pain side is similar to BTC."""
-    min_hits = 5
-    limit = 20
-
-    if context.args:
-        try:
-            min_hits = max(1, min(7, int(context.args[0])))
-        except Exception:
-            min_hits = 5
-    if len(context.args) >= 2:
-        try:
-            limit = max(1, min(50, int(context.args[1])))
-        except Exception:
-            limit = 20
-
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
-        return
-
-    results = analysis.calculate_btc_similarity(rows, min_hits=min_hits, limit=limit)
-    if not results:
-        await update.message.reply_text(f"לא נמצאו מטבעות עם התאמה ל-BTC של {min_hits}/7. נסו /btc_like 4")
-        return
-
-    table = [[
-        r["symbol"],
-        f'{r["hits"]}/{r["total"]}',
-        r["same_tfs"],
-        r["different_tfs"],
-    ] for r in results]
-
-    output = tabulate(
-        table,
-        headers=["Coin", "Match", "SameTFs", "DiffTFs"],
-        tablefmt="plain",
-    )
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 def _row_get(row, key, default=None):
     try:
@@ -3637,32 +3063,6 @@ def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
     return distance >= 0.0
 
 
-def _price_source_label(source: Any) -> str:
-    labels = {
-        "bybit_futures_mark": "Bybit Futures",
-        "bybit_spot": "Bybit Spot",
-        "hyperliquid": "Hyperliquid",
-        "coingecko": "CoinGecko",
-        "coinpaprika": "CoinPaprika",
-        "coinglass_dom": "CoinGlass DOM",
-        "binance_spot": "Binance Spot",
-        "binance_futures_mark": "Binance Futures",
-    }
-    return labels.get(str(source or ""), "Live market")
-
-
-def _distance_trade_label(distance_pct: Any) -> str:
-    try:
-        distance = float(distance_pct)
-    except (TypeError, ValueError):
-        return "לא ידוע"
-    if distance < 0.8:
-        return "גבולי"
-    if distance <= 1.3:
-        return "טווח מועדף"
-    return "רחוק יותר"
-
-
 def _direction_display_he(direction: Any) -> str:
     return {
         "BULLISH": "שורי",
@@ -4451,234 +3851,6 @@ async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             if WATCH_RUNTIME.get("scan_owner") == f"/debug {symbol}":
                 WATCH_RUNTIME["scan_owner"] = None
-
-
-async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "שימוש: /alert_explain BTC או /alert_explain BTC 24h"
-        )
-        return
-
-    symbol = context.args[0].upper()
-    timeframe = context.args[1].lower() if len(context.args) > 1 else None
-    rows = latest_snapshot_rows()
-    all_items = _build_opportunities_with_regime(rows, limit=500)
-
-    matches = [
-        item for item in all_items
-        if item.get("symbol") == symbol
-        and (timeframe is None or item.get("timeframe") == timeframe)
-    ]
-    if not matches:
-        await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
-        return
-
-    item = sorted(matches, key=lambda x: -x.get("priority", 0))[0]
-    await update.message.reply_text(_alert_card(1, item, all_items, rows), parse_mode="HTML")
-
-
-async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check Binance live-price coverage. This command does not modify DB data."""
-    rows = raw_latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
-        return
-
-    symbols = sorted({
-        str(r["symbol"]).upper()
-        for r in rows
-        if r["symbol"] and str(r["symbol"]).upper() not in NON_CRYPTO_SYMBOLS
-    })
-
-    try:
-        result = live_price_provider.fetch_binance_usdt_prices(symbols)
-    except Exception as exc:
-        await update.message.reply_text(
-            "בדיקת החיבור ל-Binance נכשלה.\n"
-            f"שגיאה: {exc!r}"
-        )
-        return
-
-    # Specific coin: compare one live Binance price with all seven Max Pain targets.
-    if context.args:
-        symbol = context.args[0].upper()
-
-        if symbol in NON_CRYPTO_SYMBOLS:
-            await update.message.reply_text(f"{symbol} מסונן ואינו נחשב מטבע קריפטו במערכת.")
-            return
-
-        live = result["prices"].get(symbol)
-        if not live:
-            await update.message.reply_text(
-                f"לא נמצא זוג {symbol}USDT ב-Binance.\n"
-                "בשלב הבא נוסיף מקור גיבוי למטבעות שאינם נסחרים שם."
-            )
-            return
-
-        symbol_rows = [
-            r for r in rows
-            if str(r["symbol"]).upper() == symbol
-        ]
-
-        table = []
-        for r in symbol_rows:
-            calc = live_price_provider.recalculate_distances(
-                live["price"],
-                r["short_max_pain"],
-                r["long_max_pain"],
-            )
-            table.append([
-                r["timeframe"],
-                fmt_price(live["price"]),
-                fmt_price(r["short_max_pain"]),
-                fmt_price(r["long_max_pain"]),
-                fmt(calc["short_signed_pct"]),
-                fmt(calc["long_signed_pct"]),
-                calc["closest_side"],
-            ])
-
-        output = tabulate(
-            table,
-            headers=["TF", "LivePrice", "ShortMP", "LongMP", "ToShort%", "ToLong%", "Closest"],
-            tablefmt="plain",
-        )
-
-        intro = (
-            f"בדיקת מחיר חי עבור {symbol}\n"
-            f"מקור: Binance ({live['pair']})\n"
-            f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
-            "המחיר עדיין לא נשמר ולא משנה את ההתראות בשלב זה.\n\n"
-        )
-
-        await update.message.reply_text(
-            intro + f"<pre>{html.escape(output)}</pre>",
-            parse_mode="HTML",
-        )
-        return
-
-    found_symbols = sorted(result["prices"].keys())
-    sample = found_symbols[:12]
-    sample_table = [
-        [
-            symbol,
-            result["prices"][symbol]["pair"],
-            fmt_price(result["prices"][symbol]["price"]),
-        ]
-        for symbol in sample
-    ]
-
-    summary = (
-        "בדיקת חיבור למחירי Binance\n"
-        "--------------------------------\n"
-        f"מטבעות קריפטו שנבדקו: {result['requested_count']}\n"
-        f"נמצא מחיר חי: {result['found_count']}\n"
-        f"חסרים ב-Binance: {result['missing_count']}\n"
-        f"זמן משיכה UTC: {result['fetched_at_utc']}\n\n"
-        "זו בדיקת כיסוי בלבד — המחירים עדיין לא משנים את החישובים או ההתראות.\n"
-    )
-
-    missing_text = ", ".join(result["missing_symbols"]) or "אין"
-    sample_output = tabulate(
-        sample_table,
-        headers=["Coin", "Binance Pair", "Live Price"],
-        tablefmt="plain",
-    )
-
-    await update.message.reply_text(
-        summary
-        + f"\nמטבעות חסרים: {missing_text}\n\n"
-        + "דוגמת מחירים שנמצאו:\n"
-        + f"<pre>{html.escape(sample_output)}</pre>",
-        parse_mode="HTML",
-    )
-
-
-async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Describe Binance-backed data saved by the latest collection."""
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין snapshot שמור. הריצו /collect קודם.")
-        return
-
-    symbols_used = sorted({str(r["symbol"]).upper() for r in rows if r["symbol"]})
-    collected = query(
-        "SELECT MAX(collected_at) AS latest_time FROM max_pain_snapshots"
-    )[0]["latest_time"]
-
-    text = (
-        "Binance collection status\n"
-        f"Latest snapshot: {collected}\n"
-        f"Symbols saved with Binance price: {len(symbols_used)}\n"
-        f"Rows saved: {len(rows)}\n"
-        "Current price and all Max Pain distances were calculated during /collect.\n"
-        "CoinGlass current price is not used as fallback."
-    )
-    await update.message.reply_text(text)
-
-
-
-
-def _alert_fingerprint(item: Dict[str, Any]) -> str:
-    # Fingerprint ignores exact priority so small score changes do not spam.
-    payload = "|".join([
-        item["symbol"],
-        item["timeframe"],
-        item["side"],
-        ",".join(sorted(item["types"])),
-    ])
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _alert_recently_sent(fingerprint: str) -> bool:
-    if use_postgres():
-        rows = query(
-            "SELECT 1 FROM alert_history "
-            "WHERE fingerprint = ? AND created_at >= NOW() - (? * INTERVAL '1 minute') "
-            "LIMIT 1",
-            (fingerprint, WATCH_COOLDOWN_MINUTES),
-        )
-    else:
-        rows = query(
-            "SELECT 1 FROM alert_history "
-            "WHERE fingerprint = ? AND datetime(created_at) >= datetime('now', ?) "
-            "LIMIT 1",
-            (fingerprint, f"-{WATCH_COOLDOWN_MINUTES} minutes"),
-        )
-    return bool(rows)
-
-
-def _remember_alert(item: Dict[str, Any], fingerprint: str) -> None:
-    now_value = datetime.now(timezone.utc)
-    if not use_postgres():
-        now_value = now_value.isoformat()
-
-    try:
-        execute_write(
-            "INSERT INTO alert_history "
-            "(created_at, fingerprint, symbol, timeframe, side, alert_types, priority) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                now_value,
-                fingerprint,
-                item["symbol"],
-                item["timeframe"],
-                item["side"],
-                ",".join(item["types"]),
-                item["priority"],
-            ),
-        )
-    except Exception:
-        # Existing fingerprint is acceptable; cooldown prevents normal duplicates.
-        pass
-
-
-def _watch_message(item, all_items, rows) -> str:
-    return (
-        "🚨 הזדמנות חדשה\n\n"
-        + _alert_card(1, item, all_items, rows)
-        + "\n\nזו התראת נתונים לבדיקה, לא הוראת מסחר."
-    )
 
 
 async def _send_magnet_watch_reports(

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import analysis
 
@@ -33,9 +33,6 @@ TIMEFRAME_HOURS = {
     "2w": 336.0,
     "1m": 720.0,
 }
-RAW_MAX_SCORE = 100.0
-
-
 def _get(row: Any, key: str, default=None):
     try:
         return row[key]
@@ -48,17 +45,6 @@ def _closest_side(row: Any) -> Optional[str]:
         _get(row, "distance_short_pct"),
         _get(row, "distance_long_pct"),
     )
-
-
-def _closest_distance(row: Any) -> Optional[float]:
-    side = _closest_side(row)
-    if side == "SHORT":
-        value = _get(row, "distance_short_pct")
-    elif side == "LONG":
-        value = _get(row, "distance_long_pct")
-    else:
-        return None
-    return abs(float(value)) if value is not None else None
 
 
 def _target_for_side(row: Any, side: str) -> Optional[float]:
@@ -75,48 +61,6 @@ def _amount_for_side(row: Any, side: str) -> float:
 def _opposite_amount(row: Any, side: str) -> float:
     key = "long_liquidation_amount" if side == "SHORT" else "short_liquidation_amount"
     return float(_get(row, key) or 0.0)
-
-
-def _relative_gap_advantage(row: Any) -> Dict[str, Optional[float]]:
-    """Relative advantage of the closer target over the farther target.
-
-    Symmetric targets receive zero advantage.
-    """
-    price = _get(row, "current_price")
-    short_mp = _get(row, "short_max_pain")
-    long_mp = _get(row, "long_max_pain")
-    if not price or short_mp is None or long_mp is None:
-        return {"near_distance": None, "far_distance": None, "advantage": None, "points": 0.0}
-
-    short_signed = (float(short_mp) - float(price)) / float(price) * 100.0
-    long_signed = (float(long_mp) - float(price)) / float(price) * 100.0
-    active_distances = []
-    if short_signed > 0:
-        active_distances.append(abs(short_signed))
-    if long_signed < 0:
-        active_distances.append(abs(long_signed))
-
-    # Relative-gap advantage requires two still-active opposing targets.
-    # A target already crossed by the live Binance price is excluded.
-    if len(active_distances) < 2:
-        return {"near_distance": None, "far_distance": None, "advantage": None, "points": 0.0}
-
-    near_distance = min(active_distances)
-    far_distance = max(active_distances)
-
-    if far_distance <= 0:
-        advantage = 0.0
-    else:
-        advantage = max(0.0, min(1.0, (far_distance - near_distance) / far_distance))
-
-    return {
-        "near_distance": near_distance,
-        "far_distance": far_distance,
-        "advantage": advantage,
-        "points": round(advantage * 15.0, 2),
-    }
-
-
 
 
 def _active_distance_for_side(row: Any, side: str) -> Optional[float]:
@@ -320,17 +264,6 @@ def _target_proximity_points(
     return round(25.0 - max(0.0, min(1.0, progress)) * 10.0, 2)
 
 
-def _proximity_points(distance_pct: Optional[float]) -> float:
-    """0..30. Full at <=0.25%, zero at >=2.00%."""
-    if distance_pct is None:
-        return 0.0
-    if distance_pct <= 0.25:
-        return 30.0
-    if distance_pct >= 2.0:
-        return 0.0
-    return round((2.0 - distance_pct) / 1.75 * 30.0, 2)
-
-
 def _dedupe_rows(rows: List[Any]) -> tuple[List[Any], Dict[str, int]]:
     """Keep one row per symbol/timeframe and count removed duplicates."""
     unique: Dict[tuple[str, str], Any] = {}
@@ -387,26 +320,6 @@ def _consensus_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
             "by_timeframe": dict(data["by_timeframe"]),
         }
     return result
-
-
-def _btc_similarity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
-    results = analysis.calculate_btc_similarity(rows, min_hits=0, limit=1000)
-    mapping = {item["symbol"]: item for item in results}
-
-    btc_rows = [
-        row for row in rows
-        if str(_get(row, "symbol", "")).upper() == "BTC"
-        and _closest_side(row)
-    ]
-    if btc_rows:
-        mapping["BTC"] = {
-            "symbol": "BTC",
-            "hits": len(btc_rows),
-            "total": len(btc_rows),
-            "same_tfs": ",".join(str(_get(row, "timeframe")) for row in btc_rows),
-            "different_tfs": "-",
-        }
-    return mapping
 
 
 def _directional_alignment(
@@ -786,117 +699,6 @@ def _liquidity_balance(near_amount: float, far_amount: float) -> Dict[str, Any]:
         "balance": balance,
         "points": round(points, 2),
     }
-
-
-def _incremental_adjusted_liquidity_map(
-    rows: List[Any],
-) -> Dict[str, Dict[str, Any]]:
-    """Incremental, timeframe-adjusted liquidity by symbol and side.
-
-    Long timeframes contain liquidity already visible in shorter timeframes.
-    Therefore we score only the positive *new increment* between consecutive
-    timeframes and normalize it by sqrt(delta hours).
-
-    This intentionally removes the automatic advantage of long timeframes.
-    """
-    grouped: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
-
-    for row in rows:
-        symbol = str(_get(row, "symbol", "")).upper()
-        timeframe = str(_get(row, "timeframe", ""))
-        hours = TIMEFRAME_HOURS.get(timeframe)
-        if not symbol or not hours:
-            continue
-
-        for side in ("LONG", "SHORT"):
-            grouped[(symbol, side)].append({
-                "timeframe": timeframe,
-                "hours": hours,
-                "amount": _amount_for_side(row, side),
-            })
-
-    result: Dict[str, Dict[str, Any]] = defaultdict(dict)
-
-    for (symbol, side), entries in grouped.items():
-        entries.sort(key=lambda item: item["hours"])
-        previous_amount = 0.0
-        previous_hours = 0.0
-        adjusted_items = []
-
-        for entry in entries:
-            amount = max(0.0, float(entry["amount"]))
-            increment = max(0.0, amount - previous_amount)
-            delta_hours = max(1.0, float(entry["hours"]) - previous_hours)
-            adjusted_increment = increment / math.sqrt(delta_hours)
-
-            adjusted_items.append({
-                **entry,
-                "incremental_liquidity": increment,
-                "adjusted_incremental_liquidity": adjusted_increment,
-            })
-            previous_amount = amount
-            previous_hours = float(entry["hours"])
-
-        positive_values = [
-            item["adjusted_incremental_liquidity"]
-            for item in adjusted_items
-            if item["adjusted_incremental_liquidity"] > 0
-        ]
-        baseline = (
-            sum(positive_values) / len(positive_values)
-            if positive_values else None
-        )
-
-        result[symbol][side] = {
-            "baseline": baseline,
-            "items": {
-                item["timeframe"]: item for item in adjusted_items
-            },
-        }
-
-    return dict(result)
-
-
-def _adjusted_multiplier(ratio: Optional[float]) -> float:
-    """Moderate 0.90..1.10 multiplier, not a separate score."""
-    if ratio is None:
-        return 1.0
-    ratio = max(0.0, float(ratio))
-    if ratio <= 1.0:
-        return round(0.90 + min(1.0, ratio) * 0.10, 4)
-    return round(min(1.10, 1.0 + min(1.0, ratio - 1.0) * 0.10), 4)
-
-
-def _balance_multiplier(near_share_pct: Optional[float]) -> float:
-    """Small continuous 0.95..1.05 modifier."""
-    if near_share_pct is None:
-        return 1.0
-    share = float(near_share_pct)
-    if share <= 40.0:
-        return 0.95
-    if share >= 60.0:
-        return 1.05
-    return round(0.95 + (share - 40.0) / 20.0 * 0.10, 4)
-
-
-def _high_liquidity_close_points(
-    distance_pct: Optional[float],
-    adjusted_ratio: Optional[float],
-) -> float:
-    """0..30 points, only when distance <= 1%."""
-    if distance_pct is None or distance_pct > 1.0 or adjusted_ratio is None:
-        return 0.0
-    if adjusted_ratio >= 2.50:
-        return 30.0
-    if adjusted_ratio >= 2.00:
-        return 24.0
-    if adjusted_ratio >= 1.60:
-        return 18.0
-    if adjusted_ratio >= 1.30:
-        return 12.0
-    if adjusted_ratio >= 1.10:
-        return 6.0
-    return 0.0
 
 
 def _score_details_for_side(
