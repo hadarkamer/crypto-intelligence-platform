@@ -69,7 +69,14 @@ STATE_SCRIPT=r'''() => {
             (e.innerText||e.getAttribute('alt')||'').trim().slice(0,256)))){region=node;break;}
     }
   }
-  const canvases=(region?chartsIn(region):[]).sort((a,b)=>{
+  // In the source's chart panel, the full-height empty state and renderer are
+  // flow siblings. A retained empty canvas can be displaced BELOW the notice,
+  // so canvas overlap alone cannot decide whether this map has data.
+  const panels=region?[...region.querySelectorAll('[class*="_box8__"]')].filter(e=>
+    visible(e)&&[...e.classList].some(name=>/^LiqHeatmap\d*_box8__/.test(name))):[];
+  const chartPanel=panels.length===1?panels[0]:null;
+  const chartRegion=chartPanel||region;
+  const canvases=(chartRegion?chartsIn(chartRegion):[]).sort((a,b)=>{
     const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
     return br.width*br.height-ar.width*ar.height;
   });
@@ -83,10 +90,12 @@ STATE_SCRIPT=r'''() => {
   };
   // CoinGlass uses both plain text divs and image/status empty-state markup.
   // Leaf text prevents a large ancestor from importing an unrelated notice.
-  const notices=(region?[...region.querySelectorAll('img[alt],[role="status"],[role="alert"],.ant-empty-description,div,span,p')]:[])
+  const notices=(chartRegion?[...chartRegion.querySelectorAll('img[alt],[role="status"],[role="alert"],.ant-empty-description,div,span,p')]:[])
     .filter(e=>e.matches('img[alt],[role="status"],[role="alert"],.ant-empty-description')||e.childElementCount===0)
     .filter(e=>{
-      if(!visible(e)||!noticeRect)return false;
+      if(!visible(e))return false;
+      if(chartPanel)return true; // Same source chart panel, including flow siblings.
+      if(!noticeRect)return false;
       const r=e.getBoundingClientRect();
       return Math.min(r.right,noticeRect.right)>Math.max(r.left,noticeRect.left)&&
         Math.min(r.bottom,noticeRect.bottom)>Math.max(r.top,noticeRect.top);

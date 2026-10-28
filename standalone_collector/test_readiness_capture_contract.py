@@ -29,6 +29,25 @@ def markup(hours=12,*,model=1,notice='',header_section=False,source_class=True):
 NOTICE='<div id="empty" style="position:absolute;left:300px;top:180px">No data</div>'
 
 
+def source_flow_markup(*,notice='nodata',notice_first=True,extra=''):
+    # Saved official Model1 CSS: the full-height empty state and BaseChart are
+    # flow siblings inside box8. The empty state can displace an existing empty
+    # canvas by exactly730px; their rectangles then do not overlap.
+    css=('*{box-sizing:border-box}html,body{margin:0}'
+        '.LiqHeatmap2_box8__fixture{max-height:110vh;padding-bottom:20px;height:var(--sx-height)}'
+        '.LiqHeatmap2_box9__fixture{display:flex;height:100%;justify-content:center;align-items:center;flex-direction:column}'
+        '.LiqHeatmap2_box10__fixture{font-size:14px}')
+    empty=('<div id="source-empty" class="LiqHeatmap2_box9__fixture"><div>icon</div>'
+        f'<div class="LiqHeatmap2_box10__fixture">{notice}</div></div>') if notice else ''
+    chart=('<div style="width:100%;height:100%;position:relative">'
+        '<canvas width="1255" height="730" style="width:100%;height:100%;display:block"></canvas></div>')
+    return ('<style>'+css+'</style><main class="LiqHeatmap2_box1__fixture" '
+        'style="position:absolute;left:300.5px;top:505.796875px;width:1255px">'
+        '<button role="combobox" style="height:30px;display:block">48 hour</button>'
+        '<div class="LiqHeatmap2_box8__fixture" style="--sx-height:750px">'
+        +(empty+chart if notice_first else chart+empty)+'</div>'+extra+'</main>')
+
+
 class SelectedMapDOMTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -95,6 +114,60 @@ class SelectedMapDOMTests(unittest.TestCase):
         page=self.page(markup(notice=noise+NOTICE))
         value=readiness.current_state(page,'12h',1)
         self.assertFalse(value['ready']);self.assertEqual(value['reason'],'no-data')
+
+    def test_source_panel_empty_state_before_or_after_canvas_blocks_readiness(self):
+        for notice,reason in (('nodata','no-data'),('Too many requests','request-limit')):
+            for notice_first in (True,False):
+                with self.subTest(notice=notice,notice_first=notice_first):
+                    page=self.page(source_flow_markup(notice=notice,notice_first=notice_first))
+                    value=readiness.current_state(page,'48h',1)
+                    self.assertFalse(value['ready']);self.assertEqual(value['reason'],reason)
+                    observed=value['_render_observation']
+                    self.assertEqual(observed['canvas_rect'],{'x':300.5,
+                        'y':1265.796875 if notice_first else 535.796875,'width':1255,'height':730})
+                    self.assertEqual(observed['canvas_count'],1)
+                    self.assertEqual(observed['visible_nodata'],reason=='no-data')
+                    self.assertEqual(observed['visible_request_limit'],reason=='request-limit')
+
+    def test_source_panel_excludes_other_component_notices_and_larger_canvas(self):
+        extra=('<aside style="position:absolute;left:0;top:30px">'
+            '<div role="status">nodata</div><div role="status">Too many requests</div>'
+            '<canvas width="1200" height="900"></canvas></aside>')
+        page=self.page(source_flow_markup(notice='',extra=extra))
+        value=readiness.wait_for_render(page,'48h',1,2000)
+        self.assertTrue(value['ready'])
+        self.assertEqual(readiness.geometry_from_state(value),{'x':300.5,'y':535.796875,
+            'width':1255,'height':730,'page_width':1600})
+        self.assertEqual(value['_render_observation']['canvas_count'],1)
+        self.assertFalse(value['_render_observation']['visible_nodata'])
+        self.assertFalse(value['_render_observation']['visible_request_limit'])
+
+    def test_source_empty_state_removed_restores_original_canvas_geometry_within_budget(self):
+        page=self.page(source_flow_markup())
+        page.evaluate("() => setTimeout(()=>document.querySelector('#source-empty').remove(),60)")
+        value=readiness.wait_for_render(page,'48h',1,2000)
+        self.assertTrue(value['ready'])
+        self.assertEqual(readiness.geometry_from_state(value),{'x':300.5,'y':535.796875,
+            'width':1255,'height':730,'page_width':1600})
+
+    def test_source_flow_empty_state_persists_through_single_saved_png_without_hover(self):
+        page=self.page(source_flow_markup())
+        started=time.monotonic()
+        value=readiness.wait_for_render(page,'48h',1,150)
+        self.assertFalse(value['ready']);self.assertEqual(value['reason'],'no-data')
+        self.assertLess(time.monotonic()-started,1)
+        with tempfile.TemporaryDirectory() as directory:
+            image=Path(directory)/'original.png'
+            with patch.object(page,'screenshot',wraps=page.screenshot) as shot:
+                page.screenshot(path=str(image),full_page=True)
+                original=image.read_bytes()
+                with self.assertRaises(execution.StageFailure) as caught:
+                    readiness.verify_saved_render(page,'48h',1,value,image,Mock(summary=lambda:{}))
+                self.assertEqual(caught.exception.code,'source_not_readable')
+                shot.assert_called_once();self.assertEqual(image.read_bytes(),original)
+            observations=json.loads(image.with_suffix('.render.json').read_text())['render_observations']
+            self.assertEqual([o['reason'] for o in observations],['no-data','no-data'])
+            self.assertTrue(all(o['visible_nodata'] for o in observations))
 
     def test_loading_and_resize_finish_before_the_bound_geometry_and_original_png(self):
         page=self.page(markup(notice=NOTICE))
