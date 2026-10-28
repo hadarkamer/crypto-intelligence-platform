@@ -58,7 +58,8 @@ def prepare():
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
-                 'capture_readiness.py','capture_failure_observer.py','store_diagnostics.py','heatmap_hover.py'):
+                 'capture_readiness.py','capture_failure_observer.py','capture_failure_diagnostics.py',
+                 'store_diagnostics.py','heatmap_hover.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -106,7 +107,9 @@ def prepare():
         'test_response_shape','test_capture_diagnostics','test_capture_readiness',
         'test_source_login_required','test_timeout_retention','test_source_compatibility',
         'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
-        'test_capture_failure_observer','-v'],
+        'test_capture_failure_observer','test_capture_failure_diagnostics',
+        'test_candle_failure_diagnostics','test_render_observations',
+        'test_failure_diagnostic_integration','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -122,6 +125,7 @@ def prepare():
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
         'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
         'capture_diagnostics':'bounded per-operation duration and failure phase',
+        'failure_diagnostics':'capture-failure.v1; bounded original-observation facts, unchanged acceptance',
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'DOM loading/blur checks before one retained PNG and paid analysis',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',

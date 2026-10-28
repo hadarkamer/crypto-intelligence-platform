@@ -113,7 +113,62 @@ READ_TOOLTIP = r'''mode => {
 }'''
 
 
-def candle_points(image_path, bounds):
+def _candle_tooltip_expression():
+    """Observe the existing predicate without another DOM read or poll.
+
+    Successful polls still return the original string. Only a timed-out poll
+    exports this bounded, text-free summary. The ordinary reader (including
+    Model 3) is unchanged.
+    """
+    reader = READ_TOOLTIP.replace('mode => {', r'''mode => {
+  let visibleRect;
+  function report(reason, text) {
+    try {
+      const entry={visible_count:Math.min(9,candidates.length),reason,
+        kind:candidates.length===0?'none':candidates.length!==1?'multiple':
+          reason==='accepted'?'candle':text && text.length<=220 &&
+          text.includes('Liquidation Leverage')?'liquidity':'other'};
+      if(typeof text==='string')entry.text_length=Math.min(221,text.length);
+      if(candidates.length===1 && visibleRect)entry.rect=visibleRect;
+      summary.poll_count=Math.min(1000,summary.poll_count+1);
+      summary.reason_counts[reason]=Math.min(1000,(summary.reason_counts[reason]||0)+1);
+      if(!summary.first)summary.first=entry;
+      summary.last=entry;
+    } catch (_) { /* Optional diagnostics must not change acceptance. */ }
+  }
+''', 1).replace('    return true;\n  });', r'''    try { visibleRect={x:r.x,y:r.y,width:r.width,height:r.height}; } catch (_) {}
+    return true;
+  });''', 1).replace('  if(candidates.length!==1)return null;', r'''  if(candidates.length!==1){
+    report(candidates.length===0?'no_visible_tooltip':'multiple_visible_tooltips');
+    return null;
+  }''', 1).replace(
+        " : text.includes('Liquidation Leverage')))return null;",
+        " : text.includes('Liquidation Leverage'))){report(text.length>220?'text_too_long':'not_candle',text);return null;}", 1
+    ).replace('  return text;', "  report('accepted',text);\n  return text;", 1)
+    return r'''(() => {
+      const summary={poll_count:0,reason_counts:{}};
+      const reader=(''' + reader + r''');
+      const predicate=()=>reader('candle');
+      predicate.failure=()=>{
+        try { return {_candle_poll_timeout:true,tooltip:summary}; }
+        catch (_) { return null; }
+      };
+      return predicate;
+    })()'''
+
+
+READ_CANDLE_TOOLTIP = _candle_tooltip_expression()
+
+
+def _candle_diagnostic_update(target, **values):
+    # Never replace a source/read failure with an optional observer failure.
+    try:
+        if target is not None:target.update(values)
+    except Exception:
+        pass
+
+
+def candle_points(image_path, bounds, *, diagnostics=None):
     """Pixels select hover locations only; no price is inferred from colour.
 
     Search only the last four rendered columns. These candle colours are
@@ -134,6 +189,16 @@ def candle_points(image_path, bounds):
         for point in pixels:
             if not groups or point[1]-groups[-1][-1][1]>2:groups.append([])
             groups[-1].append(point)
+        if diagnostics is not None:
+            try:
+                diagnostics.update(pixel_count=len(pixels),pixel_group_count=len(groups),
+                    pixel_groups=[{'pixel_count':len(group),'bounds':{
+                        'left':min(p[0] for p in group),'right':max(p[0] for p in group),
+                        'top':group[0][1],'bottom':group[-1][1]}} for group in groups[:8]])
+                if not groups:diagnostics['outcome']='no_pixel_groups'
+                elif len(groups)>8:diagnostics['outcome']='ambiguous_pixel_groups'
+            except Exception:
+                pass
         if not 1<=len(groups)<=8:raise HoverError('hover_candle_not_found')
         points=[]
         for group in groups:
@@ -144,6 +209,9 @@ def candle_points(image_path, bounds):
             x=max(p[0] for p in group)
             ys=[p[1] for p in group if p[0]==x]
             points.append((x+.5,ys[len(ys)//2]+.5))
+        if diagnostics is not None:
+            try:diagnostics['points']=[{'x':px,'y':py} for px,py in points[:8]]
+            except Exception:pass
         return points
     finally:image.close()
 
@@ -367,7 +435,11 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     viewport = page.viewport_size
     if not viewport or bounds['bottom']-bounds['top']+40 > viewport['height']:
         raise HoverError('hover_plot_clipped')
+    candle_diagnostics = {'phase':'initial','outcome':'not_started','attempts':[]} if model in (1,2) else None
     marker=price_overlay_point(image_path,geometry,bounds) if model in (1,2) else None
+    if candle_diagnostics is not None:
+        try:candle_diagnostics['marker']={'x':marker[0],'y':marker[1]} if marker is not None else None
+        except Exception:pass
     if model!=3:
         page.evaluate('(top) => window.scrollTo(0, top)', max(0, bounds['top']-20))
     scroll_y = page.evaluate('() => window.scrollY')
@@ -375,7 +447,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         raise HoverError('hover_plot_clipped')
     x = bounds['right']-.25
     read_count = 0
-    def wait_for_tooltip(expression, *, arg=None, timeout_ms):
+    def wait_for_tooltip(expression, *, arg=None, timeout_ms, candle_attempt=None):
         # One DOM evaluation per sample. The source returned visible values to
         # evaluate while the separate wait_for_function mechanism timed out.
         # Poll the SAME predicate inside this evaluation; return its value with
@@ -383,7 +455,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         remaining = max_seconds - (time.monotonic()-started)
         if remaining <= 0:
             raise HoverError('hover_deadline')
-        result = page.evaluate(r"""({value, timeout}) => new Promise((resolve,reject) => {
+        poll = r"""({value, timeout}) => new Promise((resolve,reject) => {
             const predicate = (""" + expression + r""");
             const end = performance.now() + timeout;
             function observe() {
@@ -396,9 +468,15 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
                 } catch (error) { reject(error); }
             }
             observe();
-        })""", {'value': arg, 'timeout': max(1,min(timeout_ms,remaining*1000))})
+        })"""
+        if candle_attempt is not None:
+            poll=poll.replace('resolve(null); return;', 'resolve(predicate.failure()); return;', 1)
+        result = page.evaluate(poll, {'value': arg, 'timeout': max(1,min(timeout_ms,remaining*1000))})
         if time.monotonic()-started > max_seconds:
             raise HoverError('hover_deadline')
+        if candle_attempt is not None and isinstance(result,dict) and result.get('_candle_poll_timeout') is True:
+            _candle_diagnostic_update(candle_attempt,tooltip=result.get('tooltip'))
+            result=None
         if not result:
             raise HoverError('hover_update_timeout')
         return result
@@ -408,24 +486,57 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         page.mouse.click(marker[0],marker[1]-page.evaluate('() => window.scrollY'))
         page.evaluate('(top) => window.scrollTo(0, top)',scroll_y)
 
-    def read_candle(points):
+    def read_candle(points, *, phase='initial'):
+        _candle_diagnostic_update(candle_diagnostics,phase=phase,outcome='liquidity_wait')
         # A visible liquidity tooltip first proves an old candle tip was replaced.
         page.mouse.move(x,bounds['top']+1.5-scroll_y)
         wait_for_tooltip(READ_TOOLTIP,timeout_ms=700)
-        for px,py in points:
+        _candle_diagnostic_update(candle_diagnostics,outcome='candle_search')
+        for point_index,(px,py) in enumerate(points):
+            attempt=None
+            attempt_started=time.monotonic()
+            try:
+                if candle_diagnostics is not None and len(candle_diagnostics['attempts'])<9:
+                    attempt={'phase':phase,'point_index':point_index,'x':px,'y':py,
+                        'viewport_x':px,'viewport_y':py-scroll_y,'timeout_ms':350,'outcome':'pending'}
+                    candle_diagnostics['attempts'].append(attempt)
+            except Exception:
+                attempt=None
             page.mouse.move(px,py-scroll_y)
             try:
-                text=wait_for_tooltip('() => ('+READ_TOOLTIP+")('candle')",timeout_ms=350)
+                text=wait_for_tooltip(READ_CANDLE_TOOLTIP if attempt is not None else
+                    '() => ('+READ_TOOLTIP+")('candle')",timeout_ms=350,candle_attempt=attempt)
             except HoverError as exc:
+                _candle_diagnostic_update(attempt,outcome='timeout' if exc.reason=='hover_update_timeout' else 'error')
                 if exc.reason!='hover_update_timeout':raise
                 continue
-            return parse_candle(text),(px,py)
+            except Exception:
+                _candle_diagnostic_update(attempt,outcome='error')
+                raise
+            finally:
+                try:_candle_diagnostic_update(attempt,elapsed_ms=round((time.monotonic()-attempt_started)*1000,3))
+                except Exception:pass
+            try:
+                parsed=parse_candle(text)
+            except HoverError:
+                _candle_diagnostic_update(attempt,outcome='parse_rejected')
+                _candle_diagnostic_update(candle_diagnostics,outcome='parse_rejected')
+                raise
+            _candle_diagnostic_update(attempt,outcome='accepted')
+            _candle_diagnostic_update(candle_diagnostics,outcome='accepted')
+            try:
+                candle_diagnostics[phase+'_candle']={key:parsed[key] for key in ('open','high','low','close','source_time')}
+            except Exception:pass
+            return parsed,(px,py)
+        _candle_diagnostic_update(candle_diagnostics,outcome='all_candidates_timeout')
         raise HoverError('hover_candle_not_found')
 
     candle=None
     if model in (1,2):
-        if marker is None:raise HoverError('hover_candle_not_found')
-        candle,candle_point=read_candle(candle_points(image_path,bounds))
+        if marker is None:
+            _candle_diagnostic_update(candle_diagnostics,outcome='legend_missing')
+            raise HoverError('hover_candle_not_found')
+        candle,candle_point=read_candle(candle_points(image_path,bounds,diagnostics=candle_diagnostics))
     if marker is not None:toggle_candles()
 
     def read(y, expected=None, *, native=False):
@@ -607,8 +718,10 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         if not rows[-1]['price']<=close<=rows[0]['price']:
             raise HoverError('hover_candle_outside_axis')
         toggle_candles()
-        final,_=read_candle([candle_point])
-        if final!=candle:raise HoverError('hover_candle_changed')
+        final,_=read_candle([candle_point],phase='final')
+        if final!=candle:
+            _candle_diagnostic_update(candle_diagnostics,outcome='candle_changed')
+            raise HoverError('hover_candle_changed')
     page.mouse.move(0,0)
     return {'version':VERSION,'metric':METRIC,'unit':rows[0]['unit'],
             'scope':'displayed_latest_column','heatmap_model':model,

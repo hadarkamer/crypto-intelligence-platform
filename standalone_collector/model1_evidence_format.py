@@ -104,7 +104,7 @@ def save_analysis_snapshot(raw,root,image):
     path.write_text(encoded,encoding='utf-8');path.chmod(0o600)
 
 
-def evidence_payload(directory,timeframe):
+def evidence_payload(directory,timeframe,*,job_id=None,heatmap_model=None):
     if timeframe not in ('12H','24H','48H'):raise ValueError('Unknown timeframe')
     root=Path(directory)
     image_path=root/'capture'/f'coinglass_btc_heatmap_{timeframe.lower()}.png'
@@ -133,6 +133,15 @@ def evidence_payload(directory,timeframe):
         if data.startswith(b'\x89PNG\r\n\x1a\n'):
             image=data;diagnostic['image_retained']=True
             diagnostic['image_sha256']=hashlib.sha256(data).hexdigest()
+    if job_id is not None and heatmap_model is not None:
+        try:
+            from capture_failure_diagnostics import read_failure_diagnostics
+            failure=read_failure_diagnostics(root,job_id=job_id,timeframe=timeframe,
+                heatmap_model=heatmap_model,image_sha256=diagnostic.get('image_sha256'))
+            if failure is not None:diagnostic['capture_failure']=failure
+        except Exception:
+            # Retention of existing PNG/readiness evidence remains independent.
+            pass
     render=image_path.with_suffix('.render.json')
     if render.is_file() and not render.is_symlink() and render.stat().st_size<=8192:
         try:value=json.loads(render.read_text(encoding='utf-8'))
@@ -141,6 +150,13 @@ def evidence_payload(directory,timeframe):
             from capture_readiness import safe_readiness,safe_network
             diagnostic['source_readiness']=safe_readiness(value.get('source_readiness'))
             diagnostic['source_network']=safe_network(value.get('source_network'))
+            if 'capture_failure' not in diagnostic:
+                try:
+                    from capture_readiness import safe_render_observations
+                    observations=safe_render_observations(value.get('render_observations'))
+                    if observations:diagnostic['render_observations']=observations
+                except Exception:
+                    pass
     snapshot=root/'analysis_evidence.json'
     if snapshot.is_file() and not snapshot.is_symlink() and snapshot.stat().st_size<=MAX_JSON:
         try:value=json.loads(snapshot.read_text())

@@ -4,9 +4,14 @@ import hashlib
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+
+# Exercise the generated reader used by the worker. This module is loaded
+# first in the final prepare suite, before other tests add the runtime path.
+sys.path.insert(0, str(Path(__file__).resolve().parent/'runtime'))
 from heatmap_hover import (parse_tooltip, validate_rows, ground_analysis,
     attach_measurements, model_content, plot_bounds, capture_column, candidate_pools,
     READ_TOOLTIP, READ_UPDATED_TOOLTIP, HoverError, price_overlay_point, close_heatmap_settings,

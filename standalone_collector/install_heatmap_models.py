@@ -113,6 +113,12 @@ def install(runtime:Path):
         "AND j.created_at > now()-interval '6 hours'\"\"\", (jid,self.heatmap_model)")
     text=once(text,'async def run_existing_scanner(tf: str, jid: str)',
         'async def run_existing_scanner(tf: str, jid: str, heatmap_model: int = 1)')
+    # Bind both normal-failure and timeout evidence to the original job/model.
+    # The source call, error outcome and result validation remain unchanged.
+    if text.count('evidence_payload(tmp, tf)')!=2:
+        raise RuntimeError('Failure evidence identity insertion points changed')
+    text=text.replace('evidence_payload(tmp, tf)',
+        'evidence_payload(tmp, tf, job_id=jid, heatmap_model=heatmap_model)')
     # The paid 1-CPU service measured a complete Model 3 hover sweep at 193s.
     # Keep a finite whole-job allowance for capture plus the existing AI call;
     # Models 1–2 retain their original deadline and no source is retried.
