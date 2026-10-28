@@ -1,6 +1,7 @@
 """Observe source rendering and bounded network facts without changing the page."""
 from collections import Counter
 import json
+import math
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -40,7 +41,28 @@ STATE_SCRIPT=r'''() => {
   const label=trigger ? trigger.textContent.trim().toLowerCase() : '';
   const ui={login_link_visible:[...document.querySelectorAll('a[href="/login"]')].some(visible),
     account_link_present:!!document.querySelector('a[href="/account"]')};
-  const state=(ready,reason)=>({ready,reason,label,...ui});
+  const state=(ready,reason)=>{
+    const result={ready,reason,label,...ui};
+    // Observation only: none of these fields participates in readiness or waits.
+    // Reuse this DOM evaluation; no extra browser request, timer or screenshot.
+    try {
+      const charts=[...document.querySelectorAll('canvas')].filter(e=>{
+        const r=e.getBoundingClientRect();return visible(e)&&r.width>=400&&r.height>=200;
+      }).sort((a,b)=>{
+        const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
+        return br.width*br.height-ar.width*ar.height;
+      });
+      const notices=[...document.querySelectorAll('img[alt], [role="status"], [role="alert"], .ant-empty-description')].slice(0,64).filter(visible);
+      const words=e=>(e.innerText||e.getAttribute('alt')||'').trim().slice(0,256);
+      const rect=charts.length?charts[0].getBoundingClientRect():null;
+      result._render_observation={observed_ms:performance.now(),canvas_count:charts.length,
+        visible_nodata:notices.some(e=>/^(?:no\s*data|no data available)$/i.test(words(e))),
+        visible_request_limit:notices.some(e=>/too many requests|requests? limit|rate limit|request too frequent/i.test(words(e))),
+        viewport:{width:innerWidth,height:innerHeight},scroll_x:scrollX,scroll_y:scrollY};
+      if(rect)result._render_observation.canvas_rect={x:rect.x+scrollX,y:rect.y+scrollY,width:rect.width,height:rect.height};
+    } catch (_) {} // Diagnostic collection must never change the original verdict.
+    return result;
+  };
   if([...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
       visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.innerText||'')))
     return state(false,'login-required');
@@ -132,11 +154,52 @@ def safe_readiness(value):
     return out
 
 
+def _safe_render_measurement(value):
+    """Retain finite geometry and fixed booleans only; never page text or URLs."""
+    if not isinstance(value,dict):return {}
+    out={}
+    for key in ('visible_nodata','visible_request_limit'):
+        if type(value.get(key)) is bool:out[key]=value[key]
+    count=value.get('canvas_count')
+    if type(count) is int and 0<=count<=1000:out['canvas_count']=count
+    for key in ('observed_ms','scroll_x','scroll_y'):
+        number=value.get(key)
+        if type(number) in (int,float) and math.isfinite(number) and 0<=number<=1e12:
+            out[key]=number
+    for key,fields in (('canvas_rect',('x','y','width','height')),('viewport',('width','height'))):
+        coordinates=value.get(key)
+        if not isinstance(coordinates,dict):continue
+        numbers={name:coordinates.get(name) for name in fields}
+        if (all(type(v) in (int,float) and math.isfinite(v) and -1e6<=v<=1e6 for v in numbers.values())
+            and numbers['width']>0 and numbers['height']>0):out[key]=numbers
+    return out
+
+
+def safe_render_observations(value):
+    """Bound the two original observations surrounding the existing screenshot."""
+    if not isinstance(value,list):return []
+    result=[]
+    for item in value[:2]:
+        if not isinstance(item,dict) or item.get('stage') not in ('before_screenshot','after_screenshot'):continue
+        measured=_safe_render_measurement(item)
+        if not measured:continue
+        state=safe_readiness(item)
+        result.append({'stage':item['stage'],'ready':state['ready'],'reason':state['reason'],
+            **({'label':state['label']} if 'label' in state else {}),**measured})
+    return result
+
+
 def current_state(page,timeframe,heatmap_model):
     if timeframe not in LABELS or not valid_source(page.url,heatmap_model):
         return {'ready':False,'reason':'invalid-source'}
-    try:state=safe_readiness(page.evaluate(STATE_SCRIPT))
+    try:
+        observed=page.evaluate(STATE_SCRIPT)
+        state=safe_readiness(observed)
     except Exception:return {'ready':False,'reason':'unverified'}
+    try:
+        measurement=_safe_render_measurement(observed.get('_render_observation'))
+        if measurement:state['_render_observation']=measurement
+    except Exception:pass
     if state['reason']!='login-required' and state.get('label')!=LABELS[timeframe]:
         state.update(ready=False,reason='wrong-label')
     if heatmap_model==3 and state['ready']:
@@ -248,10 +311,17 @@ class CaptureNetworkDiagnostics:
 def verify_saved_render(page,timeframe,heatmap_model,state,image_path,diagnostics):
     """Keep the one original PNG even on failure, then stop before paid analysis."""
     from model1_execution import StageFailure
-    before=safe_readiness(state);after=current_state(page,timeframe,heatmap_model)
+    before=safe_readiness(state);observed_after=current_state(page,timeframe,heatmap_model)
+    after=safe_readiness(observed_after)
     verdict=before if before['ready'] is not True else after
     network=safe_network(diagnostics.summary())
     payload={'source_readiness':verdict,'source_network':network,'assessment_validated':False}
+    try:
+        observations=safe_render_observations([
+            {**before,**state.get('_render_observation',{}),'stage':'before_screenshot'},
+            {**after,**observed_after.get('_render_observation',{}),'stage':'after_screenshot'}])
+        if observations:payload['render_observations']=observations
+    except Exception:pass
     if heatmap_model==3:
         payload['price_axis_before']=before.get('price_axis_ticks')
         payload['price_axis_after']=after.get('price_axis_ticks')

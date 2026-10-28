@@ -245,6 +245,13 @@ def run_task(main,timeframe,job_id,output):
             **failure_detail(exc),**_analysis_facts,'capture_operations':list(_capture_events)}
         root.mkdir(parents=True,exist_ok=True);path=root/'error.json'
         path.write_text(json.dumps(report),encoding='utf-8');path.chmod(0o600)
+        if _current_stage=='capture':
+            try:
+                from capture_failure_diagnostics import save_failure_diagnostics
+                save_failure_diagnostics(exc,root,job_id=job_id,timeframe=timeframe,heatmap_model=HEATMAP_MODEL)
+            except Exception:
+                # Optional evidence cannot replace the existing error/outcome.
+                pass
         return 1
     finally:
         _progress_path=None;_progress_started=None;_active_capture_phase=None;_progress_identity={}
