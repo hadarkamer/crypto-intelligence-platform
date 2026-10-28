@@ -39,9 +39,9 @@ def fixture_values():
         'viewport': {'width': 1600, 'height': 1000}, 'scroll_y': 556, 'x': 1493.75,
         'top_y': 576.25, 'bottom_y': 1173, 'top_row': row(84420),
         'calibration': [row(84420-i*56.26) for i in range(4)],
-        'transitions': [576.75, 581.75, 587.75], 'initial_step': 56.26,
+        'transitions': [576.75, 581.75, 587.75], 'grid_origin': 576.75, 'initial_step': 56.26,
         'bottom_row': row(77556), 'last_inner': row(77612.26),
-        'last_boundary': 1172.5, 'count': 122}
+        'last_boundary': 1164.75, 'count': 122}
 
 
 def execute_existing_guard(selector, values):
@@ -148,12 +148,33 @@ class CaptureFailureDiagnosticsTests(unittest.TestCase):
     def test_borderline_rejection_preserves_fractional_inputs_without_rounding(self):
         values = fixture_values()
         values['height'] = 4.94896
+        values['last_boundary'] = values['grid_origin']+(values['count']-2)*values['height']
         exc, _ = execute_existing_guard('height < 2', values)
         detail = self.record(exc)['resolution']
         self.assertEqual(detail['height'], 4.94896)
         self.assertEqual(detail['subreason'], 'grid_deviation_above_1_1')
         self.assertAlmostEqual(detail['max_deviation'], 1.10208, places=9)
         self.assertNotEqual(detail['max_deviation'], round(detail['max_deviation'], 3))
+
+    def test_failure_reports_the_fitted_origin_and_last_boundary(self):
+        values = fixture_values()
+        values.update(height=4.9, grid_origin=576.35)
+        values['last_boundary'] = values['grid_origin']+(values['count']-2)*values['height']
+        exc, _ = execute_existing_guard('height < 2', values)
+        detail = self.record(exc)['resolution']
+        self.assertEqual(detail['grid_origin'], 576.35)
+        self.assertAlmostEqual(detail['max_deviation'], 1.6)
+        self.assertAlmostEqual(detail['last_boundary_residual'], 0)
+        self.assertEqual(detail['failing_transition_index'], 2)
+
+        values.update(transitions=[576.35, 581.25, 586.15])
+        values['last_boundary'] += 1.2
+        exc, _ = execute_existing_guard('height < 2', values)
+        detail = self.record(exc)['resolution']
+        self.assertEqual(detail['subreason'], 'grid_deviation_above_1_1')
+        self.assertAlmostEqual(detail['max_deviation'], 1.2)
+        self.assertAlmostEqual(detail['last_boundary_residual'], 1.2)
+        self.assertEqual(detail['failing_transition_index'], values['count']-2)
 
     def test_only_canonical_identity_hashes_and_bounded_timestamps_cross_storage(self):
         payload = self.basic_payload()

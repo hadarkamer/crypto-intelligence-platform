@@ -15,7 +15,8 @@ def expand_capture_readiness(text):
     if len(common)!=1:raise RuntimeError('Common overlay guard insertion point changed')
     dismiss.body[common[0]+1:common[0]+1]=ast.parse(
         "require_unblocked_source(page, HEATMAP_MODEL, phase='overlay_dismissal')").body
-    inserted={'page':0,'shot':0}
+    inserted={'page':0,'shot':0,'geometry':0}
+    geometry=[]
     class Gate(ast.NodeTransformer):
         def visit_Assign(self,node):
             if isinstance(node.value,ast.Call) and ast.unparse(node.value.func)=='context.new_page':
@@ -24,16 +25,26 @@ def expand_capture_readiness(text):
             return node
         def visit_With(self,node):
             self.generic_visit(node)
+            if (len(node.body)==1 and isinstance(node.body[0],ast.Assign)
+                and any(isinstance(target,ast.Name) and target.id=='chart_rect' for target in node.body[0].targets)):
+                inserted['geometry']+=1
+                # The old global-canvas query ran before readiness could wait.
+                # Bind the exact rectangle from the state that passed instead.
+                node.body[0].value=ast.Call(func=ast.Name(id='geometry_from_state',ctx=ast.Load()),
+                    args=[ast.Name(id='render_state',ctx=ast.Load())],keywords=[])
+                geometry.append(node)
+                return []
             if (len(node.body)==1 and isinstance(node.body[0],ast.Expr)
                 and isinstance(node.body[0].value,ast.Call)
                 and ast.unparse(node.body[0].value.func)=='page.screenshot'):
                 inserted['shot']+=1
+                if len(geometry)!=1:raise RuntimeError('Capture geometry ordering changed')
                 before=ast.parse("with capture_operation('render_readiness'):\n    render_state = wait_for_render(page, timeframe, HEATMAP_MODEL)\n    require_unblocked_source(page, HEATMAP_MODEL, phase='render_readiness')").body
                 after=ast.parse("with capture_operation('render_readiness'):\n    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)").body
-                return [*before,node,*after]
+                return [*before,*geometry,node,*after]
             return node
     capture.body=[Gate().visit(n) for n in capture.body]
-    if inserted!={'page':1,'shot':1}:raise RuntimeError('Capture readiness insertion points changed')
+    if inserted!={'page':1,'shot':1,'geometry':1}:raise RuntimeError('Capture readiness insertion points changed')
     driver=next(n for n in capture.body if isinstance(n,ast.With)
         and ast.unparse(n.items[0].context_expr)=='sync_playwright()')
     start=next(i for i,n in enumerate(driver.body) if isinstance(n,ast.With)
@@ -46,7 +57,7 @@ def expand_capture_readiness(text):
     driver.body[start:finish]=[ast.Try(body=driver.body[start:finish],handlers=[handler],orelse=[],finalbody=[])]
     index=next(i+1 for i,n in enumerate(tree.body) if isinstance(n,ast.ImportFrom) and n.module=='__future__')
     tree.body.insert(index,ast.ImportFrom(module='capture_readiness',names=[ast.alias(name=n)
-        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source')],level=0))
+        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source','geometry_from_state')],level=0))
     tree.body.insert(index+1,ast.ImportFrom(module='capture_failure_observer',
         names=[ast.alias(name='observe_capture_failure')],level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'

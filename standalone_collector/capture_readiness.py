@@ -3,6 +3,7 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
+import time
 from urllib.parse import parse_qs, urlsplit
 
 LABELS={'12h':'12 hour','24h':'24 hour','48h':'48 hour'}
@@ -11,7 +12,7 @@ LABELS={'12h':'12 hour','24h':'24 hour','48h':'48 hour'}
 SOURCE_PATH_ALIASES={3:frozenset({'/liquidation-heatmap-model3'})}
 REASONS=frozenset({'render-checks-passed','loading-indicator','blur','no-chart',
     'visible-dialog','login-required','wrong-label','invalid-source','unverified',
-    'axis-not-ready','render-pending'})
+    'axis-not-ready','render-pending','no-data','request-limit','geometry-changed'})
 NETWORK_KINDS=frozenset({'timeout','connection','cancelled','blocked','other'})
 LOGIN_GATE_SCRIPT=r'''() => {
   const visible = el => {
@@ -41,45 +42,77 @@ STATE_SCRIPT=r'''() => {
   const label=trigger ? trigger.textContent.trim().toLowerCase() : '';
   const ui={login_link_visible:[...document.querySelectorAll('a[href="/login"]')].some(visible),
     account_link_present:!!document.querySelector('a[href="/account"]')};
+  const chartsIn=root=>[...root.querySelectorAll('canvas')].filter(e=> {
+    const r=e.getBoundingClientRect();return visible(e)&&r.width>=400&&r.height>=200;
+  });
+  // Bind the canvas to the active timeframe control before considering any
+  // notices. An unrelated chart elsewhere on the page must not win by size.
+  const ancestors=[];
+  for(let node=trigger?trigger.parentElement:null;node&&node!==document.body;node=node.parentElement)ancestors.push(node);
+  let region=null;
+  for(const node of ancestors){
+    // The source's LiqHeatmap component remains present while its canvas is
+    // absent/loading. Stop there instead of borrowing a sibling widget's chart.
+    const component=[...node.classList].some(name=>/^LiqHeatmap\d*_box1__/.test(name));
+    if(component){region=node;break;}
+  }
+  if(!region){
+    for(const node of ancestors){
+      if(chartsIn(node).length){region=node;break;}
+      // A sizeable empty chart panel is also a boundary. Header-only sections
+      // are skipped, so their sibling chart can share the actual component.
+      const r=node.getBoundingClientRect();
+      if(node.matches('section,[role="tabpanel"]')&&r.width>=400&&r.height>=200&&
+        [...node.querySelectorAll('img[alt],[role="status"],[role="alert"],div,span,p')].some(e=>
+          visible(e)&&(e.tagName==='IMG'||e.childElementCount===0)&&
+          /^(?:no\s*data|no data available)$|too many requests|requests? limit|rate limit/i.test(
+            (e.innerText||e.getAttribute('alt')||'').trim().slice(0,256)))){region=node;break;}
+    }
+  }
+  const canvases=(region?chartsIn(region):[]).sort((a,b)=>{
+    const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
+    return br.width*br.height-ar.width*ar.height;
+  });
+  const canvas=canvases[0],cr=canvas?canvas.getBoundingClientRect():null;
+  const noticeRect=cr||(region?region.getBoundingClientRect():null);
+  const intersection=e=> {
+    if(!cr)return 0;
+    const r=e.getBoundingClientRect();
+    return Math.max(0,Math.min(r.right,cr.right)-Math.max(r.left,cr.left)) *
+      Math.max(0,Math.min(r.bottom,cr.bottom)-Math.max(r.top,cr.top));
+  };
+  // CoinGlass uses both plain text divs and image/status empty-state markup.
+  // Leaf text prevents a large ancestor from importing an unrelated notice.
+  const notices=(region?[...region.querySelectorAll('img[alt],[role="status"],[role="alert"],.ant-empty-description,div,span,p')]:[])
+    .filter(e=>e.matches('img[alt],[role="status"],[role="alert"],.ant-empty-description')||e.childElementCount===0)
+    .filter(e=>{
+      if(!visible(e)||!noticeRect)return false;
+      const r=e.getBoundingClientRect();
+      return Math.min(r.right,noticeRect.right)>Math.max(r.left,noticeRect.left)&&
+        Math.min(r.bottom,noticeRect.bottom)>Math.max(r.top,noticeRect.top);
+    });
+  const words=e=>(e.innerText||e.getAttribute('alt')||'').trim().slice(0,256);
+  const noData=notices.some(e=>/^(?:no\s*data|no data available)$/i.test(words(e)));
+  const requestLimit=notices.some(e=>/too many requests|requests? limit|rate limit|requests?(?: are)? (?:too )?frequent/i.test(words(e)));
   const state=(ready,reason)=>{
     const result={ready,reason,label,...ui};
-    // Observation only: none of these fields participates in readiness or waits.
-    // Reuse this DOM evaluation; no extra browser request, timer or screenshot.
+    // These are the same selected-chart facts used by the decision below.
+    // Preserve them for geometry binding and the two screenshot observations.
     try {
-      const charts=[...document.querySelectorAll('canvas')].filter(e=>{
-        const r=e.getBoundingClientRect();return visible(e)&&r.width>=400&&r.height>=200;
-      }).sort((a,b)=>{
-        const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
-        return br.width*br.height-ar.width*ar.height;
-      });
-      const notices=[...document.querySelectorAll('img[alt], [role="status"], [role="alert"], .ant-empty-description')].slice(0,64).filter(visible);
-      const words=e=>(e.innerText||e.getAttribute('alt')||'').trim().slice(0,256);
-      const rect=charts.length?charts[0].getBoundingClientRect():null;
-      result._render_observation={observed_ms:performance.now(),canvas_count:charts.length,
-        visible_nodata:notices.some(e=>/^(?:no\s*data|no data available)$/i.test(words(e))),
-        visible_request_limit:notices.some(e=>/too many requests|requests? limit|rate limit|request too frequent/i.test(words(e))),
-        viewport:{width:innerWidth,height:innerHeight},scroll_x:scrollX,scroll_y:scrollY};
-      if(rect)result._render_observation.canvas_rect={x:rect.x+scrollX,y:rect.y+scrollY,width:rect.width,height:rect.height};
+      result._render_observation={observed_ms:performance.now(),canvas_count:canvases.length,
+        visible_nodata:noData,visible_request_limit:requestLimit,
+        viewport:{width:innerWidth,height:innerHeight},scroll_x:scrollX,scroll_y:scrollY,
+        page_width:Math.max(document.documentElement.scrollWidth,innerWidth)};
+      if(cr)result._render_observation.canvas_rect={x:cr.x+scrollX,y:cr.y+scrollY,width:cr.width,height:cr.height};
     } catch (_) {} // Diagnostic collection must never change the original verdict.
     return result;
   };
   if([...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
       visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.innerText||'')))
     return state(false,'login-required');
-  const canvases=[...document.querySelectorAll('canvas')].filter(e=> {
-    const r=e.getBoundingClientRect(); return visible(e) && r.width>=400 && r.height>=200;
-  });
+  if(requestLimit)return state(false,'request-limit');
+  if(noData)return state(false,'no-data');
   if(!canvases.length) return state(false,'no-chart');
-  const canvas=canvases.sort((a,b)=> {
-    const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
-    return br.width*br.height-ar.width*ar.height;
-  })[0];
-  const cr=canvas.getBoundingClientRect();
-  const intersection=e=> {
-    const r=e.getBoundingClientRect();
-    return Math.max(0,Math.min(r.right,cr.right)-Math.max(r.left,cr.left)) *
-      Math.max(0,Math.min(r.bottom,cr.bottom)-Math.max(r.top,cr.top));
-  };
   const indicators=document.querySelectorAll('[role="progressbar"], [aria-busy="true"], .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner" i], [data-loading="true"]');
   if([...indicators].some(e=>visible(e) && intersection(e)>0)) return state(false,'loading-indicator');
   const blurred=value=> [...(value||'').matchAll(/blur\(\s*([\d.]+)px\s*\)/g)].some(m=>Number(m[1])>0);
@@ -95,6 +128,22 @@ STATE_SCRIPT=r'''() => {
   if([...dialogs].some(e=>visible(e) && intersection(e)>0)) return state(false,'visible-dialog');
   return state(true,'render-checks-passed');
 }'''
+
+# Wait for the selected chart's readiness and geometry to survive consecutive
+# paint frames, not for an arbitrary fixed delay. Numeric contents are still
+# verified by the unchanged native hover reader after the retained screenshot.
+RENDER_PAINT_SCRIPT=r'''arg => new Promise(resolve=>{
+  const read=('''+STATE_SCRIPT+r''');let previous='',stable=0,frame;
+  const timer=setTimeout(()=>{cancelAnimationFrame(frame);resolve(false)},arg.timeout);
+  const check=()=>{
+    const state=read(),measurement=state._render_observation;
+    if(state.reason==='login-required'){clearTimeout(timer);resolve(false);return;}
+    const key=state.ready&&state.label===arg.label&&measurement&&measurement.canvas_rect
+      ?JSON.stringify([measurement.canvas_rect,measurement.page_width]):'';
+    stable=key&&key===previous?stable+1:0;previous=key;
+    if(stable>=2){clearTimeout(timer);resolve(true)}else frame=requestAnimationFrame(check);
+  };frame=requestAnimationFrame(check);
+})'''
 
 # Model 3 exposes its price ticks as visible DOM text. A purple canvas without
 # those ticks is an unfinished chart, even when no spinner remains.
@@ -162,7 +211,7 @@ def _safe_render_measurement(value):
         if type(value.get(key)) is bool:out[key]=value[key]
     count=value.get('canvas_count')
     if type(count) is int and 0<=count<=1000:out['canvas_count']=count
-    for key in ('observed_ms','scroll_x','scroll_y'):
+    for key in ('observed_ms','scroll_x','scroll_y','page_width'):
         number=value.get(key)
         if type(number) in (int,float) and math.isfinite(number) and 0<=number<=1e12:
             out[key]=number
@@ -187,6 +236,15 @@ def safe_render_observations(value):
         result.append({'stage':item['stage'],'ready':state['ready'],'reason':state['reason'],
             **({'label':state['label']} if 'label' in state else {}),**measured})
     return result
+
+
+def geometry_from_state(state):
+    """Use the rectangle that actually passed readiness, without another query."""
+    if not isinstance(state,dict):return None
+    measurement=_safe_render_measurement(state.get('_render_observation'))
+    rectangle=measurement.get('canvas_rect');width=measurement.get('page_width')
+    if not rectangle or type(width) not in (int,float) or width<=0:return None
+    return {**rectangle,'page_width':width}
 
 
 def current_state(page,timeframe,heatmap_model):
@@ -227,20 +285,27 @@ def require_unblocked_source(page,heatmap_model,*,phase):
 
 def wait_for_render(page,timeframe,heatmap_model,timeout_ms=60_000):
     """Poll only existing DOM; no navigation, refresh, requests, clicks or styling."""
+    timeout=max(1,min(int(timeout_ms),60_000))
+    deadline=time.monotonic()+timeout/1000
+    def remaining():return max(0,int((deadline-time.monotonic())*1000))
     state=current_state(page,timeframe,heatmap_model)
     def painted(value):
-        if heatmap_model!=3 or not value['ready']:return value
-        try:ready=page.evaluate(MODEL3_PAINT_SCRIPT,6000) is True
+        if not value['ready']:return value
+        budget=remaining()
+        if budget<=0:return {**value,'ready':False,'reason':'render-pending'}
+        try:
+            ready=(page.evaluate(MODEL3_PAINT_SCRIPT,min(6000,budget)) if heatmap_model==3
+                else page.evaluate(RENDER_PAINT_SCRIPT,{'timeout':budget,'label':LABELS[timeframe]})) is True
         except Exception:ready=False
-        return current_state(page,timeframe,heatmap_model) if ready else {**value,'ready':False,'reason':'render-pending'}
+        observed=current_state(page,timeframe,heatmap_model)
+        return observed if ready or not observed['ready'] else {**observed,'ready':False,'reason':'render-pending'}
     if state['ready'] or state['reason'] in ('invalid-source','login-required'):return painted(state)
-    timeout=max(1,min(int(timeout_ms),60_000))
     predicate='expected => { const s=('+STATE_SCRIPT+')(); return s.reason === "login-required" || (s.ready === true && s.label === expected); }'
     if heatmap_model==3:
         predicate=predicate.replace('s.label === expected','s.label === expected && ('+MODEL3_AXIS_SCRIPT+')()')
     try:
-        page.wait_for_function(predicate,arg=LABELS[timeframe],timeout=timeout,polling=1000)
-        page.wait_for_timeout(1000)
+        budget=remaining()
+        if budget>0:page.wait_for_function(predicate,arg=LABELS[timeframe],timeout=budget,polling=1000)
     except Exception:pass
     return painted(current_state(page,timeframe,heatmap_model))
 
@@ -327,6 +392,14 @@ def verify_saved_render(page,timeframe,heatmap_model,state,image_path,diagnostic
         payload['price_axis_after']=after.get('price_axis_ticks')
         if before['ready'] and after['ready'] and before.get('price_axis_ticks')!=after.get('price_axis_ticks'):
             verdict={**after,'ready':False,'reason':'render-pending'}
+            payload['source_readiness']=verdict
+    if before['ready'] and after['ready']:
+        before_geometry=geometry_from_state(state);after_geometry=geometry_from_state(observed_after)
+        if before_geometry is None or after_geometry is None:
+            verdict={**after,'ready':False,'reason':'unverified'}
+            payload['source_readiness']=verdict
+        elif before_geometry!=after_geometry:
+            verdict={**after,'ready':False,'reason':'geometry-changed'}
             payload['source_readiness']=verdict
     target=Path(image_path).with_suffix('.render.json')
     target.write_text(json.dumps(payload,allow_nan=False),encoding='utf-8');target.chmod(0o600)

@@ -106,7 +106,8 @@ def _resolution(value):
         raise ValueError('Invalid resolution subreason')
     out = {'subreason': subreason}
     for key in ('top_y', 'bottom_y', 'y', 'next_y', 'sample_y', 'previous_y',
-                'target', 'height', 'minimum_transition_spacing', 'max_deviation'):
+                'target', 'height', 'grid_origin', 'last_boundary_residual',
+                'minimum_transition_spacing', 'max_deviation'):
         if key in value:
             out[key] = _number(value[key], -1e6, 1e6)
     for key in ('initial_step', 'price_step', 'gap', 'tolerance'):
@@ -135,7 +136,7 @@ def _resolution_from_locals(values):
     """Classify the existing rejection after it occurred; do not rerun capture."""
     out = {}
     keys = ('top_y', 'bottom_y', 'y', 'next_y', 'sample_y', 'previous_y',
-        'target', 'height', 'initial_step', 'price_step', 'gap', 'tolerance',
+        'target', 'height', 'grid_origin', 'initial_step', 'price_step', 'gap', 'tolerance',
         'count', 'offset', 'last_boundary', 'transitions', 'calibration',
         'top_row', 'bottom_row', 'last_inner')
     for key in keys:
@@ -149,16 +150,27 @@ def _resolution_from_locals(values):
     subreason = 'unresolved'
     if 'height' in values and transitions:
         height = values['height']
-        expected = [transitions[0]+i*height for i in range(len(transitions))]
+        # Report the actual fitted grid used by the reader. Older captures did
+        # not have grid_origin and anchored the grid at the first transition.
+        origin = values.get('grid_origin', transitions[0])
+        expected = [origin+i*height for i in range(len(transitions))]
         residuals = [actual-target for actual, target in zip(transitions, expected)]
         out['expected_transitions'] = expected
         out['transition_residuals'] = residuals
         out['max_deviation'] = max(abs(item) for item in residuals)
+        count = values.get('count')
+        last_boundary = values.get('last_boundary')
+        if ('grid_origin' in values and type(count) is int and count >= 4
+                and type(last_boundary) in (int, float)):
+            out['last_boundary_residual'] = last_boundary-(origin+(count-2)*height)
+            out['max_deviation'] = max(out['max_deviation'], abs(out['last_boundary_residual']))
         if height < 2:
             subreason = 'computed_height_below_2'
         elif out['max_deviation'] > 1.1:
             subreason = 'grid_deviation_above_1_1'
-            out['failing_transition_index'] = next(i for i, item in enumerate(residuals) if abs(item) > 1.1)
+            out['failing_transition_index'] = next(
+                (i for i, item in enumerate(residuals) if abs(item) > 1.1),
+                count-2 if type(count) is int else len(residuals))
     elif 'last_boundary' in values and values['last_boundary'] is None:
         subreason = 'last_boundary_missing'
     elif out.get('minimum_transition_spacing', 2) < 2:
