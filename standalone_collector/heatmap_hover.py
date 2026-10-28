@@ -574,6 +574,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
 
     top_y, bottom_y = bounds['top']+.25, float(bounds['bottom'])
     top_row, top_y = edge(top_y, 1)
+    top_same_y = top_y
     calibration = [top_row]
     transitions = []
     y = top_y
@@ -596,6 +597,8 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
                 calibration.append(row)
             elif any(row[k] != calibration[-1][k] for k in ('value','unit','source_time')):
                 raise HoverError('hover_snapshot_changed')
+            elif len(calibration)==1:
+                top_same_y=sample_y
             y = sample_y
     for i,row in enumerate(calibration):row['id']=f'r{i}'
     if model==2:
@@ -612,6 +615,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
     # Locate the last boundary too. This prevents a one-pixel calibration error
     # from accumulating across the whole height of the chart.
     previous_y = bottom_y
+    bottom_same_y = bottom_y
     last_boundary = None
     for offset in range(1,122):
         target = bottom_y-offset
@@ -633,13 +637,25 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
             break
         if any(row[k] != bottom_row[k] for k in ('value','unit','source_time')):
             raise HoverError('hover_snapshot_changed')
+        bottom_same_y=target
         previous_y = target
     if last_boundary is None:raise HoverError('hover_resolution_insufficient')
     count = (round((calibration[1]['price']-last_inner['price'])/initial_step)+3 if model==2
              else round((top_row['price']-bottom_row['price'])/initial_step)+1)
     if not 4 <= count <= MAX_ROWS:raise HoverError('hover_row_count')
+    grid_origin = transitions[0]
     height = (last_boundary-transitions[0])/(count-2)
-    if height < 2 or any(abs(t-(transitions[0]+i*height))>1.1 for i,t in enumerate(transitions)):
+    if (model in (1,2) and height >= 2 and
+        any(abs(t-(grid_origin+i*height))>1.1 for i,t in enumerate(transitions))):
+        # Rendered cells overlap at their borders. Their draw order can shift
+        # one observed transition even on a uniform price grid. Fit ALL observed
+        # boundaries instead of treating the first one as exact; keep the same
+        # resolution/deviation limits, and verify the resulting row positions.
+        height,grid_origin = statistics.linear_regression(
+            [*range(len(transitions)),count-2],[*transitions,last_boundary])
+    if (height < 2 or
+        any(abs(t-(grid_origin+i*height))>1.1 for i,t in enumerate(transitions)) or
+        abs(last_boundary-(grid_origin+(count-2)*height))>1.1):
         raise HoverError('hover_resolution_insufficient')
     # Edge tooltip prices need not be exact points on the interior grid.
     # Live Model 2/12H: 89264.50, 89070.97, 88877.24, 88683.51.
@@ -653,7 +669,7 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         # renderer protocol round-trip between each of the already-known rows.
         remaining = max_seconds-(time.monotonic()-started)
         if remaining <= 0:raise HoverError('hover_deadline')
-        points=[{'index':i,'y':transitions[0]+(i-.5)*height-scroll_y,
+        points=[{'index':i,'y':grid_origin+(i-.5)*height-scroll_y,
                  'expected':calibration[1]['price']-(i-1)*price_step}
                 for i in range(len(calibration),count-1)]
         texts=page.evaluate(r"""async arg=>{
@@ -694,11 +710,24 @@ def capture_column(page, image_path, geometry, *, model, timeframe, source_axis=
         read_count+=len(texts)
     rows = []
     positions = []
+    # Edge pixels can be antialiased. Use the middle of positions that
+    # actually returned the edge row, including partially clipped M2 rows.
+    # Model 3 retains its existing axis/candle-bracketing coordinates.
+    top_target=(top_y+top_same_y)/2 if model in (1,2) else top_y
+    bottom_target=(bottom_y+bottom_same_y)/2 if model in (1,2) else bottom_y
     for i in range(count):
-        target = top_y if i==0 else bottom_y if i==count-1 else transitions[0]+(i-.5)*height
+        target = top_target if i==0 else bottom_target if i==count-1 else grid_origin+(i-.5)*height
         expected = (top_row['price'] if i==0 else bottom_row['price'] if i==count-1
                     else calibration[1]['price']-(i-1)*price_step)
         row = calibration[i] if i<len(calibration) else bottom_row if i==count-1 else direct_rows[i] if model==3 else read(target,expected)
+        if model in (1,2) and (i<len(calibration) or i==count-1):
+            # Calibration sampled near a boundary. Bind its stored position to
+            # the SAME displayed row at the final centre, as for the rest of
+            # the sweep; never assign a fitted position to an unverified value.
+            bound_row=read(target,expected)
+            if any(bound_row[k]!=row[k] for k in ('price','value','unit','source_time')):
+                raise HoverError('hover_snapshot_changed')
+            row=bound_row
         if abs(row['price']-expected)>.025:raise HoverError('hover_price_grid_gap')
         row.update(id=f'r{i}',y_fraction=round((target-bounds['top'])/(bounds['bottom']-bounds['top']),6))
         rows.append(row);positions.append(target)
@@ -779,8 +808,16 @@ def candidate_pools(snapshot, image_path):
                 if previous_y is not None and not 0 < y-previous_y <= max_gap:
                     raise HoverError('hover_geometry_invalid')
                 previous_y=y
-                samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*height))))))
-                         for d in (-.2,0,.2)]
+                radius=.2*height
+                if snapshot.get('heatmap_model') in (1,2):
+                    # These edge positions are midpoints of observed same-row
+                    # samples. Allow for the original one-pixel inward edge
+                    # probe when reconstructing a conservative sample radius;
+                    # a clipped edge must never sample its neighbouring row.
+                    if index==0:radius=min(radius,max(0,y-bounds['top']-1.25))
+                    elif index==len(snapshot['rows'])-1:radius=min(radius,max(0,bounds['bottom']-1-y))
+                samples=[colour(image.getpixel((x,round(max(bounds['top'],min(bounds['bottom'],y+d*radius))))))
+                         for d in (-1,0,1)]
                 label=next((c for c in ('yellow','green','blue') if samples.count(c)>=2),None)
                 if row['value']==0:label=None
                 if groups and groups[-1][0]==label:groups[-1][1].append(row)

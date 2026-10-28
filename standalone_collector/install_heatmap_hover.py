@@ -65,17 +65,16 @@ def install(runtime: Path):
     text = once(text, "'height': 1000}", "'height': 1300 if HEATMAP_MODEL == 3 else 1000}")
     text = once(text, 'page.screenshot(path=str(path), full_page=True)',
         'page.screenshot(path=str(path), full_page=HEATMAP_MODEL != 3)')
-    text = once(text, "                with capture_operation('chart_geometry'):\n",
+    readiness_anchor = "                with capture_operation('render_readiness'):\n                    render_state = wait_for_render(page, timeframe, HEATMAP_MODEL)\n"
+    text = once(text, readiness_anchor,
         "                if HEATMAP_MODEL == 3:\n"
         "                    from heatmap_hover import close_heatmap_settings\n"
         "                    with capture_operation('overlay_dismissal'):\n"
         "                        close_heatmap_settings(page)\n"
         "                    page.evaluate('() => window.scrollTo(0, 0)')\n"
-        "                with capture_operation('chart_geometry'):\n")
-    anchor = "                    page.screenshot("
-    text = once(text, anchor,
+        "                with capture_operation('overlay_dismissal'):\n"
         "                    from heatmap_hover import dismiss_cookie_banner\n"
-        "                    dismiss_cookie_banner(page, model=HEATMAP_MODEL)\n" + anchor)
+        "                    dismiss_cookie_banner(page, model=HEATMAP_MODEL)\n" + readiness_anchor)
     anchor = '                    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)\n'
     text = once(text, anchor, anchor+
         "                from heatmap_hover import require_cookie_banner_hidden\n"

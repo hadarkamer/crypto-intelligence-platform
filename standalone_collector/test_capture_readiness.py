@@ -20,27 +20,33 @@ from heatmap_models import source_url
 
 def state(reason='render-checks-passed',label='12 hour'):
     return {'ready':reason=='render-checks-passed','reason':reason,'label':label,
-        'login_link_visible':True,'account_link_present':False}
+        'login_link_visible':True,'account_link_present':False,
+        '_render_observation':{'canvas_count':1,'canvas_rect':{'x':0,'y':20,'width':800,'height':600},
+            'viewport':{'width':1000,'height':800},'page_width':1000}}
 
 
 class ReadinessTests(unittest.TestCase):
     def page(self,states):
-        page=Mock();page.url=source_url(1);page.evaluate.side_effect=states
+        page=Mock();page.url=source_url(1);pending=iter(states);last=states[-1]
+        page.evaluate.side_effect=lambda script,*args: True if script==readiness.RENDER_PAINT_SCRIPT else next(pending,last)
         return page
 
-    def test_ready_does_not_wait_or_require_account_marker(self):
+    def test_ready_checks_paint_without_fixed_delay_or_account_requirement(self):
         page=self.page([state()])
         result=readiness.wait_for_render(page,'12h',1)
         self.assertTrue(result['ready']);self.assertTrue(result['login_link_visible'])
         page.wait_for_function.assert_not_called()
+        page.wait_for_timeout.assert_not_called()
+        self.assertEqual(page.evaluate.call_args_list[1].args[0],readiness.RENDER_PAINT_SCRIPT)
         page.goto.assert_not_called();page.reload.assert_not_called()
 
     def test_loading_waits_for_real_dom_readiness(self):
         page=self.page([state('loading-indicator'),state()])
         self.assertTrue(readiness.wait_for_render(page,'12h',1,999999)['ready'])
-        self.assertEqual(page.wait_for_function.call_args.kwargs['timeout'],60000)
+        self.assertGreater(page.wait_for_function.call_args.kwargs['timeout'],59000)
+        self.assertLessEqual(page.wait_for_function.call_args.kwargs['timeout'],60000)
         self.assertEqual(page.wait_for_function.call_args.kwargs['arg'],'12 hour')
-        page.wait_for_timeout.assert_called_once_with(1000)
+        page.wait_for_timeout.assert_not_called()
 
     def test_unfinished_loading_timeout_stays_explicit(self):
         page=self.page([state('loading-indicator'),state('loading-indicator')])
@@ -52,7 +58,7 @@ class ReadinessTests(unittest.TestCase):
             for hours in (12,24,48):
                 page=Mock(url=source_url(model))
                 page.evaluate.side_effect=lambda script,*args: ([77000,87000] if script==readiness.MODEL3_AXIS_SCRIPT
-                    else True if script==readiness.MODEL3_PAINT_SCRIPT else state(label=f'{hours} hour'))
+                    else True if script in (readiness.MODEL3_PAINT_SCRIPT,readiness.RENDER_PAINT_SCRIPT) else state(label=f'{hours} hour'))
                 with self.subTest(model=model,hours=hours):
                     self.assertTrue(readiness.wait_for_render(page,f'{hours}h',model)['ready'])
             self.assertFalse(readiness.valid_source(source_url(model).replace('coin=BTC','coin=ETH'),model))
@@ -183,7 +189,7 @@ class RenderDOMTests(unittest.TestCase):
     def check(self,body):
         page=self.browser.new_page(viewport={'width':1000,'height':800})
         try:
-            page.set_content('<button role="combobox">48 hour</button><a href="/login">Login</a>'+body)
+            page.set_content('<section><button role="combobox">48 hour</button><a href="/login">Login</a>'+body+'</section>')
             return page.evaluate(readiness.STATE_SCRIPT)
         finally:page.close()
 
