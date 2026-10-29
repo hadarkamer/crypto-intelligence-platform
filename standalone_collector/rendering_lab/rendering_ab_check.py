@@ -67,8 +67,42 @@ def image_compare(first, second, bounds):
         changed = left.width * left.height - maximum.histogram()[0]
         return {'equal': changed == 0, 'changed_pixels': changed,
                 'pixels': left.width * left.height, 'max_channel_difference': maximum.getextrema()[1],
+                'difference_bbox_relative_to_plot': maximum.getbbox(),
+                'tiles_8_by_4_changed_pixels': [
+                    (tile.width * tile.height - tile.histogram()[0])
+                    for iy in range(4) for ix in range(8)
+                    for tile in [maximum.crop((ix*left.width//8, iy*left.height//4,
+                                               (ix+1)*left.width//8, (iy+1)*left.height//4))]],
                 'first_rgb_sha256': hashlib.sha256(left.tobytes()).hexdigest(),
                 'second_rgb_sha256': hashlib.sha256(right.tobytes()).hexdigest()}
+
+
+
+def private_plot_preview(label, image, bounds):
+    """Bounded plot-only preview in private build logs; never public artifacts."""
+    import base64
+    import io
+    from PIL import Image
+    with Image.open(image) as source:
+        box = tuple(int(bounds[key]) for key in ('left', 'top', 'right', 'bottom'))
+        crop = source.convert('RGB').crop((box[0], box[1], box[2]+1, box[3]+1))
+        crop.thumbnail((384, 216))
+        encoded = io.BytesIO()
+        crop.save(encoded, format='WEBP', quality=48, method=4)
+        data = encoded.getvalue()
+        if len(data) > 12000:
+            crop.thumbnail((256, 144))
+            encoded = io.BytesIO()
+            crop.save(encoded, format='WEBP', quality=35, method=4)
+            data = encoded.getvalue()
+        if len(data) > 12000:
+            return
+        value = base64.b64encode(data).decode('ascii')
+        chunks = [value[i:i+4000] for i in range(0, len(value), 4000)]
+        for index, chunk in enumerate(chunks):
+            print('CG29_PRIVATE_PLOT ' + json.dumps({'label':label, 'part':index,
+                'parts':len(chunks), 'sha256':hashlib.sha256(data).hexdigest(),
+                'mime_type':'image/webp', 'base64':chunk}, separators=(',', ':')), flush=True)
 
 
 def run(timeframes, runtime, fps, requested_output=None):
@@ -208,6 +242,12 @@ def run(timeframes, runtime, fps, requested_output=None):
         pair['A']['status'] = 'passed_original_validators'
         persist()
         emit('A_completed', {'timeframe': timeframe, **pair['A']})
+        # Diagnostic observation only: unchanged renderer, after the original
+        # sweep. It does not replace the original PNG or the acceptance gate.
+        control_image = output / (timeframe + '-A-control.png')
+        own_image(page, timeframe, control_image, geometry, a['price_axis_ticks'], force=True)
+        pair['baseline_control_pixels'] = image_compare(image, control_image, a['plot_bounds'])
+        emit('baseline_control', {'timeframe':timeframe, 'pixels':pair['baseline_control_pixels']})
         second_image = output / (timeframe + '-B.png')
         try:
             enabled = candidate.enable(page, fps=fps)
@@ -227,6 +267,12 @@ def run(timeframes, runtime, fps, requested_output=None):
             pair['checks'] = checks
             pair['pixels'] = image_compare(image, second_image, a['plot_bounds'])
             pair['gate_after_B'] = candidate.snapshot(page)
+            pair['candidate_vs_control_pixels'] = image_compare(control_image, second_image, a['plot_bounds'])
+            emit('pixel_comparison', {'timeframe':timeframe, 'original_vs_candidate':pair['pixels'],
+                 'unchanged_control_vs_candidate':pair['candidate_vs_control_pixels']})
+            if not pair['pixels']['equal']:
+                for label, path in (('original', image), ('unchanged-control', control_image), ('candidate', second_image)):
+                    private_plot_preview(timeframe+'-'+label, path, a['plot_bounds'])
             require(all(checks.values()), 'paired_snapshot_or_output_mismatch')
             require(pair['pixels']['equal'], 'paired_map_pixels_changed')
         except Exception as exc:
@@ -236,6 +282,20 @@ def run(timeframes, runtime, fps, requested_output=None):
         finally:
             restored = candidate.disable(page)
             pair['restored'] = restored['enabled'] is False and restored['ticker_count'] == entry['ticker_count']
+            # Keep the original failure, but finish this observation before
+            # closing the lab browser. Do not accept changed pixels as success.
+            if pair.get('error') == 'paired_map_pixels_changed' and pair['restored']:
+                try:
+                    recovery_image = output / (timeframe + '-failed-pair-restored.png')
+                    own_image(page, timeframe, recovery_image, geometry, a['price_axis_ticks'], force=True)
+                    pair['failed_pair_restored_pixels'] = image_compare(second_image, recovery_image, a['plot_bounds'])
+                    pair['control_vs_restored_pixels'] = image_compare(control_image, recovery_image, a['plot_bounds'])
+                    emit('failed_pair_restored', {'timeframe':timeframe,
+                         'candidate_vs_restored':pair['failed_pair_restored_pixels'],
+                         'unchanged_control_vs_restored':pair['control_vs_restored_pixels']})
+                    private_plot_preview(timeframe+'-restored', recovery_image, a['plot_bounds'])
+                except Exception as diagnostic_error:
+                    pair['restoration_observation_error'] = safe_error(diagnostic_error)
             persist()
         require(pair['restored'], 'render_listener_not_restored')
         anchors(page, a)
