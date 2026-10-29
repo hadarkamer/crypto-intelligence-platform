@@ -49,6 +49,27 @@ def cycle(collector=None, cycle_id="test-cycle", rows=None):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_bounded_encoding_preserves_existing_object_hashes(self):
+        # Frozen identities from the deployed encoder, including UTF-8 and
+        # oversized-parent chunking. Root hashes bind every child object.
+        cases = [
+            ({"text": "שלום 🌍", "numbers": [1.0, -0.0, 1e-20, True]},
+             "c6bc5f32b57537938ab02794186999e664dd4359dc75cbb9fdcb0d70fa328f31"),
+            ({"samples": [[i / 7, i % 2] for i in range(65000)]},
+             "519e626f570564f6cd0e29ff4f25b4df568cc86382799121a05f1fba59f6943e"),
+            (["x" * 270000, "y" * 270000],
+             "aa74abd30799d5d35041af42db1ee9540fa8349c9883ca56acddc30f3ae8a422"),
+        ]
+        for value, expected in cases:
+            collector = capture.Collector()
+            ref = collector.record("input", value)
+            self.assertEqual(ref, expected)
+            self.assertEqual(capture.recover(collector.package(), ref), capture.normalized(value))
+            self.assertFalse(collector.errors)
+        collector = capture.Collector()
+        self.assertIsNone(collector.record("input", "x" * capture.MAX_OBJECT_BYTES))
+        self.assertEqual(collector.errors, [{"code": "OVERSIZED_SCALAR"}])
+
     def test_normalization_preserves_numeric_values_and_utc(self):
         value = {"zero": -0.0, "integral": 2.0, "fraction": 2.25,
                  "at": datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=2)))}

@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from functools import wraps
@@ -78,6 +79,11 @@ WINDOWS: Dict[str, int] = {
     "72h": 144,
     "7d": 336,
 }
+
+class _ReferenceRanges(dict):
+    """Allow receipts to bind a generation without retaining its result."""
+    __slots__ = ("__weakref__",)
+
 
 _REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
 # Receipts bind the exact returned cache object, including concurrent builds.
@@ -138,7 +144,10 @@ def _remember_reference_inputs(result, package, metadata):
         if size > _REFERENCE_INPUT_MAX_BYTES:
             return
         with _REFERENCE_INPUT_LOCK:
-            _REFERENCE_INPUT_RECEIPTS[id(result)] = (result, package,
+            for key, receipt in list(_REFERENCE_INPUT_RECEIPTS.items()):
+                if receipt[0]() is None:
+                    del _REFERENCE_INPUT_RECEIPTS[key]
+            _REFERENCE_INPUT_RECEIPTS[id(result)] = (weakref.ref(result), package,
                 {**metadata, "result_sha256": consumed_inputs.digest(result)}, size,
                 _local_input_guard(result))
             while (len(_REFERENCE_INPUT_RECEIPTS) > _REFERENCE_INPUT_MAX_ENTRIES or
@@ -149,10 +158,12 @@ def _remember_reference_inputs(result, package, metadata):
 
 
 def _use_reference_inputs(symbol, result, cache_hit):
+    if consumed_inputs.current() is None:
+        return
     try:
         with _REFERENCE_INPUT_LOCK:
             receipt = _REFERENCE_INPUT_RECEIPTS.get(id(result))
-            if receipt is not None and receipt[0] is result:
+            if receipt is not None and receipt[0]() is result:
                 _REFERENCE_INPUT_RECEIPTS.move_to_end(id(result))
             else:
                 receipt = None
@@ -876,7 +887,7 @@ def get_reference_ranges(symbol: str, refresh: bool = False) -> Dict[str, Any]:
     if symbol in {"ETH", "DOGE"}:
         started = datetime.now(timezone.utc).isoformat()
         with _safe_input_collection() as collector:
-            result = calculate_reference_ranges(symbol)
+            result = _ReferenceRanges(calculate_reference_ranges(symbol))
         try:
             if collector is not None:
                 package = collector.package()

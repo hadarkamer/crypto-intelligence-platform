@@ -10,6 +10,7 @@ import threading
 import time
 import types
 import unittest
+import weakref
 from unittest.mock import Mock, patch
 
 try:
@@ -185,6 +186,28 @@ class CacheInputTests(unittest.TestCase):
         self.assertIs(cached, result)
         self.assertEqual(compute.call_count, 1)
         self.assertEqual(len(payloads(evidence, "capture_gap")), 1)
+
+    def test_refresh_releases_unused_result_but_keeps_active_generation(self):
+        with patch.object(history, "calculate_reference_ranges", side_effect=self.baseline):
+            old = history.get_reference_ranges("ETH")
+            old_ref = weakref.ref(old)
+            self.value = 11
+            current = history.get_reference_ranges("ETH", refresh=True)
+            with capture.collect() as evidence:
+                history._use_reference_inputs("ETH", old, True)
+            self.assertEqual(payloads(evidence, "oi_baseline_calculation")[0]["result"], old)
+            self.assertFalse(evidence.errors)
+            del old
+            gc.collect()
+            self.assertIsNone(old_ref())
+            self.assertIs(history.get_reference_ranges("ETH"), current)
+
+    def test_baseline_hit_without_capture_skips_serializing_guard(self):
+        with patch.object(history, "calculate_reference_ranges", side_effect=self.baseline):
+            result = history.get_reference_ranges("ETH")
+        with patch.object(history, "_local_input_guard", side_effect=AssertionError("unused guard")) as guard:
+            self.assertIs(history.get_reference_ranges("ETH"), result)
+        guard.assert_not_called()
 
     def test_concurrent_baseline_builds_bind_actual_returned_object(self):
         barrier = threading.Barrier(2)

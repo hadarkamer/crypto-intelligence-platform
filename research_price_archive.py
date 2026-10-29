@@ -309,14 +309,17 @@ def get_path(route, symbol, start, end, fetcher, *, database_url=None, connectio
     first, last, expected = bounds(start, end)
     if expected > 100000:
         raise ValueError('Archive read exceeds bounded path budget')
-    bars = [dict(b) for b in read_bars(conn, route, symbol, first, last)]
+    bars = read_bars(conn, route, symbol, first, last)
     cached, requests = len(bars), 0
     for page_start, page_end in missing_ranges((r['open_time_utc'] for r in bars), first, last):
         path = fetcher(symbol, page_start, page_end)
         incoming = validate_path(route, symbol, path, page_start, page_end, now=now)
         write_bars(conn, route, symbol, incoming)
         requests += 1
-    bars = [dict(b) for b in read_bars(conn, route, symbol, first, last)]
+    if requests:
+        bars = None
+        path = incoming = None
+        bars = read_bars(conn, route, symbol, first, last)
     return _result(route, symbol, bars, first, last, expected, requests, cached)
 
 
@@ -339,5 +342,5 @@ def read_path(route, symbol, start, end, *, database_url=None, connection=None):
     first, last, expected = bounds(start, end)
     if expected > 31*24*60:
         raise ValueError('Read-only archive path exceeds 31 days')
-    bars = [dict(b) for b in read_bars(connection, route, symbol, first, last)]
+    bars = read_bars(connection, route, symbol, first, last)
     return _result(route, symbol, bars, first, last, expected, 0, len(bars))

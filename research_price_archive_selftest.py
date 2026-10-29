@@ -24,6 +24,32 @@ def path(route=a.BINANCE_SPOT,symbol='BTC',indices=(0,1,2)):
 
 
 class PriceArchiveTests(unittest.TestCase):
+    def test_complete_archive_reads_once_without_mutating_stored_rows(self):
+        rows = [bar(i) for i in range(3)]
+        for route in (a.BINANCE_SPOT, a.HYPERLIQUID_PERP_GENERIC):
+            with self.subTest(route=route), \
+                 patch.object(a, 'read_bars', return_value=rows) as read, \
+                 patch.object(a, 'write_bars') as write:
+                result = a.get_path(route, 'BTC', START, START+3*a.MINUTE,
+                    lambda *args: self.fail('Complete archive must not fetch'), connection=object())
+            read.assert_called_once()
+            write.assert_not_called()
+            self.assertTrue(result['complete'])
+            self.assertEqual(len(result['candles']), 3)
+            self.assertEqual(rows, [bar(i) for i in range(3)])
+
+    def test_missing_archive_page_is_persisted_and_reread(self):
+        rows = [bar(i) for i in range(3)]
+        with patch.object(a, 'read_bars', side_effect=[[rows[0], rows[2]], rows]) as read, \
+             patch.object(a, 'write_bars') as write:
+            result = a.get_path(a.BINANCE_SPOT, 'BTC', START, START+3*a.MINUTE,
+                lambda *args: path(indices=(1,)), connection=object(), now=NOW)
+        self.assertEqual(read.call_count, 2)
+        write.assert_called_once()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['archive_cached_candles'], 2)
+        self.assertEqual(len(result['candles']), 3)
+
     def test_hyperliquid_routes_preserve_hype_and_separate_new_symbols(self):
         self.assertEqual(a.hyperliquid_route('HYPE'),a.HYPERLIQUID_PERP)
         self.assertEqual(len(a.ACTIVE_ROUTES),13)
@@ -205,7 +231,7 @@ class PriceArchiveTests(unittest.TestCase):
         self.assertEqual(result,dict(route=a.BINANCE_SPOT,symbol='BTC',lane='tail',
                                     complete=True,candles=1,cached=1))
         reads=[params for sql,params in queries if sql.startswith('SELECT open_time_utc,close_time_utc')]
-        self.assertEqual(reads,[(a.BINANCE_SPOT,'BTC',START,START)]*2)
+        self.assertEqual(reads,[(a.BINANCE_SPOT,'BTC',START,START)])
         with self.assertRaisesRegex(ValueError,'outside'):
             a.validate_path(a.BINANCE_SPOT,'BTC',path(indices=(0,1)),start,end,now=NOW)
 
