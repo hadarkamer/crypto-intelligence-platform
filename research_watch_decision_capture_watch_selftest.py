@@ -264,6 +264,16 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             capture_combined_state_changes=Mock(side_effect=lifecycle))
         scope.update({
             'asyncio': asyncio, 'json': json, 'WATCH_RUNTIME': {'chat_id': 1}, 'WATCH_GENERAL_ENABLED': True,
+            # This AST-loaded fixture tests the existing source/archive/delivery
+            # order. The separate real bridge suite covers passive observation.
+            # Forward each native batch exactly once without a collector/store.
+            'research_alert_decision_watch': SimpleNamespace(
+                begin=lambda *args, **kwargs: None, bind_score=lambda *args, **kwargs: None,
+                gate=lambda *args, **kwargs: None, finish=lambda *args, **kwargs: None,
+                special_batch=lambda native, *args, **kwargs: native(),
+                combined_batch=lambda native, *args, **kwargs: native()),
+            'CONFIRMATION_STATE': {}, 'HIGH_SCORE_83_STATE': {},
+            'DERIVATIVES_HIGH_STATE': {}, 'SPOT_FAMILY_HIGH_STATE': {},
             'WATCH_PRIORITY_THRESHOLD': 70, '_get_scrape_lock': lambda: asyncio.Lock(),
             'collect_live_rows_for_watch': collect, '_ensure_watch_derivatives_ready': AsyncMock(return_value={}),
             'research_watch_score_capture': SimpleNamespace(failure=failed,
