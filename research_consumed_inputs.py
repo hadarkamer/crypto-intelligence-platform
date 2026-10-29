@@ -241,9 +241,19 @@ class Collector:
         return sha
 
     def _node(self, value):
-        raw = _dumps({"node": "value", "value": value}).encode("utf-8")
-        if len(raw) <= MAX_OBJECT_BYTES:
-            return self._put({"node": "value", "value": value}, raw)
+        # Preserve canonical bytes while stopping before an oversized parent
+        # is materialized. Children retain the existing chunk/hash contract.
+        raw = bytearray()
+        encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False)
+        for part in encoder.iterencode({"node": "value", "value": value}):
+            encoded = part.encode("utf-8")
+            if len(raw) + len(encoded) > MAX_OBJECT_BYTES:
+                break
+            raw.extend(encoded)
+        else:
+            return self._put({"node": "value", "value": value}, bytes(raw))
+        del raw, encoded, part
         if isinstance(value, dict):
             return self._put({"node": "dict", "items": [[k, self._node(v)]
                              for k, v in sorted(value.items())]})
