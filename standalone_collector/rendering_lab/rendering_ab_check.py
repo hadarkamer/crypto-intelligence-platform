@@ -21,7 +21,7 @@ def require(value,code):
     if not value:raise CheckFailure(code)
 
 def safe_error(exc):
-    value=getattr(exc,'reason',None) or (str(exc) if isinstance(exc,(CheckFailure,ValueError)) else '')
+    value=getattr(exc,'reason',None) or getattr(exc,'code',None) or (str(exc) if isinstance(exc,(CheckFailure,ValueError)) else '')
     return value if re.fullmatch(r'[a-z][a-z0-9_]{0,100}',str(value)) else type(exc).__name__
 
 def rows_key(s):return [[r[k] for k in ROW_KEYS] for r in s['rows']]
@@ -52,6 +52,7 @@ def run(timeframes,runtime,fps,requested_output=None):
             'lab_service_credentials_must_be_absent')
     os.environ['COLLECTION_HEATMAP_MODEL']='3';sys.path.insert(0,str(runtime))
     import heatmap_hover as reader
+    import model1_execution as execution
     import capture_readiness as readiness
     from market_vision.coinglass_heatmap_capture import capture_heatmaps
     from playwright.sync_api import Browser,BrowserContext,Page
@@ -64,7 +65,7 @@ def run(timeframes,runtime,fps,requested_output=None):
         output=requested_output.resolve();require(output.parent==Path('/tmp'),'lab_output_must_be_private_tmp_child')
         output.mkdir(mode=0o700,exist_ok=False)
     report={'schema':'model3-clean-render-ab.v2','status':'running','timeframes':list(timeframes),
-            'candidate_repetitions':2,'experimental_fps':fps,'pairs':[],'cleanup':[],'clean_captures':[],
+            'candidate_repetitions':2,'experimental_fps':fps,'pairs':[],'attempts':[],'cleanup':[],'clean_captures':[],
             'database_writes':0,'openai_calls':0,'reader_sha256':READER_SHA,'capture_sha256':CAPTURE_SHA,
             'cpu_affinity':sorted(os.sched_getaffinity(0)),
             'cpu_max':Path('/sys/fs/cgroup/cpu.max').read_text().strip(),
@@ -76,6 +77,7 @@ def run(timeframes,runtime,fps,requested_output=None):
     def emit(event,**fields):print('CG29_RENDER_AB '+json.dumps({'event':event,**fields},separators=(',',':'),allow_nan=False),flush=True)
     def new_context(browser,*args,**kwargs):
         context=new_context_original(browser,*args,**kwargs)
+        restored_contexts.discard(id(context))
         installs[id(context)]=candidate.install_context(context);return context
     def restore_context(context):
         if id(context) not in installs or id(context) in restored_contexts:return
@@ -179,13 +181,34 @@ def run(timeframes,runtime,fps,requested_output=None):
     signal.signal(signal.SIGALRM,deadline);signal.alarm(1400)
     emit('started',timeframes=list(timeframes),experimental_fps=fps,original_reader=True,candidate_repetitions=2)
     try:
-        capture_heatmaps(output,timeframes=timeframes)
+        for timeframe in timeframes:
+            attempt={'timeframe':timeframe,'status':'running'};report['attempts'].append(attempt)
+            execution._capture_events.clear()
+            try:
+                capture_heatmaps(output,timeframes=(timeframe,))
+                attempt['status']='passed'
+            except Exception as exc:
+                detail=execution.failure_detail(exc)
+                attempt.update(status='failed',error=safe_error(exc),source_failure=detail,
+                               operations=list(execution._capture_events))
+                for pair in report['pairs']:
+                    if pair['status']=='running':pair.update(status='failed',error=safe_error(exc))
+                emit('timeframe_failed',**attempt);persist()
+                reasons=[detail.get('source_readiness',{}).get('reason')]
+                state=detail.get('source_capture_state') or {}
+                if (getattr(exc,'code',None)=='source_login_required' or
+                    detail.get('blocking_condition') in ('login','challenge') or
+                    any(r in ('request-limit','challenge','login-required') for r in reasons) or
+                    state.get('challenge_visible') is True or state.get('request_limit_visible') is True):
+                    raise
+        require(all(a['status']=='passed' for a in report['attempts']),'source_timeframe_not_passed')
         require(len(report['pairs'])==len(timeframes) and all(p['status']=='passed' for p in report['pairs']),'pair_not_passed')
         require(bool(report['cleanup']) and not any(x.get('error') for x in report['cleanup']),'final_restore_failed')
         report['status']='passed'
     except Exception as exc:
         report['status']='partial' if any(p['status']=='passed' for p in report['pairs']) else 'failed'
         report['error']=safe_error(exc)
+        report['source_failure']=execution.failure_detail(exc)
         for pair in report['pairs']:
             if pair['status']=='running':pair.update(status='failed',error=report['error'])
     finally:
