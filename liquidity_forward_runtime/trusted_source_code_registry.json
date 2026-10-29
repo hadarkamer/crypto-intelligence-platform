@@ -1,0 +1,13 @@
+{
+  "ec93fcd2049565b9d344924a8e7553f1b30ecfde": {
+    "analysis.py": "13cbe24125737664e06dc520b78bc32877a14b4e25e6a423d68ed49276381fb5",
+    "main.py": "45dc49028e2c4694e97abe00d070ab5e158d7e0e26ba5a26c85e95bd11d6f4cf",
+    "research_combined_liquidity_shadow.py": "01c65aa397e7dc0af0c76b1fccb75971adb6c3023a51f3fa1d9caee052eab65f",
+    "research_consumed_inputs.py": "e87e023ae68c871240ea1dca0f4a32fcb7c8d3035247c87138de651021752bdf",
+    "research_event_capture.py": "8a69348c77f520454f53545e869aeb8581ab29fbafdc45b83591b6c41f6448e8",
+    "research_event_runtime.py": "2b7a42edde3b92f06339c8b4f5ba618b51840e7efa1ffeb96ec198af187cacdc",
+    "research_event_store.py": "8dc4e9d0a53aa0c322f21b0bf34f413bb52ed8db0042c879c3fd3abb75326d37",
+    "research_ordered_question_catalog.py": "a1e92c01e54d744dfd23966bad8d39b13c93a1e731cfcc0cc7ec3228434bd94b",
+    "research_watch_decision_capture.py": "e7afabc1e000dbde8f9d67de65f688a6a49da4febf309ea139f337f61a6d8934"
+  }
+}

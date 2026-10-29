@@ -1,0 +1,218 @@
+{
+  "protocol_id": "doge-native-plus-combined-liquidity-entry2-short-protocol-v1",
+  "study_id": "doge-liquidity-source-extension-entry2-short-forward-v1",
+  "schema_version": 1,
+  "frozen_at_utc": "2026-10-29T12:30:58+00:00",
+  "artifact_state": "FROZEN_PROTOCOL_AWAITING_OBSERVER",
+  "activation": null,
+  "study_start_utc": null,
+  "implementation_scope": "Offline source/sequence/parent conformance reference. No running observer, enrollment, quotes, outcomes, trade execution or alert dispatch.",
+  "old_study": {
+    "study_id": "doge-eth-first-observed-paper-render-v1",
+    "policy_sha256": "d409652433e0fdf06be1984254bad22ce4acb29d6b6d0a91436913c7161da70d",
+    "config_sha256": "89d5be5bdc31aee000e17112d543caea6e7a1ea7e3c67504fe943e72a24c63c2",
+    "candidate_key": "captured-question-search-v3-experimental-binding:liquidity_ENTRY_2",
+    "candidate_definition_sha256": "a911ab78dcf4a6af7f1bc1cd077fa961b721d56a7ea6a308598bef337ccf607c",
+    "unchanged": true
+  },
+  "hypothesis": {
+    "symbol": "DOGE",
+    "analysis_direction": "SHORT",
+    "orientation": "NORMAL",
+    "candidate_key": "doge-native-plus-combined-liquidity-v1:liquidity_ENTRY_2:NORMAL:SHORT",
+    "feature_namespace": "prospective.liquidity.",
+    "predicate": {
+      "feature": "prospective.liquidity.sequence.30m.entry_ordinal",
+      "operator": "==",
+      "value": 2
+    },
+    "alignment_filter": null,
+    "maxpain_score_filter": null,
+    "no_inverse_or_long_arm": true
+  },
+  "sources": {
+    "version": "doge-native-plus-combined-liquidity-v1",
+    "common": {
+      "symbol": "DOGE",
+      "event_kind": "ALERT",
+      "delivery_status": "DELIVERED",
+      "positive_event_id": true,
+      "event_fingerprint_required": true
+    },
+    "native": {
+      "contract": "MAX_PAIN_CAPTURED_AMOUNTS_V1",
+      "event_type_predicate": "contains case-sensitive MAX_PAIN, matching the frozen legacy inverse-family extractor",
+      "known_types_at_freeze": [
+        "MAX_PAIN_ALERT",
+        "MAX_PAIN_SCORE_65",
+        "MAX_PAIN_SCORE_83",
+        "MAX_PAIN_CONFIRMATION",
+        "STRONG_MAX_PAIN_CONFIRMATION"
+      ],
+      "known_types_are_audit_annotations_not_new_whitelist": true,
+      "extractor": "reference/legacy_question_catalog.py::extended_features",
+      "extractor_sha256": "a1e92c01e54d744dfd23966bad8d39b13c93a1e731cfcc0cc7ec3228434bd94b",
+      "required_status": "VALID",
+      "preserve_legacy_missing_target_behavior": true,
+      "root_fields": [
+        "near_amount",
+        "far_amount",
+        "near_share_pct"
+      ],
+      "share_classification_uses": "legacy reported share; preserve exact old extractor validation",
+      "new_provider_freshness_threshold": null
+    },
+    "combined": {
+      "contract": "doge-combined-selected-slot-shadow-v1",
+      "contract_sha256": "30b5e533f360db0a443d2d47bcbaa84e813e4f754145647e7186cd5ad4012ff1",
+      "event_type": "COMBINED_CONFIRMATION",
+      "capture_status": "CAPTURED",
+      "point_status": "VALID",
+      "source_link_status": "SOURCE_LINKED",
+      "exact_selected_slot": true,
+      "require_full_observation_and_positive_current_source_binding": true,
+      "strict_target_direction_mapping": true,
+      "share_formula": "100 * near_amount / (near_amount + far_amount)",
+      "reported_share_tolerance_percentage_points": 0.05,
+      "source_and_runtime_code_pins_required_at_observer_boundary": true,
+      "new_provider_freshness_threshold": null
+    },
+    "do_not_write_legacy_features": true,
+    "forbid_missing_as_negative": true,
+    "equal_amounts_do_not_create_or_remove_scans": true,
+    "provider_http_freshness_proved": false
+  },
+  "sequence": {
+    "window_minutes": 30,
+    "window": "[current.alert_time_utc - 30 minutes, current.alert_time_utc)",
+    "same_symbol": true,
+    "same_analysis_direction": true,
+    "current_requires_valid_liquidity": true,
+    "distinct_prior_scan_id": "engine_snapshot.watch_scan_id else engine_snapshot.sheet_snapshot_id",
+    "current_scan_id_required_for_ordinal": false,
+    "missing_prior_scan_excluded": true,
+    "count_rule": "number of distinct qualifying prior scan IDs + 1",
+    "prior_from_current_scan_allowed": true,
+    "current_scan_not_subtracted_from_prior_set": true,
+    "equal_source_timestamps_excluded": true,
+    "event_id_is_not_a_time_order_filter": true,
+    "prior_parent_or_formula_match_required": false,
+    "history_only_if_source_at_or_after_epoch": true,
+    "prior_reader_receipt_must_not_exceed_current_receipt": true,
+    "first_complete_eligible_response_freezes_availability": true,
+    "no_retroactive_replacement_from_late_older_rows": true,
+    "two_distinct_actual_scans_variant": false,
+    "preserve_actual_legacy_rule_not_misleading_old_justification": true
+  },
+  "epoch": {
+    "state": "NOT_ACTIVATED",
+    "activation_not_before_utc": "2026-10-29T12:30:58+00:00",
+    "actual_epoch_source": "First durable registration generated by the new observer, committed before observing an eligible population; immutable on restart.",
+    "registration_alone_does_not_mean_observer_active": true,
+    "warmup_minutes": 30,
+    "warmup_clock": "current source alert clock must be at least epoch + 30 minutes",
+    "warmup_data": "Post-epoch points may build history; no entries or parent consumption during warm-up.",
+    "historical_backfill_entries": false,
+    "historical_pre_epoch_points_count_in_new_sequence": false,
+    "bootstrap": "Exclude the first observed bootstrap population and its parent identities; retain it as audit-only. A source and its parent must satisfy the new epoch gates.",
+    "preparation_event_ids": [
+      455744,
+      468953,
+      469375,
+      471121,
+      471332,
+      471958,
+      473857,
+      474774,
+      475132
+    ],
+    "preparation_observations_are_excluded": true,
+    "late_observer_start_does_not_backdate_first_availability": true,
+    "source_event_stamp_is_not_reader_availability": true
+  },
+  "parent": {
+    "policy_version": "btc-parent-close-reversal-200bps-v1",
+    "version_field": "episode_policy_version",
+    "membership_status": "LIVE",
+    "evidence_eligible_required": true,
+    "parent_start_strictly_after_epoch": true,
+    "ordering": "parent_start <= parent_confirmed <= current source alert",
+    "btc_closed_bar_age_seconds": {
+      "min_inclusive": 0,
+      "max_exclusive": 60
+    },
+    "all_recorded_markers_must_be_visible_by_reader_receipt": true,
+    "schema_fields": [
+      "event_id",
+      "btc_parent_movement_id",
+      "episode_policy_version",
+      "membership_status",
+      "parent_evidence_eligible",
+      "parent_start_time_utc",
+      "membership_created_at_utc",
+      "parent_created_at_utc",
+      "parent_confirmed_at_utc",
+      "btc_bar_created_at_utc",
+      "btc_observed_close_utc"
+    ],
+    "reference_verifies_supplied_constraints_not_live_db_provenance": true,
+    "five_or_fresh_three_is_not_an_entry_predicate": true
+  },
+  "availability_and_selection": {
+    "authoritative_clock": "First new-observer response receipt at which source, validated liquidity/sequence and causal live parent prerequisites were seen together.",
+    "recorded_db_start_or_shadow_clocks_are_annotations": true,
+    "raw_first_seen_and_first_eligible_seen_both_logged": true,
+    "same_response_order": [
+      "max_required_recorded_marker",
+      "event_id",
+      "symbol"
+    ],
+    "first_candidate_per_parent_immutable": true,
+    "no_fallback_after_capacity_or_expiry": true,
+    "book": "DOGE_only",
+    "no_eth_or_first_cross_asset_book": true,
+    "source_receipt_closure_must_be_retained": true,
+    "reference_only_receipt_validation": "Timestamp/schema/hash conformance of supplied records cannot prove first availability or durable journal state."
+  },
+  "paper_measurement_plan": {
+    "implemented_in_this_stage": false,
+    "analysis_direction": "SHORT",
+    "holding_minutes": 720,
+    "symmetric_barrier_bps": 50,
+    "all_in_cost_percentage_points": 0.1,
+    "entry": "Strict next full minute after first eligible observer response receipt; first quote request starting at/after planned time; expire after 90 seconds.",
+    "poll_seconds": 10,
+    "entry_expiry_seconds": 90,
+    "quote_max_elapsed_seconds": 5,
+    "max_quote_gap_seconds": 30,
+    "source": "BINANCE_SPOT_BOOK_TICKER",
+    "symbol": "DOGEUSDT",
+    "fill_model": "Observed bid/ask midpoint research proxy. Fixed all-in cost includes spread; do not subtract spread twice.",
+    "exit": "First observed midpoint barrier crossing or first quote request at/after holding deadline.",
+    "uncertainty": "Quote gap >30 seconds or open-position restart permanently marks path uncertain; retain all outcomes and flags.",
+    "intragap_first_touch_or_execution_proved": false,
+    "no_exchange_account_order_or_notification_access": true
+  },
+  "assessment": {
+    "performance_acceptance_in_this_stage": false,
+    "automatic_strategy_promotion": false,
+    "all_cases_and_uncertainty_flags_retained": true,
+    "aggregate_one_frozen_case_per_causal_btc_parent": true,
+    "source_contract_mix_reported": true,
+    "no_tuning_on_preparation_observation_outcomes": true,
+    "no_profitability_or_independent_waves_claim": true
+  },
+  "readiness": {
+    "current": "PROTOCOL_READY_OBSERVER_NOT_IMPLEMENTED",
+    "required_before_active": [
+      "Independent review of source adapters and parent membership joins",
+      "Own durable study registration with protocol SHA and immutable new epoch",
+      "Separate append-only first-reader and first-eligible receipts, exact source/history closures, parent-winner state and checkpoint recovery",
+      "Bootstrap exclusion and source-clock warm-up verified",
+      "Paper quote observer with deadline/capacity/gap flags implemented and tested",
+      "Deployment live plus first genuine observer response and durable registration checked"
+    ],
+    "reference_matching_does_not_enroll": true,
+    "synthetic_tests_are_not_live_evidence": true
+  }
+}
