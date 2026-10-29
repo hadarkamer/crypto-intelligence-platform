@@ -130,7 +130,7 @@ def prepare():
         'failure_diagnostics':'capture-failure.v1; bounded original-observation facts and fitted-grid residuals',
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'selected-map data/loading/blur checks and stable geometry around one retained PNG',
-        'model3_rendering':'hash-guarded chart-local automatic paint; original fallback on source drift; clean original PNG; original numerical reader',
+        'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
