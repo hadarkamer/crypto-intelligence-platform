@@ -113,11 +113,160 @@ def _observe_inputs(kind, argument_names):
                     consumed_inputs.record(kind, {"arguments": arguments, "result": result,
                         "call_started_at_utc": started,
                         "call_finished_at_utc": datetime.now(timezone.utc).isoformat()})
-                except Exception:
+                except BaseException:
                     pass
             return result
         return observed
     return decorate
+
+
+_NEAREST_CAPTURE_VERSION = "oi-nearest-sql-candidates-v1"
+_NEAREST_CAPTURE_MAX_BYTES = 8192
+_NEAREST_CAPTURE_MAX_TEXT_BYTES = 256
+
+
+def _nearest_operation_error_code(exc):
+    if isinstance(exc, sqlite3.Error):
+        return "SQLITE_ERROR"
+    if psycopg is not None and isinstance(exc, psycopg.Error):
+        return "POSTGRES_ERROR"
+    if isinstance(exc, ValueError):
+        return "VALUE_ERROR"
+    if isinstance(exc, TypeError):
+        return "TYPE_ERROR"
+    return "OTHER_OPERATION_ERROR"
+
+
+def _nearest_capture_gap():
+    # Fixed codes only: never retain database exception messages or SQL text.
+    try:
+        consumed_inputs.record("capture_gap", {"source": "oi_historical_nearest_candidates",
+                                               "reason": "NEAREST_CANDIDATE_CAPTURE_UNAVAILABLE"})
+    except BaseException:
+        pass
+    try:
+        collector = consumed_inputs.current()
+        if collector is not None:
+            collector.gap("NEAREST_CANDIDATE_CAPTURE_UNAVAILABLE")
+    except BaseException:
+        pass
+
+
+def _nearest_capture_update(trace, action):
+    if trace is None:
+        return
+    try:
+        action()
+    except BaseException as exc:
+        bounded = type(exc) is ValueError and len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] == "CAPTURE_BOUND"
+        trace["capture_status"] = "TRUNCATED" if bounded else "UNAVAILABLE"
+        trace["capture_reason_codes"] = ["CAPTURE_BOUND" if trace["capture_status"] == "TRUNCATED" else "CAPTURE_PROJECTION_UNAVAILABLE"]
+        _nearest_capture_gap()
+
+
+def _nearest_capture_values(row, keys):
+    values, types = {}, {}
+    for key in keys:
+        value = row[key]
+        types[key] = type(value).__name__
+        if isinstance(value, datetime):
+            value = value.isoformat() if value.tzinfo is None else value.astimezone(timezone.utc).isoformat()
+        elif value is not None and not isinstance(value, (str, bool, int, float)):
+            raise TypeError("UNSUPPORTED_CAPTURE_VALUE")
+        if isinstance(value, str) and len(value.encode("utf-8")) > _NEAREST_CAPTURE_MAX_TEXT_BYTES:
+            raise ValueError("CAPTURE_BOUND")
+        if isinstance(value, int) and not -(2 ** 63) <= value < 2 ** 63:
+            raise ValueError("CAPTURE_BOUND")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise TypeError("NONFINITE_CAPTURE_VALUE")
+        values[key] = value
+    return values, types
+
+
+@contextmanager
+def _nearest_candidate_observation(symbol, target_time):
+    trace = None
+    try:
+        if (isinstance(symbol, str) and symbol.strip().upper() in {"DOGE", "ETH"}
+                and consumed_inputs.current() is not None):
+            arguments, _ = _nearest_capture_values({"symbol": symbol.strip().upper(), "target_time": target_time}, ("symbol", "target_time"))
+            trace = {"version": _NEAREST_CAPTURE_VERSION,
+                     "query_contract": "oi-price-history-before-after-limit1-v1",
+                     "arguments": arguments, "backend": "UNAVAILABLE",
+                     "call_started_at_utc": datetime.now(timezone.utc).isoformat(),
+                     "queries": {side: {"status": "NOT_EXECUTED"} for side in ("before", "after")},
+                     "capture_status": "COMPLETE", "capture_reason_codes": [],
+                     "selection": {"status": "NOT_COMPLETED"},
+                     "scope": "SAME_CALL_TWO_STATEMENT_RETURNS_NOT_FULL_TABLE_OR_SINGLE_SNAPSHOT"}
+    except BaseException:
+        _nearest_capture_gap()
+    try:
+        yield trace
+    except BaseException as exc:
+        def failed():
+            trace["operation_status"] = "ERROR"
+            trace["operation_error_code"] = _nearest_operation_error_code(exc)
+        _nearest_capture_update(trace, failed)
+        raise
+    finally:
+        if trace is not None:
+            try:
+                trace["call_finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+                operation_error = trace.get("operation_status") == "ERROR"
+                completed = sum(q.get("status") == "SUCCESS" for q in trace["queries"].values())
+                trace["status"] = ("PARTIAL" if completed else "UNAVAILABLE") if operation_error else trace["capture_status"]
+                if operation_error and trace["capture_status"] != "COMPLETE":
+                    trace["status"] = trace["capture_status"]
+                if trace["status"] != "COMPLETE":
+                    _nearest_capture_gap()
+                if len(consumed_inputs.canonical(trace).encode("utf-8")) > _NEAREST_CAPTURE_MAX_BYTES:
+                    trace = {"version": _NEAREST_CAPTURE_VERSION, "status": "TRUNCATED",
+                             "capture_reason_codes": ["CAPTURE_BYTE_BOUND"],
+                             "arguments": trace["arguments"],
+                             "call_started_at_utc": trace["call_started_at_utc"],
+                             "call_finished_at_utc": trace["call_finished_at_utc"]}
+                    _nearest_capture_gap()
+                if len(consumed_inputs.canonical(trace).encode("utf-8")) > _NEAREST_CAPTURE_MAX_BYTES:
+                    _nearest_capture_gap()
+                elif consumed_inputs.record("oi_historical_nearest_candidates", trace) is None:
+                    _nearest_capture_gap()
+            except BaseException:
+                _nearest_capture_gap()
+
+
+def _nearest_candidate_query(trace, side, read):
+    def started():
+        trace["queries"][side] = {"status": "STARTED", "call_started_at_utc": datetime.now(timezone.utc).isoformat()}
+    _nearest_capture_update(trace, started)
+    try:
+        row = read()
+    except BaseException as exc:
+        def failed():
+            trace["queries"][side].update(status="ERROR", error_code=_nearest_operation_error_code(exc),
+                                         call_finished_at_utc=datetime.now(timezone.utc).isoformat())
+        _nearest_capture_update(trace, failed)
+        raise
+    def finished():
+        query = trace["queries"][side]
+        query.update(status="SUCCESS", call_finished_at_utc=datetime.now(timezone.utc).isoformat(),
+                     row_found=row is not None)
+        query["row"], query["sql_value_types"] = _nearest_capture_values(row, ("candle_time", "price_close", "oi_close_usd")) if row is not None else (None, None)
+    _nearest_capture_update(trace, finished)
+    return row
+
+
+def _nearest_candidate_decision(trace, selected, result):
+    def capture():
+        row, _ = _nearest_capture_values(selected, ("candle_time", "price_close", "oi_close_usd")) if selected is not None else (None, None)
+        side = next((name for name in ("before", "after") if row is not None and trace["queries"][name].get("row") == row), None)
+        returned, types = _nearest_capture_values(result, ("collected_at", "price", "open_interest_usd", "source")) if result is not None else (None, None)
+        trace["operation_status"] = "SUCCESS"
+        trace["selection"] = {"status": "NO_CANDIDATE" if selected is None else "SELECTED",
+                              "selected_side": side, "tie_rule": "BEFORE_FIRST_STABLE_MIN",
+                              "returned_result": returned, "sql_value_types": types}
+        if selected is not None and side is None:
+            raise TypeError("SELECTED_SIDE_UNAVAILABLE")
+    _nearest_capture_update(trace, capture)
 
 
 @contextmanager
@@ -743,58 +892,66 @@ def historical_point_nearest(symbol: str, target_time: datetime) -> Optional[Dic
     sides of the requested time avoids systematically selecting the previous
     candle when the next closed candle is actually closer.
     """
-    init_db()
-    symbol = str(symbol or "").strip().upper()
-    if target_time.tzinfo is None:
-        target_time = target_time.replace(tzinfo=timezone.utc)
-    else:
-        target_time = target_time.astimezone(timezone.utc)
+    with _nearest_candidate_observation(symbol, target_time) as capture:
+        init_db()
+        symbol = str(symbol or "").strip().upper()
+        if target_time.tzinfo is None:
+            target_time = target_time.replace(tzinfo=timezone.utc)
+        else:
+            target_time = target_time.astimezone(timezone.utc)
+        _nearest_capture_update(capture, lambda: capture.update(arguments=
+            _nearest_capture_values({"symbol": symbol, "target_time": target_time}, ("symbol", "target_time"))[0]))
 
-    before = None
-    after = None
-    if _use_postgres():
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            before = conn.execute(
-                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
-                "WHERE symbol=%s AND candle_time<=%s ORDER BY candle_time DESC LIMIT 1",
-                (symbol, target_time),
-            ).fetchone()
-            after = conn.execute(
-                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
-                "WHERE symbol=%s AND candle_time>=%s ORDER BY candle_time ASC LIMIT 1",
-                (symbol, target_time),
-            ).fetchone()
-    else:
-        target_iso = target_time.isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            before = conn.execute(
-                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
-                "WHERE symbol=? AND candle_time<=? ORDER BY candle_time DESC LIMIT 1",
-                (symbol, target_iso),
-            ).fetchone()
-            after = conn.execute(
-                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
-                "WHERE symbol=? AND candle_time>=? ORDER BY candle_time ASC LIMIT 1",
-                (symbol, target_iso),
-            ).fetchone()
+        before = None
+        after = None
+        if _use_postgres():
+            _nearest_capture_update(capture, lambda: capture.update(backend="postgresql"))
+            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                before = _nearest_candidate_query(capture, "before", lambda: conn.execute(
+                    "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                    "WHERE symbol=%s AND candle_time<=%s ORDER BY candle_time DESC LIMIT 1",
+                    (symbol, target_time),
+                ).fetchone())
+                after = _nearest_candidate_query(capture, "after", lambda: conn.execute(
+                    "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                    "WHERE symbol=%s AND candle_time>=%s ORDER BY candle_time ASC LIMIT 1",
+                    (symbol, target_time),
+                ).fetchone())
+        else:
+            _nearest_capture_update(capture, lambda: capture.update(backend="sqlite"))
+            target_iso = target_time.isoformat()
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                before = _nearest_candidate_query(capture, "before", lambda: conn.execute(
+                    "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                    "WHERE symbol=? AND candle_time<=? ORDER BY candle_time DESC LIMIT 1",
+                    (symbol, target_iso),
+                ).fetchone())
+                after = _nearest_candidate_query(capture, "after", lambda: conn.execute(
+                    "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                    "WHERE symbol=? AND candle_time>=? ORDER BY candle_time ASC LIMIT 1",
+                    (symbol, target_iso),
+                ).fetchone())
 
-    candidates = [dict(row) for row in (before, after) if row]
-    if not candidates:
-        return None
+        candidates = [dict(row) for row in (before, after) if row]
+        if not candidates:
+            _nearest_candidate_decision(capture, None, None)
+            return None
 
-    def as_utc(value):
-        if isinstance(value, datetime):
-            return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        def as_utc(value):
+            if isinstance(value, datetime):
+                return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
 
-    data = min(candidates, key=lambda row: abs((as_utc(row["candle_time"]) - target_time).total_seconds()))
-    return {
-        "collected_at": data["candle_time"],
-        "price": float(data["price_close"]),
-        "open_interest_usd": float(data["oi_close_usd"]),
-        "source": "historical_backfill",
-    }
+        data = min(candidates, key=lambda row: abs((as_utc(row["candle_time"]) - target_time).total_seconds()))
+        result = {
+            "collected_at": data["candle_time"],
+            "price": float(data["price_close"]),
+            "open_interest_usd": float(data["oi_close_usd"]),
+            "source": "historical_backfill",
+        }
+        _nearest_candidate_decision(capture, data, result)
+        return result
 
 @_observe_inputs("oi_baseline_calculation", ("symbol",))
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
