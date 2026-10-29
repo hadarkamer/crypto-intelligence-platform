@@ -42,7 +42,7 @@ def publish_status(source_passed):
     public.mkdir(exist_ok=True)
     if any(item.name != 'index.html' or item.is_symlink() for item in public.iterdir()):
         raise RuntimeError('render_lab_unexpected_public_artifact')
-    message = ('Paired 12H and 24H source checks, exact rows, map pixels and restoration passed.'
+    message = ('Clean 12H, 24H and 48H comparisons passed, including two candidate reads per map, exact rows, pixels and restoration.'
                if source_passed else 'Preparation and isolated tests passed. No live source comparison has been run by this build.')
     (public/'index.html').write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
@@ -69,7 +69,6 @@ def main():
     lab=HERE/'rendering_lab'
     node=shutil.which('node')
     if not node:raise RuntimeError('render_lab_node_unavailable')
-    # Public code assets only; no account requests, cookies, or market data.
     sys.path.insert(0,str(lab))
     import candidate
     import requests
@@ -83,7 +82,7 @@ def main():
         target=assets/url.rsplit('/',1)[-1]
         target.write_bytes(response.content);target.chmod(0o600)
     subprocess.run([sys.executable,'test_candidate_offline.py','-v'],cwd=lab,
-                   env=build_env,check=True,timeout=30)
+                   env=build_env,check=True,timeout=60)
     subprocess.run([node,'--check','patched_chart_for_syntax.js'],cwd=lab,
                    env=build_env,check=True,timeout=30)
     subprocess.run([node,'test_render_gate.cjs'],cwd=lab,
@@ -95,7 +94,7 @@ def main():
         return
     output=Path('/tmp')/('cg29-rendering-ab-'+str(time.time_ns()))
     command=[sys.executable,str(lab/'rendering_ab_check.py'),'--output',str(output),
-             '--timeframes','12h,24h','--fps','0.5']
+             '--timeframes','48h,12h,24h','--fps','0.5']
     affinity=None
     if hasattr(os,'sched_getaffinity') and hasattr(os,'sched_setaffinity'):
         current=os.sched_getaffinity(0)
@@ -103,7 +102,7 @@ def main():
         os.sched_setaffinity(0,{min(current)});affinity=sorted(os.sched_getaffinity(0))
     print('CG29_LAB_ISOLATION '+json.dumps({'diagnostic_cpu_affinity':affinity,
           'worker_started':False,'database_writes':0,'ai_calls':0}),flush=True)
-    result=subprocess.run(command,cwd=ROOT,env=source_env,timeout=900)
+    result=subprocess.run(command,cwd=ROOT,env=source_env,timeout=1500)
     report_path=output/'report.json'
     if not report_path.exists():raise RuntimeError('render_lab_report_missing')
     report=json.loads(report_path.read_text())
