@@ -66,6 +66,7 @@ import research_max_pain_archive
 import research_watch_score_capture
 import research_consumed_inputs
 import research_watch_decision_capture
+import research_alert_decision_watch
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -3998,6 +3999,9 @@ async def run_watch_cycle(
         formula_timing=formula_timing,
         experimental_reference_prices_by_symbol=experimental_references,
     )
+    alert_decision_handle = research_alert_decision_watch.begin(
+        watch_scan_id, general_enabled=general_enabled, top8_only=top8_only,
+    )
     derivatives_task = None
 
     try:
@@ -4117,6 +4121,7 @@ async def run_watch_cycle(
         # The user's standalone rule consumes the same frozen all-coin scores,
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        research_alert_decision_watch.bind_score(dual_cvd_bundle)
         # SOL consumes all frozen targets, before any presentation threshold.
         # This adds no DOM/derivatives collector and has an isolated outbox.
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
@@ -4179,6 +4184,7 @@ async def run_watch_cycle(
         # transitions that were never sent to the general Watch chat.
         transition_record = None
         ordinary_lifecycle = general_enabled and alert_delivery_policy.ordinary_alerts_enabled()
+        research_alert_decision_watch.gate(ordinary_lifecycle)
         if ordinary_lifecycle:
             transition_record = await watch_transition_delivery.record_watch(
                 chat_id, displayable_items, watch_scan_id=watch_scan_id,
@@ -4188,21 +4194,30 @@ async def run_watch_cycle(
                 ),
             )
         special_messages = (
-            _collect_special_transition_messages(
-                displayable_items, include_score65=False,
+            research_alert_decision_watch.special_batch(
+                lambda: _collect_special_transition_messages(
+                    displayable_items, include_score65=False,
+                ),
+                displayable_items,
+                {"confirmation": CONFIRMATION_STATE, "score83": HIGH_SCORE_83_STATE,
+                 "derivatives_high": DERIVATIVES_HIGH_STATE, "spot_high": SPOT_FAMILY_HIGH_STATE},
             )
             if ordinary_lifecycle else []
         )
         if ordinary_lifecycle and combined_precompute_error is not None:
             raise combined_precompute_error
         combined_deliveries = (
-            _collect_combined_confirmation_messages(
-                displayable_items,
-                rows,
-                include_metadata=True,
+            research_alert_decision_watch.combined_batch(
+                lambda: _collect_combined_confirmation_messages(
+                    displayable_items,
+                    rows,
+                    include_metadata=True,
+                    event_time=research_decision_time,
+                    persist_research=True,
+                    precomputed_candidates=combined_candidates,
+                ),
+                combined_candidates, COMBINED_CONFIRMATION_STATE,
                 event_time=research_decision_time,
-                persist_research=True,
-                precomputed_candidates=combined_candidates,
             )
             if ordinary_lifecycle else []
         )
@@ -4450,6 +4465,9 @@ async def run_watch_cycle(
             pass
         return {"ok": False, "reason": repr(exc)}
     finally:
+        research_alert_decision_watch.finish(
+            alert_decision_handle, cycle_status=WATCH_RUNTIME.get("last_cycle_status"),
+        )
         if derivatives_task is not None:
             if not derivatives_task.done():
                 derivatives_task.cancel()
@@ -5818,6 +5836,7 @@ async def health(request):
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
+        "alert_decision_capture": research_alert_decision_watch.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
