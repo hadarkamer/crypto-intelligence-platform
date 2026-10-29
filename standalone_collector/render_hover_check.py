@@ -14,7 +14,7 @@ import tempfile
 import time
 
 SERVICE='srv-dbaf3grbc2fs73b5iogg'
-REVISION='56f23afbcb4e9e294c40d760b9d69d2aa9cf5e79'
+REVISION='d9ff5089a6865eb434047d9e34c60ca485c28c17'
 BRANCH='fix/model3-render-lifecycle-20261029'
 REPOSITORY='https://github.com/hadarkamer/crypto-intelligence-platform.git'
 HERE=Path(__file__).resolve().parent
