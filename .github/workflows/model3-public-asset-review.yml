@@ -1,0 +1,50 @@
+name: Review public Model 3 renderer assets
+on:
+  push:
+    branches: [test/model3-rendering-lab-20261029]
+    paths: [.github/workflows/model3-public-asset-review.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch four explicitly observed public JavaScript assets only
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,urllib.request,zipfile
+          from pathlib import Path
+          names={
+            '69001-464e676a1cd1221f.js':'1cef0cf46e89017f01d14b69ee34193903ffb37b71def91453d12918451a5417',
+            '10679-f5d0c63436a34cc4.js':'4c6bfb003a2a7713014a21c00bea7bc61b58a06294c6c56bbc76881910ee9150',
+            '69001-353ee23e05d8e496.js':None,
+            '10679-6f1f50533af63e97.js':None}
+          prefix='https://s3.coinglass.com/v1/cg/_next/static/chunks/'
+          summary={}
+          with zipfile.ZipFile('public-renderer-review.zip','w',zipfile.ZIP_DEFLATED) as archive:
+              for name,expected in names.items():
+                  request=urllib.request.Request(prefix+name,headers={'User-Agent':'SourceReview/1.0'})
+                  with urllib.request.urlopen(request,timeout=30) as response:
+                      if response.status!=200 or response.url!=prefix+name:raise RuntimeError('public_asset_response_changed')
+                      data=response.read(4000001)
+                  if len(data)>4000000:raise RuntimeError('public_asset_too_large')
+                  sha=hashlib.sha256(data).hexdigest()
+                  if expected and sha!=expected:raise RuntimeError('prior_asset_identity_changed')
+                  text=data.decode('utf-8')
+                  summary[name]={'sha256':sha,'bytes':len(data),
+                    'app_init_hook_count':text.count('__PIXI_APP_INIT__'),
+                    'renderer_init_hook_count':text.count('__PIXI_RENDERER_INIT__'),
+                    'app_init_marker_count':text.count('await this.app.init({resolution:1,background:this.state.color[0],resizeTo:document.getElementById("zxc")});')}
+                  archive.writestr(name,data)
+              archive.writestr('asset-summary.json',json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          print('Public code only. No source account, source market-data request, database or AI access.')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-renderer-review
+          path: public-renderer-review.zip
+          retention-days: 3
+          if-no-files-found: error
