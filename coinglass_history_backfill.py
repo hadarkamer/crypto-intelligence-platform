@@ -168,58 +168,6 @@ def _use_reference_inputs(symbol, result, cache_hit):
         pass
 
 
-def reference_cache_memory_counts() -> Dict[str, int]:
-    """Best-effort content-free counts; never fetch, copy samples or alter cache.
-
-    Snapshot at most 64 entry references and eight window references per entry.
-    Totals describe those sampled entries; cache_symbols is the observed cache
-    size. Detected mutation, truncation or malformed state sets incomplete=1.
-    This diagnostic is not an atomic snapshot or a measurement of bytes.
-    """
-    counts = dict(cache_symbols=0, sampled_symbols=0, history_rows=0, windows=0,
-                  price_samples=0, oi_samples=0, incomplete=0)
-
-    def snapshot_values(mapping, limit):
-        values, size = [], 0
-        try:
-            size = len(mapping)
-            if size > limit:
-                counts['incomplete'] = 1
-            iterator = iter(mapping.values())
-            for _ in range(min(size, limit)):
-                values.append(next(iterator))
-            if len(mapping) != size:
-                counts['incomplete'] = 1
-        except Exception:
-            counts['incomplete'] = 1
-        return values, size
-
-    entries, counts['cache_symbols'] = snapshot_values(_REFERENCE_CACHE, 64)
-    counts['sampled_symbols'] = len(entries)
-    for entry in entries:
-        try:
-            rows = entry.get('rows', 0)
-            if type(rows) is int and rows >= 0:
-                counts['history_rows'] += rows
-            else:
-                counts['incomplete'] = 1
-            windows, _ = snapshot_values(entry.get('windows', {}), 8)
-            counts['windows'] += len(windows)
-            for window in windows:
-                for source, target in (('price_composition_samples', 'price_samples'),
-                                       ('oi_composition_samples', 'oi_samples')):
-                    try:
-                        samples = window.get(source, [])
-                        if not isinstance(samples, (list, tuple)):
-                            raise TypeError
-                        counts[target] += len(samples)
-                    except Exception:
-                        counts['incomplete'] = 1
-        except Exception:
-            counts['incomplete'] = 1
-    return counts
-
-
 # Price history is exchange/pair based. For most assets Binance is the first
 # choice. HYPE starts with Hyperliquid. Fallbacks exist only for historical
 # collection and never touch the live price provider.
@@ -347,6 +295,8 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError("COINGLASS_API_KEY is not configured")
     last_error: Optional[Exception] = None
     for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        response = None
+        permanent_error = False
         try:
             response = requests.get(
                 API_BASE_URL + path,
@@ -354,17 +304,20 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 headers={"CG-API-KEY": key, "accept": "application/json"},
                 timeout=API_TIMEOUT_SECONDS,
             )
-            if response.status_code in {401, 403}:
-                response.raise_for_status()
+            permanent_error = response.status_code in {401, 403}
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict) or str(payload.get("code")) not in {"0", "200"}:
                 msg = payload.get("msg") if isinstance(payload, dict) else "invalid response"
+                permanent_error = isinstance(payload, dict) and (
+                    str(payload.get("code")) in {"401", "403"}
+                    or msg == "The requested pair does not exist on the exchange."
+                )
                 raise RuntimeError(f"CoinGlass API error: {msg!r}")
             return payload
         except Exception as exc:
             last_error = exc
-            if attempt >= MAX_REQUEST_ATTEMPTS:
+            if permanent_error or attempt >= MAX_REQUEST_ATTEMPTS:
                 break
             retry_after = 0.0
             try:
@@ -382,7 +335,7 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
             )
             time.sleep(delay)
     raise RuntimeError(
-        f"CoinGlass request failed after {MAX_REQUEST_ATTEMPTS} attempts: {last_error!r}"
+        f"CoinGlass request failed after {attempt} attempts: {last_error!r}"
     )
 
 
@@ -725,33 +678,6 @@ def _composition_distribution(
         "matched_effective_samples": float(matched.get("effective_samples") or 0.0),
     })
     return matched
-
-
-def _blend_distribution(active: Dict[str, Any], weekend: Dict[str, Any], global_dist: Dict[str, Any], active_ratio: float, weekend_ratio: float) -> Dict[str, Any]:
-    # Require enough effective observations per component.  When one component
-    # is still sparse, its percentiles fall back to the global distribution;
-    # the current window remains continuously weighted and never jumps.
-    min_effective = 30.0
-    active_ok = float(active.get("effective_samples") or 0.0) >= min_effective
-    weekend_ok = float(weekend.get("effective_samples") or 0.0) >= min_effective
-    out: Dict[str, Any] = {
-        "count": int(global_dist.get("count") or 0),
-        "active_ratio": active_ratio,
-        "weekend_ratio": weekend_ratio,
-        "active_effective_samples": float(active.get("effective_samples") or 0.0),
-        "weekend_effective_samples": float(weekend.get("effective_samples") or 0.0),
-        "baseline_mode": "ACTIVE_WEEKEND_CONTINUOUS",
-        "fallback_used": not (active_ok and weekend_ok),
-    }
-    for key in ("p25", "median", "p75", "p90", "p95"):
-        global_value = global_dist.get(key)
-        active_value = active.get(key) if active_ok else global_value
-        weekend_value = weekend.get(key) if weekend_ok else global_value
-        out[key] = session_baseline.blend_values(
-            active_value, weekend_value, active_ratio, weekend_ratio, global_value
-        )
-    return out
-
 
 
 @_observe_inputs("oi_historical_before", ("symbol", "target_time"))

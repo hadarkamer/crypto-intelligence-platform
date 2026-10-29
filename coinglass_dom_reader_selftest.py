@@ -113,13 +113,13 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
         click.assert_not_awaited()
         page.wait_for_timeout.assert_not_awaited()
 
-    async def test_missing_selector_stops_without_polling(self):
+    async def test_selector_timeout_is_retryable_without_polling(self):
         page = SimpleNamespace(wait_for_timeout=AsyncMock())
         with patch.object(reader, '_extract_tables', AsyncMock(return_value=[table()])), \
              patch.object(reader, '_click_timeframe_verified', AsyncMock(return_value=False)), \
              patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='24h')):
             result = await reader.read_timeframe(page, '24h')
-        self.assertFalse(result['retryable'])
+        self.assertTrue(result['retryable'])
         page.wait_for_timeout.assert_not_awaited()
 
     async def test_layout_failure_does_not_open_three_pages(self):
@@ -127,13 +127,35 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
         failed = {'verified': False, 'rows': [], 'retryable': False}
         with patch.object(reader, '_new_ready_page', AsyncMock(return_value=page)) as opened, \
              patch.object(reader, 'read_timeframe', AsyncMock(return_value=failed)), \
-             patch.object(reader, '_record_dom_memory'), \
              patch.object(reader.asyncio, 'sleep', AsyncMock()) as sleep:
             result = await reader._retry_timeframe_on_fresh_page(None, 'fixture://', '24h', None, 3)
         self.assertEqual(result, failed)
         self.assertEqual(opened.await_count, 1)
         page.close.assert_awaited_once()
         sleep.assert_not_awaited()
+
+    async def test_selector_timeout_retries_fresh_pages_and_can_recover(self):
+        for recover in (True, False):
+            with self.subTest(recover=recover):
+                pages = [SimpleNamespace(close=AsyncMock(), wait_for_timeout=AsyncMock()) for _ in range(3)]
+                selector = SimpleNamespace(wait_for=AsyncMock(side_effect=[
+                    reader.PlaywrightTimeoutError('selector delayed'),
+                    reader.PlaywrightTimeoutError('selector delayed'),
+                    None if recover else reader.PlaywrightTimeoutError('selector delayed'),
+                ]))
+                for page in pages:
+                    page.locator = lambda _: selector
+                with patch.object(reader, '_new_ready_page', AsyncMock(side_effect=pages)) as opened, \
+                     patch.object(reader, '_extract_tables', AsyncMock(return_value=[table()])), \
+                     patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='24h')), \
+                     patch.object(reader.asyncio, 'sleep', AsyncMock()):
+                    result = await reader._retry_timeframe_on_fresh_page(None, 'fixture://', '24h', None, 3)
+                self.assertEqual(result['verified'], recover)
+                self.assertEqual(opened.await_count, 3)
+                for page in pages:
+                    page.close.assert_awaited_once()
+                if not recover:
+                    self.assertEqual(result['rows'], [])
 
     async def test_layout_failure_aborts_atomic_collection_and_closes_browser(self):
         context = SimpleNamespace(close=AsyncMock())
@@ -143,8 +165,7 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
         manager.__aenter__.return_value = api
         failed = {'verified': False, 'rows': [], 'retryable': False, 'debug': {}}
         with patch.object(reader, 'async_playwright', return_value=manager), \
-             patch.object(reader, '_retry_timeframe_on_fresh_page', AsyncMock(return_value=failed)) as read, \
-             patch.object(reader, '_record_dom_memory'):
+             patch.object(reader, '_retry_timeframe_on_fresh_page', AsyncMock(return_value=failed)) as read:
             result = await reader.collect_coinglass_dom_snapshot()
         self.assertFalse(result['ok'])
         self.assertEqual(result['rows'], [])

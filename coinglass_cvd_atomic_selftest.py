@@ -82,6 +82,24 @@ def exercise(connect, postgres):
 
 
 def main():
+    # The 30m window and latest impulse share a baseline, not a directional vote.
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    rows, cumulative = [], 0.0
+    for i in range(500):
+        delta = (1 if i % 2 else -1) * (i % 17 + 1) * 10_000.0
+        cumulative += delta
+        rows.append({'time': base + timedelta(minutes=30*i), 'delta': delta,
+                     'continuous_cvd': cumulative})
+    expected_baseline = engine._baseline(rows, 1, current_end=rows[-1]['time'])
+    with patch.object(engine, '_load_rows', return_value=rows), \
+         patch.object(engine, '_baseline', wraps=engine._baseline) as baseline:
+        result = engine.analyze_market('XRP', 'futures')
+    assert sum(call.args[1] == 1 for call in baseline.call_args_list) == 1
+    assert result['windows']['30m']['directional_baselines'] == expected_baseline.to_dict()
+    magnitude, level = engine._magnitude_label(abs(rows[-1]['delta']), expected_baseline.for_change(rows[-1]['delta']))
+    assert result['current_impulse_30m']['magnitude'] == magnitude
+    assert result['current_impulse_30m']['evidence_level'] == level
+
     real_sqlite_connect = sqlite3.connect
     with tempfile.TemporaryDirectory() as folder:
         db = str(Path(folder)/"cvd.db")

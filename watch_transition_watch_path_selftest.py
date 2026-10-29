@@ -110,7 +110,6 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
         scope.update({
             "asyncio": SimpleNamespace(CancelledError=asyncio.CancelledError, sleep=sleep),
             "time": SimpleNamespace(monotonic=Mock(return_value=0.0)),
-            "_record_runtime_memory": Mock(),
             "WATCH_GENERAL_ENABLED": general, "WATCH_RUNTIME": runtime,
             "MAGNET_V1_WATCHES": {"BTC": {"chat_id": 99}} if magnet else {},
             "WATCH_TASK": SimpleNamespace(done=lambda: False) if coordinator_alive else None,

@@ -465,11 +465,6 @@ def combine(
     }
 
 
-def max_pain_side_to_price_direction(max_pain_side: Any) -> str:
-    side = str(max_pain_side or "").upper()
-    return "LONG" if side == "SHORT" else "SHORT" if side == "LONG" else "NEUTRAL"
-
-
 def attach_to_opportunities(
     items: List[Dict[str, Any]],
     snapshot_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
