@@ -31,11 +31,6 @@ jobs:
         run: python -m py_compile coinglass_dom_reader.py coinglass_dom_cleanup_selftest.py
       - name: Run collector page ownership regressions
         run: python coinglass_dom_cleanup_selftest.py
-      - name: Run bounded memory diagnostics regressions
-        run: |
-          python runtime_memory_diagnostics_selftest.py
-          python reference_cache_memory_counts_selftest.py
-          python memory_diagnostics_hooks_selftest.py
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 12
@@ -95,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t selftests < <(git ls-files '*_selftest.py' | sort)
+          mapfile -t selftests < <(git ls-files '*_selftest.py' 'test_forward_paper_*.py' | sort)
           test "${#selftests[@]}" -gt 0
           printf 'Running %s self-tests\n' "${#selftests[@]}"
           for selftest in "${selftests[@]}"; do

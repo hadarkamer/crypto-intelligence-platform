@@ -264,23 +264,6 @@ def _weighted_percentiles(values_and_weights: Sequence[Tuple[float, float]]) -> 
     )
 
 
-def _blend_percentiles(active: Optional[Percentiles], weekend: Optional[Percentiles], global_pct: Optional[Percentiles], active_ratio: float, weekend_ratio: float) -> Optional[Percentiles]:
-    if global_pct is None and active is None and weekend is None:
-        return None
-    fallback = global_pct or active or weekend
-    active = active or fallback
-    weekend = weekend or fallback
-    if active is None or weekend is None:
-        return fallback
-    return Percentiles(
-        samples=min(active.samples, weekend.samples),
-        p25=float(session_baseline.blend_values(active.p25, weekend.p25, active_ratio, weekend_ratio, fallback.p25)),
-        p50=float(session_baseline.blend_values(active.p50, weekend.p50, active_ratio, weekend_ratio, fallback.p50)),
-        p75=float(session_baseline.blend_values(active.p75, weekend.p75, active_ratio, weekend_ratio, fallback.p75)),
-        p90=float(session_baseline.blend_values(active.p90, weekend.p90, active_ratio, weekend_ratio, fallback.p90)),
-    )
-
-
 def _baseline(rows: Sequence[Dict[str, Any]], steps: int, current_end: Optional[datetime] = None) -> Optional[DirectionalBaselines]:
     """Directional CVD baseline matched to the current session composition.
 
@@ -362,7 +345,10 @@ def _magnitude_label(value_abs: float, baseline: Percentiles) -> Tuple[str, int]
     return "STRONG", 3
 
 
-def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dict[str, Any]:
+def _window_state(
+    rows: Sequence[Dict[str, Any]], label: str, steps: int,
+    baseline_30m: Optional[DirectionalBaselines],
+) -> Dict[str, Any]:
     if len(rows) <= steps:
         return {"window": label, "available": False, "reason": "not enough history"}
     latest_idx = len(rows) - 1
@@ -379,7 +365,7 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
     reference_idx, offset = nearest
     if reference_idx >= latest_idx:
         return {"window": label, "available": False, "reason": "reference is not older"}
-    directional_baselines = _baseline(rows, steps, current_end=latest["time"])
+    directional_baselines = baseline_30m if steps == 1 else _baseline(rows, steps, current_end=latest["time"])
     if directional_baselines is None:
         return {"window": label, "available": False, "reason": "not enough baseline samples"}
 
@@ -433,46 +419,6 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
     }
 
 
-def _group_state(name: str, windows: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    labels = GROUPS[name]
-    significant = [
-        windows[label] for label in labels
-        if windows.get(label, {}).get("available")
-        and int(windows[label].get("evidence_level") or 0) >= 2
-    ]
-    bullish = [x for x in significant if x.get("direction") == "BULLISH"]
-    bearish = [x for x in significant if x.get("direction") == "BEARISH"]
-
-    if bullish and bearish:
-        state = "MIXED"
-        direction = "NEUTRAL"
-    elif len(bullish) >= 2:
-        state = "BULLISH_CONFIRMED"
-        direction = "BULLISH"
-    elif len(bearish) >= 2:
-        state = "BEARISH_CONFIRMED"
-        direction = "BEARISH"
-    elif len(bullish) == 1:
-        state = "BULLISH_EVIDENCE"
-        direction = "BULLISH"
-    elif len(bearish) == 1:
-        state = "BEARISH_EVIDENCE"
-        direction = "BEARISH"
-    else:
-        state = "NEUTRAL"
-        direction = "NEUTRAL"
-
-    strong_count = sum(1 for x in significant if int(x.get("evidence_level") or 0) >= 3)
-    return {
-        "group": name,
-        "state": state,
-        "direction": direction,
-        "significant_windows": len(significant),
-        "strong_windows": strong_count,
-        "members": list(labels),
-    }
-
-
 def _overall(groups: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     directional = [g for g in groups.values() if g.get("direction") in {"BULLISH", "BEARISH"}]
     bull = [g for g in directional if g.get("direction") == "BULLISH"]
@@ -491,24 +437,6 @@ def _overall(groups: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     else:
         state = f"{direction}_EARLY"
     return {"state": state, "direction": direction, "confirmed_groups": len(confirmed)}
-
-
-def _early_shift(groups: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    momentum = groups.get("momentum") or {}
-    trend = groups.get("trend") or {}
-    structure = groups.get("structure") or {}
-    momentum_dir = momentum.get("direction")
-    established = [g.get("direction") for g in (trend, structure) if g.get("state", "").endswith("CONFIRMED")]
-    if momentum_dir not in {"BULLISH", "BEARISH"} or not established:
-        return None
-    if all(x == established[0] for x in established) and momentum_dir != established[0]:
-        return {
-            "detected": True,
-            "new_direction": momentum_dir,
-            "established_direction": established[0],
-            "reason": "momentum opposes confirmed trend/structure flow",
-        }
-    return None
 
 
 def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -588,8 +516,9 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     rows = _load_rows(symbol, market)
     quality = _quality(rows)
     valid_series = quality.get("continuous_cvd_check", False)
+    directional_baseline_30m = _baseline(rows, 1, current_end=rows[-1]["time"]) if rows else None
     windows = {
-        label: _window_state(rows, label, steps) if valid_series else {
+        label: _window_state(rows, label, steps, directional_baseline_30m) if valid_series else {
             "available": False, "reason": "נתוני CVD אינם עקביים; ממתין לתיקון הסדרה" if rows else "אין נתוני CVD שמורים",
         }
         for label, steps in WINDOWS
@@ -616,7 +545,6 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     latest_impulse = None
     if rows:
         latest = rows[-1]
-        directional_baseline_30m = _baseline(rows, 1, current_end=latest["time"])
         baseline_30m = directional_baseline_30m.for_change(float(latest["delta"])) if directional_baseline_30m else None
         if baseline_30m:
             magnitude, level = _magnitude_label(abs(float(latest["delta"])), baseline_30m)

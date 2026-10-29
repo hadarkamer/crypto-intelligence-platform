@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import requests
 
@@ -306,25 +306,6 @@ def _normalize(payload: Dict[str, Any]) -> Dict[int, Tuple[float, float, float]]
         if ts > 0 and all(math.isfinite(v) for v in (buy, sell, api_cvd)) and buy >= 0 and sell >= 0:
             rows[ts] = (buy, sell, api_cvd)
     return rows
-
-
-def _stitch_chunks(
-    chunks: List[Dict[int, Tuple[float, float, float]]]
-) -> Dict[int, Tuple[float, float, float, float]]:
-    """Backward-compatible helper retained for tests and diagnostics."""
-    output: Dict[int, Tuple[float, float, float, float]] = {}
-    previous_continuous_close: Optional[float] = None
-    for chunk in chunks:
-        if not chunk:
-            continue
-        ordered = sorted(chunk.items())
-        first_api = ordered[0][1][2]
-        chunk_offset = 0.0 if previous_continuous_close is None else previous_continuous_close - first_api
-        for ts, (buy, sell, api_cvd) in ordered:
-            continuous = api_cvd + chunk_offset
-            output[ts] = (buy, sell, api_cvd, continuous)
-        previous_continuous_close = output[ordered[-1][0]][3]
-    return output
 
 
 def _fetch_chunk(

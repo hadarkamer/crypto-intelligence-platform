@@ -10,7 +10,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     import requests
@@ -26,6 +26,64 @@ import market_confidence_engine as confidence
 
 def payloads(collector, kind):
     return [body for _, body in capture.event_payloads(collector.package(), kind)]
+
+
+class HistoryRequestTests(unittest.TestCase):
+    def response(self, status=200, payload=None, headers=None):
+        response = Mock(status_code=status, headers=headers or {})
+        response.json.return_value = payload or {"code": "0", "data": []}
+        if status >= 400:
+            response.raise_for_status.side_effect = requests.HTTPError(str(status), response=response)
+        return response
+
+    def test_permanent_failures_stop_without_backoff(self):
+        cases = [self.response(status=401), self.response(status=403)]
+        cases += [self.response(payload={"code": code, "msg": message}) for code, message in (
+            ("401", "Unauthorized"), ("403", "Forbidden"),
+            ("400", "The requested pair does not exist on the exchange."),
+        )]
+        for response in cases:
+            with self.subTest(response=response), patch.object(history, '_api_key', return_value='fixture'), \
+                 patch.object(history.requests, 'get', return_value=response) as get, \
+                 patch.object(history.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(RuntimeError, 'after 1 attempts'):
+                    history._request('/fixture', {})
+                get.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_transient_failures_keep_backoff_and_recover(self):
+        for failure in (self.response(status=429, headers={'Retry-After': '12'}),
+                        self.response(status=503), requests.Timeout('slow'),
+                        self.response(payload={'code': '500', 'msg': 'temporary'})):
+            with self.subTest(failure=failure), patch.object(history, '_api_key', return_value='fixture'), \
+                 patch.object(history.requests, 'get', side_effect=[failure, self.response()]) as get, \
+                 patch.object(history.time, 'sleep') as sleep:
+                self.assertEqual(history._request('/fixture', {})['code'], '0')
+                self.assertEqual(get.call_count, 2)
+                sleep.assert_called_once_with(12.0 if getattr(failure, 'status_code', None) == 429 else 2.0)
+
+    def test_exhausted_network_failures_are_bounded(self):
+        with patch.object(history, '_api_key', return_value='fixture'), \
+             patch.object(history.requests, 'get', side_effect=requests.Timeout('slow')) as get, \
+             patch.object(history.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'after 4 attempts'):
+                history._request('/fixture', {})
+            self.assertEqual(get.call_count, 4)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [2.0, 5.0, 10.0])
+
+    def test_unsupported_pair_preserves_market_fallback(self):
+        start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        candles = [{'time': i + 1, 'close': 10.0} for i in range(100)]
+        responses = [self.response(payload={'code': '400', 'msg': 'The requested pair does not exist on the exchange.'}),
+                     self.response(payload={'code': '0', 'data': candles})]
+        with patch.object(history, '_api_key', return_value='fixture'), \
+             patch.object(history, '_price_candidates', return_value=[('first', 'XRPUSDT'), ('second', 'XRPUSDT')]), \
+             patch.object(history.requests, 'get', side_effect=responses) as get, \
+             patch.object(history.time, 'sleep') as sleep:
+            rows, exchange, pair = history.fetch_price_history('XRP', start, start + timedelta(hours=1))
+        self.assertEqual((len(rows), exchange, pair), (100, 'second', 'XRPUSDT'))
+        self.assertEqual(get.call_count, 2)
+        sleep.assert_called_once_with(history.REQUEST_PAUSE_SECONDS)
 
 
 class CacheInputTests(unittest.TestCase):
