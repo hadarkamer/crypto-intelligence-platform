@@ -209,6 +209,7 @@ def combined_source(candidates, *, event_time=None):
 
 def begin(cycle_id, *, general_enabled, top8_only):
     """Start one Watch-only scope. No recipient identifier is retained."""
+    token=None;handle=None
     try:
         token=capture.begin(cycle_id, metadata=dict(bridge_version=VERSION,
             population='ACTUAL_WATCH_NATIVE_BATCH_INVOCATIONS', general_enabled=bool(general_enabled),
@@ -228,6 +229,10 @@ def begin(cycle_id, *, general_enabled, top8_only):
         return handle
     except BaseException as error:
         _gap(error)
+        if handle is not None and 'bridge_token' in handle:
+            try: _CURRENT.reset(handle['bridge_token'])
+            except BaseException as cleanup_error: _gap(cleanup_error)
+        if token is not None: _safe(capture.reset,token)
         return None
 
 

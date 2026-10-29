@@ -216,5 +216,14 @@ class WatchBridgeTests(unittest.TestCase):
         self.assertEqual(capsule['payload']['records'][0]['result']['outcome'],'RAISED')
         self.assertEqual(capsule['payload']['stage_status']['combined_native_batch'],'ERROR')
 
+    def test_failed_bridge_activation_restores_prior_capture_context(self):
+        outer=capture.begin(CYCLE);previous=capture._current()
+        def broken_set(value): raise RuntimeError('bridge context unavailable')
+        try:
+            with patch.object(bridge,'_CURRENT',SimpleNamespace(get=lambda:None,set=broken_set)):
+                self.assertIsNone(bridge.begin(CYCLE,general_enabled=True,top8_only=True))
+            self.assertIs(capture._current(),previous)
+        finally: capture.reset(outer)
+
 
 if __name__=='__main__':unittest.main()
