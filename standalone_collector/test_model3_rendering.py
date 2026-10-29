@@ -1,4 +1,4 @@
-"""No account, database or source access: integration contract and lifecycle."""
+"""Source-independent lifecycle and browser checks; no accounts or network."""
 import ast
 import hashlib
 import json
@@ -7,31 +7,24 @@ import sys
 import types
 import unittest
 from unittest.mock import patch
-
 HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE/'runtime'))
 import model3_rendering as rendering
 from install_model3_rendering import expand
-
 GEOMETRY={'x':81,'y':336,'width':1428,'height':800,'page_width':1600}
-# Full pristine capture was independently verified as SHA256 6b05e7dd...e40b35.
-# ast.dump omits empty lists by default on Python 3.13, unlike CI's 3.11.
-# Serialize every field ourselves, normalizing only absent empty type_params.
+# Independent pristine capture hash: 6b05e7dd62b4a2ef228c2cf31eb75d9598aa36ef0a15c4665871cda085e40b35.
+# Include empty fields on every Python version; only empty type_params is normalized.
 BASE_AST_SHA='ff5a666e1e7b2274ad30c0584f3a4ba30521e7b604f2bef8b16b68ab55588c4c'
-
-
 def canonical_ast(value):
     if isinstance(value,ast.AST):
-        return [type(value).__name__,[[name,canonical_ast(field)]
-            for name,field in ast.iter_fields(value)
+        return [type(value).__name__,[[name,canonical_ast(field)] for name,field in ast.iter_fields(value)
             if not(name=='type_params' and field==[])]]
     if isinstance(value,list):return [canonical_ast(item) for item in value]
     return value
 
 
 def ast_digest(tree):
-    return hashlib.sha256(json.dumps(canonical_ast(tree),
-        separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(canonical_ast(tree),separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
 
 
 class Context:
@@ -43,14 +36,15 @@ class Context:
 class Page:
     def __init__(self):
         self.context=Context();self.calls=[];self.enabled=False;self.restore_fail=False
-        setattr(self.context,rendering._STATE,{'chart':True,'pixi':True,'reason':'verified'})
+        setattr(self.context,rendering._STATE,True)
         self.entry={'key':1,'enabled':False,'ticker_count':2,
-                    'canvas':{'rect':{k:GEOMETRY[k] for k in ('x','y','width','height')}}}
+            'canvas':{'rect':{k:GEOMETRY[k] for k in ('x','y','width','height')}}}
+        self.supported=True;self.version='8.21.0';self.reason='selected_chart_unobserved'
     def evaluate(self,script,arg=None):
         self.calls.append((script,arg))
-        if 'snapshot()' in script:return [{**self.entry,'enabled':self.enabled}]
-        if '.enable(' in script:
-            self.enabled=True;return {**self.entry,'enabled':True}
+        if 'attachSelected' in script:return {'supported':self.supported,'version':self.version,
+            'reason':self.reason,'entry':{**self.entry,'enabled':self.enabled}}
+        if '.enable(' in script:self.enabled=True;return {**self.entry,'enabled':True}
         if '.disable(' in script:
             if self.restore_fail:raise RuntimeError('synthetic_restore_failure')
             self.enabled=False;return {**self.entry,'enabled':False}
@@ -62,85 +56,116 @@ class RenderingTests(unittest.TestCase):
     def test_other_models_are_exact_noops(self):
         for model in (1,2):
             rendering.configure_context(object(),model)
-            with rendering.observation(object(),model,{}) as prepare:
-                self.assertIsNone(prepare())
-    def test_context_has_only_two_public_asset_routes(self):
+            with rendering.observation(object(),model,{}) as prepare:self.assertIsNone(prepare())
+    def test_context_uses_one_ordered_init_script_and_no_network_routes(self):
         context=Context();rendering.configure_context(context,3)
-        self.assertEqual(set(context.routes),{rendering.CHART_URL,rendering.PIXI_URL})
+        self.assertEqual(context.routes,{})
         self.assertEqual(len(context.scripts),1)
-        self.assertTrue(Path(context.scripts[0]['path']).is_file())
-        with self.assertRaisesRegex(RuntimeError,'already_configured'):
-            rendering.configure_context(context,3)
-    def test_guarded_patch_is_one_inert_attachment_and_rejects_drift(self):
-        fixture=b'before;'+rendering.MARKER+b'after;'
-        with patch.object(rendering,'CHART_SHA',hashlib.sha256(fixture).hexdigest()):
-            actual=rendering.patch_public_chart(fixture)
-            self.assertEqual(actual.replace(rendering.INSERT,b'',1),fixture)
-            self.assertNotIn(b'.enable(',actual)
-            self.assertIsNone(rendering.patch_public_chart(fixture+b' '))
-        duplicate=fixture+rendering.MARKER
-        with patch.object(rendering,'CHART_SHA',hashlib.sha256(duplicate).hexdigest()):
-            self.assertIsNone(rendering.patch_public_chart(duplicate))
-    def test_unknown_chart_and_pixi_are_returned_unmodified(self):
-        context=Context();rendering.configure_context(context,3)
-        for url in (rendering.CHART_URL,rendering.PIXI_URL):
-            response=types.SimpleNamespace(status=200,headers={'content-type':'application/javascript','content-encoding':'gzip','etag':'old'},body=lambda:b'new-source-version')
-            class Route:
-                request=types.SimpleNamespace(url=url)
-                def fetch(self,**kwargs):return response
-                def fulfill(self,**kwargs):self.output=kwargs
-            route=Route();context.routes[url](route)
-            self.assertEqual(route.output['body'],b'new-source-version')
-            self.assertNotIn('content-encoding',route.output['headers'])
-        state=getattr(context,rendering._STATE)
-        self.assertFalse(state['chart']);self.assertFalse(state['pixi'])
-    def test_fetch_failure_leaves_normal_browser_path_without_retry(self):
-        context=Context();rendering.configure_context(context,3)
-        class Route:
-            request=types.SimpleNamespace(url=rendering.CHART_URL)
-            count=0;continued=False
-            def fetch(self,**kwargs):self.count+=1;raise TimeoutError('private not logged')
-            def continue_(self):self.continued=True
-        route=Route();context.routes[rendering.CHART_URL](route)
-        self.assertEqual(route.count,1);self.assertTrue(route.continued)
-    def test_unrecognized_version_never_activates_hook(self):
-        page=Page();setattr(page.context,rendering._STATE,{'chart':True,'pixi':False,'reason':'pixi_version_unrecognized'})
+        script=context.scripts[0]['script']
+        self.assertTrue(script.startswith((HERE/'runtime/model3_render_gate.js').read_text()))
+        self.assertTrue(script.endswith(rendering.DISCOVERY))
+        with self.assertRaisesRegex(RuntimeError,'already_configured'):rendering.configure_context(context,3)
+    def test_missing_configuration_keeps_original_without_browser_calls(self):
+        page=Page();delattr(page.context,rendering._STATE)
         with rendering.observation(page,3,GEOMETRY) as prepare:self.assertIsNone(prepare())
         self.assertEqual(page.calls,[])
-    def test_missing_or_wrong_chart_keeps_original(self):
-        for mode in ('missing','geometry'):
-            page=Page()
-            if mode=='missing':page.evaluate=lambda *args:None
-            else:page.entry['canvas']['rect']['x']+=1
+    def test_missing_or_unsupported_hook_never_activates_gate(self):
+        for reason in ('selected_chart_unobserved','renderer_version_unrecognized','init_hook_unavailable'):
+            page=Page();page.supported=False;page.reason=reason
             with rendering.observation(page,3,GEOMETRY) as prepare:self.assertIsNone(prepare())
-            self.assertFalse(page.enabled)
-    def test_scope_activates_clean_capture_and_always_restores(self):
+            self.assertFalse(any('.enable(' in script for script,_ in page.calls))
+    def test_discovered_identity_mismatch_is_rejected(self):
+        for kind in ('geometry','version'):
+            page=Page()
+            if kind=='geometry':page.entry['canvas']['rect']['x']+=1
+            else:page.version='9.0.0'
+            with self.assertRaisesRegex(RuntimeError,'discovery_unverified'):
+                with rendering.observation(page,3,GEOMETRY):pass
+    def test_scope_activates_clean_capture_and_restores(self):
         page=Page();seen=[]
         def clean(target,paint):
-            seen.append(target);self.assertTrue(page.enabled);paint(target)
-            return {'fresh_paint':True}
+            seen.append(target);self.assertTrue(page.enabled);paint(target);return {'fresh_paint':True}
         with patch.dict(sys.modules,{'model3_clean_frame':types.SimpleNamespace(prepare_frame=clean)}):
             with rendering.observation(page,3,GEOMETRY) as prepare:
                 self.assertTrue(prepare()['fresh_paint']);self.assertTrue(page.enabled)
         self.assertEqual(seen,[page]);self.assertFalse(page.enabled)
-        self.assertEqual(sum('.enable(' in script for script,_ in page.calls),1)
-        self.assertEqual(sum('.disable(' in script for script,_ in page.calls),1)
+        self.assertEqual(sum('.enable(' in s for s,_ in page.calls),1)
+        self.assertEqual(sum('.disable(' in s for s,_ in page.calls),1)
     def test_source_failure_is_preserved_and_restores(self):
         page=Page()
         with self.assertRaisesRegex(ValueError,'original_source_failure'):
             with rendering.observation(page,3,GEOMETRY):raise ValueError('original_source_failure')
         self.assertFalse(page.enabled)
-    def test_restore_failure_rejects_success_without_masking_original_failure(self):
+    def test_restore_failure_rejects_success_without_masking_source_failure(self):
         page=Page();page.restore_fail=True
         with self.assertRaisesRegex(RuntimeError,'synthetic_restore_failure'):
             with rendering.observation(page,3,GEOMETRY):pass
         page=Page();page.restore_fail=True
         with self.assertRaisesRegex(ValueError,'original_source_failure'):
             with rendering.observation(page,3,GEOMETRY):raise ValueError('original_source_failure')
-    def test_already_active_hook_is_not_silently_reused(self):
+    def test_active_hook_is_not_reused(self):
         page=Page();page.enabled=True
         with self.assertRaisesRegex(RuntimeError,'unexpected_active_hook'):
             with rendering.observation(page,3,GEOMETRY):pass
+
+
+class DiscoveryBrowserTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls.p=sync_playwright().start();cls.addClassCleanup(cls.p.stop)
+        cls.browser=cls.p.chromium.launch(headless=True);cls.addClassCleanup(cls.browser.close)
+    def setUp(self):
+        self.context=self.browser.new_context(viewport={'width':400,'height':300})
+        self.addCleanup(self.context.close)
+        self.context.route('**/*',lambda route:route.abort())
+        self.page=self.context.new_page()
+        self.page.set_content('<canvas width="200" height="100"></canvas>')
+        self.page.evaluate('''() => {
+          const canvas=document.querySelector('canvas');
+          window.makeApp=()=>({renderer:{canvas,render(){return 'rendered'}},
+             ticker:{started:true,count:2,add(){},remove(){}},render(){return this.renderer.render()}});
+          window.app=makeApp();
+          const r=canvas.getBoundingClientRect();window.rect={x:r.x,y:r.y,width:r.width,height:r.height};
+        }''')
+    def install(self,prefix=''):
+        script=prefix+(HERE/'runtime/model3_render_gate.js').read_text()+'\n'+rendering.DISCOVERY
+        self.page.evaluate('source => (0,eval)(source)',script)
+    def result(self):return self.page.evaluate('()=>__cgModel3Discovery.attachSelected(rect)')
+    def test_matching_hook_attaches_only_the_selected_canvas_and_deduplicates(self):
+        self.install();self.assertFalse(self.result()['supported'])
+        self.page.evaluate("()=>{__PIXI_APP_INIT__(app,'8.21.0');__PIXI_APP_INIT__(app,'8.21.0')}")
+        self.assertTrue(self.result()['supported'])
+        self.assertEqual(self.page.evaluate('()=>__cg29RenderLab.snapshot().length'),1)
+        self.assertEqual(self.page.evaluate('()=>app.render()'),'rendered')
+    def test_unknown_library_version_and_wrong_geometry_keep_original(self):
+        self.install();self.page.evaluate("()=>__PIXI_APP_INIT__(app,'9.0.0')")
+        self.assertFalse(self.result()['supported'])
+        self.assertEqual(self.page.evaluate('()=>__cg29RenderLab.snapshot().length'),0)
+        self.page.evaluate("()=>{__PIXI_APP_INIT__(app,'8.21.0');rect.x+=1}")
+        self.assertFalse(self.result()['supported'])
+    def test_existing_hook_return_receiver_and_arguments_are_preserved(self):
+        self.install("globalThis.__PIXI_APP_INIT__=function(a,v){globalThis.prior={receiver:this.flag,version:v,same:a===app};return 'kept'};\n")
+        result=self.page.evaluate("()=>__PIXI_APP_INIT__.call({flag:7},app,'8.21.0')")
+        self.assertEqual(result,'kept')
+        self.assertEqual(self.page.evaluate('()=>prior'),{'receiver':7,'version':'8.21.0','same':True})
+        self.assertTrue(self.result()['supported'])
+    def test_locked_source_hook_is_not_replaced(self):
+        self.install("Object.defineProperty(globalThis,'__PIXI_APP_INIT__',{value:()=>42,writable:false});\n")
+        self.assertEqual(self.page.evaluate('()=>__PIXI_APP_INIT__()'),42)
+        self.assertFalse(self.result()['supported'])
+    def test_ambiguous_canvas_owners_and_replaced_hook_are_rejected(self):
+        self.install()
+        self.page.evaluate("()=>{__PIXI_APP_INIT__(app,'8.21.0');__PIXI_APP_INIT__(makeApp(),'8.21.0')}")
+        self.assertEqual(self.result()['reason'],'ambiguous_chart')
+        self.page.evaluate('()=>globalThis.__PIXI_APP_INIT__=()=>42')
+        self.assertEqual(self.result()['reason'],'init_hook_unavailable')
+    def test_collection_waits_for_application_ready_instead_of_mutating_init(self):
+        self.install()
+        self.page.evaluate("()=>{window.early={};__PIXI_APP_INIT__(early,'8.21.0')}")
+        self.assertFalse(self.result()['supported'])
+        self.page.evaluate('()=>Object.assign(early,makeApp())')
+        self.assertTrue(self.result()['supported'])
 
 
 class InstallerTests(unittest.TestCase):
