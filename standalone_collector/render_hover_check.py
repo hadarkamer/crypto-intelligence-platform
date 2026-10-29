@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 SERVICE='srv-dbaf3grbc2fs73b5iogg'
-REVISION='307d55c1187a86f0ac66981be6ab36623fe0ac4c'
+REVISION='0780a6f9d54bb732db68c72ba179d40a426bec64'
 BRANCH='test/model3-rendering-lab-20261029'
 REPOSITORY='https://github.com/hadarkamer/crypto-intelligence-platform.git'
 HERE=Path(__file__).resolve().parent
