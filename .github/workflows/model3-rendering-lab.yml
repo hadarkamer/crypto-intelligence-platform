@@ -1,0 +1,107 @@
+name: Verify Model 3 rendering laboratory
+
+on:
+  push:
+    branches:
+      - test/model3-rendering-lab-20261029
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-validation:
+    if: github.ref == 'refs/heads/test/model3-rendering-lab-20261029'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPENAI_API_KEY: ""
+      DATABASE_URL: ""
+      SUPABASE_SERVICE_ROLE_KEY: ""
+      COINGLASS_STORAGE_STATE_JSON: ""
+      COINGLASS_COOKIE_HEADER: ""
+      COINGLASS_COLLECTOR_TOKEN: ""
+      COLLECTION_BRIDGE_ENABLED: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install original collector test dependencies
+        run: >-
+          python -m pip install
+          'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3'
+          'playwright==1.55.0' 'Pillow==12.3.0'
+      - name: Install offline test browser
+        run: python -m playwright install --with-deps chromium
+      - name: Build unchanged reader and run existing regression tests
+        run: python standalone_collector/prepare.py
+      - name: Verify exact reader hashes and isolated runner
+        run: |
+          python - <<'PY'
+          import hashlib, importlib.util, os
+          from pathlib import Path
+          from unittest.mock import patch
+          runtime=Path('standalone_collector/runtime')
+          expected={
+            'heatmap_hover.py':'693aa6739a8b1f50d0550cd802dde99cff4c68edfad6c643c1adf8d6bc05f820',
+            'market_vision/coinglass_heatmap_capture.py':'6b05e7dd62b4a2ef228c2cf31eb75d9598aa36ef0a15c4665871cda085e40b35'}
+          for name,value in expected.items():
+              assert hashlib.sha256((runtime/name).read_bytes()).hexdigest()==value,name
+          spec=importlib.util.spec_from_file_location('lab_runner','standalone_collector/render_hover_check.py')
+          runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+          with patch.dict(os.environ,{'DATABASE_URL':'fixture','OPENAI_API_KEY':'fixture','COINGLASS_COOKIE_HEADER':'fixture','OTHER_SECRET':'fixture'},clear=True):
+              clean=runner.child_environment()
+              assert not clean['DATABASE_URL'] and not clean['OPENAI_API_KEY']
+              assert 'COINGLASS_COOKIE_HEADER' not in clean and 'OTHER_SECRET' not in clean
+              source=runner.child_environment(True)
+              assert source['COINGLASS_COOKIE_HEADER']=='fixture'
+              assert not source['DATABASE_URL'] and not source['OPENAI_API_KEY']
+              assert 'OTHER_SECRET' not in source
+          with patch.dict(os.environ,{'RENDER_SERVICE_ID':runner.LAB_SERVICE,'RENDER_SERVICE_TYPE':'static'},clear=True):
+              assert runner.check_target()=='prepare'
+          for values in ({'RENDER_SERVICE_ID':'srv-dakhacou01pc73f58aug','RENDER_SERVICE_TYPE':'web'},
+                         {'RENDER_SERVICE_ID':runner.LAB_SERVICE,'RENDER_SERVICE_TYPE':'static','CG_RENDER_LAB_MODE':'unexpected'}):
+              with patch.dict(os.environ,values,clear=True):
+                  try:runner.check_target()
+                  except RuntimeError:pass
+                  else:raise AssertionError('Isolation guard did not reject invalid invocation')
+          print('Exact original runtime hashes and five isolation cases passed; source_scans=0')
+          PY
+      - name: Fetch and verify two public code fixtures only
+        run: |
+          python - <<'PY'
+          import hashlib,sys,requests
+          from pathlib import Path
+          sys.path.insert(0,'standalone_collector/rendering_lab')
+          import candidate
+          root=Path('/tmp/cg29-m3-review');root.mkdir(mode=0o700,exist_ok=True)
+          for url,expected in ((candidate.ASSET_URL,candidate.ASSET_SHA256),(candidate.PIXI_URL,candidate.PIXI_SHA256)):
+              response=requests.get(url,timeout=30,allow_redirects=False)
+              assert response.status_code==200,'public_asset_download_failed'
+              assert hashlib.sha256(response.content).hexdigest()==expected,'public_asset_changed'
+              (root/url.rsplit('/',1)[-1]).write_bytes(response.content)
+          print('Public code fixtures verified. No authenticated source access.')
+          PY
+      - name: Check exact patch scope and real Pixi ticker behavior
+        working-directory: standalone_collector/rendering_lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          python test_candidate_offline.py -v
+          node --check patched_chart_for_syntax.js
+          node test_render_gate.cjs | tee offline-results.json
+          python -m py_compile candidate.py rendering_ab_check.py ../render_hover_check.py
+      - name: Check whitespace
+        run: git diff --check
+      - name: Retain text-only offline test result
+        uses: actions/upload-artifact@v4
+        with:
+          name: model3-rendering-lab-offline-results
+          path: standalone_collector/rendering_lab/offline-results.json
+          retention-days: 7
+          if-no-files-found: error
