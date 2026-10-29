@@ -1,8 +1,9 @@
-"""Asset identity, patch scope and rejection tests; no browser or network."""
+"""Offline asset identity and clean-frame browser checks; no account or source scans."""
 import hashlib
 from pathlib import Path
 import unittest
 import candidate
+from test_clean_frame import CleanFrameTests
 
 ROOT=Path('/tmp/cg29-m3-review')
 CHART=(ROOT/'69001-464e676a1cd1221f.js').read_bytes()
