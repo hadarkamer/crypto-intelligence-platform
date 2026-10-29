@@ -103,13 +103,15 @@ def prepare():
         cwd=HERE,check=True,timeout=90)
     from install_heatmap_hover import install as install_hover
     install_hover(RUNTIME)
+    from install_model3_rendering import install as install_rendering
+    install_rendering(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
         'test_response_shape','test_capture_diagnostics','test_capture_readiness',
         'test_source_login_required','test_timeout_retention','test_source_compatibility',
         'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','test_capture_failure_diagnostics',
         'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
-        'test_failure_diagnostic_integration','-v'],
+        'test_failure_diagnostic_integration','test_model3_rendering','-v'],
         cwd=HERE,check=True,timeout=240)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -128,6 +130,7 @@ def prepare():
         'failure_diagnostics':'capture-failure.v1; bounded original-observation facts and fitted-grid residuals',
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'selected-map data/loading/blur checks and stable geometry around one retained PNG',
+        'model3_rendering':'hash-guarded chart-local automatic paint; original fallback on source drift; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
