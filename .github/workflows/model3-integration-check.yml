@@ -1,0 +1,59 @@
+name: Verify Model 3 rendering integration
+on:
+  push:
+    branches: [fix/model3-render-lifecycle-20261029]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/fix/model3-render-lifecycle-20261029'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPENAI_API_KEY: ""
+      DATABASE_URL: ""
+      SUPABASE_SERVICE_ROLE_KEY: ""
+      COINGLASS_STORAGE_STATE_JSON: ""
+      COINGLASS_COOKIE_HEADER: ""
+      COINGLASS_COLLECTOR_TOKEN: ""
+      COLLECTION_BRIDGE_ENABLED: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned collector dependencies
+        run: python -m pip install 'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3' 'playwright==1.55.0' 'Pillow==12.3.0'
+      - name: Install synthetic browser
+        run: python -m playwright install --with-deps chromium
+      - name: Build and validate actual collector runtime without source access
+        run: python standalone_collector/prepare.py
+      - name: Retain code-only review bundle
+        run: |
+          python - <<'PY'
+          import hashlib,json,zipfile
+          from pathlib import Path
+          root=Path.cwd()
+          selected=list((root/'standalone_collector').rglob('*.py'))
+          selected+=list((root/'standalone_collector').rglob('*.js'))
+          selected+=[root/'market_vision/coinglass_heatmap_capture.py',root/'market_vision/openai_heatmap_scanner.py',root/'collection_bridge.py',root/'collection_model1_task.py']
+          hashes={}
+          with zipfile.ZipFile('collector-code-review.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(set(selected)):
+                  if p.is_symlink() or '__pycache__' in p.parts:continue
+                  key=str(p.relative_to(root));data=p.read_bytes()
+                  z.writestr(key,data);hashes[key]=hashlib.sha256(data).hexdigest()
+              z.writestr('hashes.json',json.dumps(hashes,sort_keys=True,indent=2))
+          print('Code-only review archive created. No account/session/market-data files.')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collector-code-review
+          path: collector-code-review.zip
+          retention-days: 3
+          if-no-files-found: error
