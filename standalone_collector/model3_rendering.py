@@ -61,7 +61,7 @@ def _log(status,reason):
 
 def configure_context(context,model:int)->None:
     if model!=3:return
-    if getattr(context,_STATE,False):raise RuntimeError('model3_render_context_already_configured')
+    if getattr(context,_STATE,False) is True:raise RuntimeError('model3_render_context_already_configured')
     # One init script preserves ordering; source request routing stays untouched.
     context.add_init_script(script=(ROOT/'model3_render_gate.js').read_text()+ '\n'+DISCOVERY)
     setattr(context,_STATE,True)
@@ -79,7 +79,7 @@ def observation(page,model:int,geometry:dict):
     if model!=3:
         yield lambda:None
         return
-    if not getattr(page.context,_STATE,False):
+    if getattr(page.context,_STATE,False) is not True:
         _log('original','not_configured')
         yield lambda:None
         return
