@@ -1,7 +1,7 @@
 """No account, database or source access: integration contract and lifecycle."""
 import ast
 import hashlib
-import importlib.util
+import json
 from pathlib import Path
 import sys
 import types
@@ -14,7 +14,24 @@ import model3_rendering as rendering
 from install_model3_rendering import expand
 
 GEOMETRY={'x':81,'y':336,'width':1428,'height':800,'page_width':1600}
-BASE_AST_SHA='dd93d13760928a0999ec7784537161988b72c17be036bdc4d353c97ff23f0920'
+# Full pristine capture was independently verified as SHA256 6b05e7dd...e40b35.
+# ast.dump omits empty lists by default on Python 3.13, unlike CI's 3.11.
+# Serialize every field ourselves, normalizing only absent empty type_params.
+BASE_AST_SHA='ff5a666e1e7b2274ad30c0584f3a4ba30521e7b604f2bef8b16b68ab55588c4c'
+
+
+def canonical_ast(value):
+    if isinstance(value,ast.AST):
+        return [type(value).__name__,[[name,canonical_ast(field)]
+            for name,field in ast.iter_fields(value)
+            if not(name=='type_params' and field==[])]]
+    if isinstance(value,list):return [canonical_ast(item) for item in value]
+    return value
+
+
+def ast_digest(tree):
+    return hashlib.sha256(json.dumps(canonical_ast(tree),
+        separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
 
 
 class Context:
@@ -105,7 +122,6 @@ class RenderingTests(unittest.TestCase):
         with patch.dict(sys.modules,{'model3_clean_frame':types.SimpleNamespace(prepare_frame=clean)}):
             with rendering.observation(page,3,GEOMETRY) as prepare:
                 self.assertTrue(prepare()['fresh_paint']);self.assertTrue(page.enabled)
-                # The unmodified caller's actual screenshot/read occurs here.
         self.assertEqual(seen,[page]);self.assertFalse(page.enabled)
         self.assertEqual(sum('.enable(' in script for script,_ in page.calls),1)
         self.assertEqual(sum('.disable(' in script for script,_ in page.calls),1)
@@ -149,7 +165,14 @@ class InstallerTests(unittest.TestCase):
                 return node
         restored=Strip().visit(tree)
         self.assertEqual(counts,{'import':1,'configure':1,'scope':1,'prepare':1})
-        self.assertEqual(hashlib.sha256(ast.dump(restored,include_attributes=False).encode()).hexdigest(),BASE_AST_SHA)
+        self.assertEqual(ast_digest(restored),BASE_AST_SHA)
+    def test_canonical_ast_keeps_empty_fields_and_detects_code_changes(self):
+        original=ast.parse('def f(value):\n    return value + 1\n')
+        changed=ast.parse('def f(value):\n    return value + 2\n')
+        self.assertNotEqual(ast_digest(original),ast_digest(changed))
+        self.assertIn(['decorator_list',[]],canonical_ast(original.body[0])[1])
+        original.body[0].type_params=[]
+        self.assertEqual(ast_digest(original),ast_digest(ast.parse('def f(value):\n    return value + 1\n')))
     def test_double_install_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError,'already_installed'):
             expand((HERE/'runtime/market_vision/coinglass_heatmap_capture.py').read_text())
