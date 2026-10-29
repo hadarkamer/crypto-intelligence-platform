@@ -18,6 +18,7 @@ Important:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -25,10 +26,48 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+import research_dom_capture as dom_capture
 
 
 COINGLASS_URL = "https://www.coinglass.com/liquidation-maxpain"
 DEFAULT_TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
+
+
+def _capture_unavailable(timeframe, reason, *, outcome='FAILED', metadata=None):
+    """Diagnostics are fail-open, including a failure in their own helper."""
+    try:
+        return dom_capture.unavailable(timeframe, reason, outcome=outcome, metadata=metadata)
+    except Exception:
+        payload = {'kind': 'TIMEFRAME', 'timeframe': str(timeframe)[:32], 'outcome': outcome,
+                   'unavailable_reason': 'DIAGNOSTIC_HELPER_FAILURE', 'selected_table': None,
+                   'row_decisions': [], 'attempt_history': [], 'truncation': []}
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+        return {'version': 'coinglass-dom-row-capture-v1', 'status': 'UNAVAILABLE',
+                'payload': payload, 'payload_sha256': hashlib.sha256(encoded.encode('utf-8')).hexdigest()}
+
+
+def _accepted_capture(tables, timeframe, rows, metadata):
+    try:
+        return dom_capture.capture_poll(tables, timeframe, rows, metadata=metadata,
+                                        parse_number=_parse_number, is_symbol=_is_symbol_token)
+    except Exception:
+        return _capture_unavailable(timeframe, 'ACCEPTED_POLL_CAPTURE_FAILED', metadata=metadata)
+
+
+def _attempt_capture(result, timeframe, history, attempt):
+    """Attach bounded retry metadata without changing operational result fields."""
+    try:
+        capture = result.get('dom_capture') or _capture_unavailable(timeframe, 'ATTEMPT_CAPTURE_UNAVAILABLE')
+        debug = result.get('debug') or {}
+        history.append({'attempt': attempt, 'outcome': 'ACCEPTED' if result.get('verified') else 'FAILED',
+                        'retryable': result.get('retryable'), 'poll': debug.get('poll'),
+                        'parsed_count': debug.get('parsed_count'), 'capture_payload_sha256': capture['payload_sha256'],
+                        'reason_code': capture['payload'].get('unavailable_reason'),
+                        'capture_completed_at_utc': capture['payload'].get('metadata', {}).get('capture_completed_at_utc')})
+        result['dom_capture'] = dom_capture.with_attempt_history(capture, history, attempt=attempt)
+    except Exception:
+        result['dom_capture'] = _capture_unavailable(timeframe, 'ATTEMPT_HISTORY_CAPTURE_FAILED')
+    return result
 
 
 def _parse_number(value):
@@ -209,23 +248,29 @@ async def read_timeframe(
         baseline_rows = _parse_maxpain_table_rows(await _extract_tables(page), "baseline")
     except ValueError as exc:
         return {"timeframe": timeframe, "verified": False, "rows": [],
-                "error": str(exc), "retryable": False, "debug": {}}
+                "error": str(exc), "retryable": False, "debug": {},
+                "dom_capture": _capture_unavailable(timeframe, 'BASELINE_SCHEMA_UNRECOGNIZED')}
     baseline_fp = _rows_fingerprint(baseline_rows) if baseline_rows else None
     baseline_label = await _active_timeframe_label(page)
     clicked = await _click_timeframe_verified(page, timeframe)
     if not clicked:
         return {"timeframe": timeframe, "verified": False, "rows": [],
-                "error": "Max Pain Window option timed out", "retryable": True, "debug": {}}
+                "error": "Max Pain Window option timed out", "retryable": True, "debug": {},
+                "dom_capture": _capture_unavailable(timeframe, 'WINDOW_SELECTOR_TIMEOUT')}
     stable_fp = None
     stable_count = 0
     # Fresh-page retries already exist; do not multiply them by another retry loop.
     for poll in range(1, 25):
         await page.wait_for_timeout(750)
         try:
-            rows = _parse_maxpain_table_rows(await _extract_tables(page), timeframe)
+            # Keep the same single extraction and the unchanged operational
+            # parser. Retain this exact poll only after its existing gate passes.
+            tables = await _extract_tables(page)
+            rows = _parse_maxpain_table_rows(tables, timeframe)
         except ValueError as exc:
             return {"timeframe": timeframe, "verified": False, "rows": [],
-                    "error": str(exc), "retryable": False, "debug": last_debug}
+                    "error": str(exc), "retryable": False, "debug": last_debug,
+                    "dom_capture": _capture_unavailable(timeframe, 'POLL_SCHEMA_UNRECOGNIZED', metadata={'poll': poll})}
         fingerprint = _rows_fingerprint(rows) if rows else None
         active_label = await _active_timeframe_label(page)
         symbols = [str(r.get("symbol") or "") for r in rows]
@@ -252,12 +297,17 @@ async def read_timeframe(
         if (active_ok and baseline_changed and previous_changed and stable_count >= 2
                 and unique_symbols and row_count_ok and not duplicate_of):
             return {"timeframe": timeframe, "clicked": clicked, "verified": True,
-                    "rows": rows, "fingerprint": fingerprint, "debug": last_debug}
+                    "rows": rows, "fingerprint": fingerprint, "debug": last_debug,
+                    "dom_capture": _accepted_capture(tables, timeframe, rows,
+                        {**last_debug, 'baseline_label': baseline_label, 'fingerprint': fingerprint,
+                         'baseline_fingerprint': baseline_fp, 'previous_fingerprint': previous_fingerprint,
+                         'parsed_at_utc': rows[0]['collected_at_utc'] if rows else None})}
     return {
         "timeframe": timeframe, "clicked": clicked, "verified": False, "rows": [],
         "fingerprint": None,
         "error": "timeframe failed active-tab/content/stability/uniqueness verification",
         "debug": last_debug,
+        "dom_capture": _capture_unavailable(timeframe, 'TIMEFRAME_VERIFICATION_FAILED', metadata=last_debug),
     }
 
 
@@ -305,6 +355,7 @@ async def _retry_timeframe_on_fresh_page(
         "error": "fresh-page retries exhausted",
         "debug": {},
     }
+    capture_history = []
 
     for attempt in range(1, attempts + 1):
         retry_page = None
@@ -320,6 +371,7 @@ async def _retry_timeframe_on_fresh_page(
                 previous_fingerprint=previous_fingerprint,
                 forbidden_fingerprints=forbidden_fingerprints,
             )
+            _attempt_capture(last_result, timeframe, capture_history, attempt)
 
             if last_result.get("retryable") is False:
                 return last_result
@@ -340,7 +392,9 @@ async def _retry_timeframe_on_fresh_page(
                 "fingerprint": None,
                 "error": repr(exc),
                 "debug": {},
+                "dom_capture": _capture_unavailable(timeframe, 'FRESH_PAGE_ATTEMPT_EXCEPTION', metadata={'error_code': type(exc).__name__}),
             }
+            _attempt_capture(last_result, timeframe, capture_history, attempt)
             print(
                 f"[dom] tf={timeframe} retry error: {exc!r}",
                 flush=True,
@@ -474,7 +528,7 @@ async def collect_coinglass_dom_snapshot(
         f"[dom] atomic result ok={ok}; rows={len(all_rows)}; counts={tf_counts}; "
         f"missing={missing}; duplicates={duplicate_pairs}", flush=True,
     )
-    return {
+    snapshot = {
         "ok": ok,
         "rows": all_rows if ok else [],
         "row_count": len(all_rows) if ok else 0,
@@ -489,6 +543,19 @@ async def collect_coinglass_dom_snapshot(
         },
         "collected_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    try:
+        snapshot['dom_capture'] = dom_capture.aggregate(requested_timeframes, by_timeframe)
+    except Exception:
+        try:
+            snapshot['dom_capture'] = dom_capture.unavailable_snapshot(requested_timeframes, 'SNAPSHOT_CAPTURE_FAILED')
+        except Exception:
+            payload = {'kind': 'SNAPSHOT', 'requested_timeframes': [], 'timeframes': {},
+                       'unavailable_reason': 'DIAGNOSTIC_HELPER_FAILURE',
+                       'original_requested_timeframe_count': len(requested_timeframes)}
+            encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+            snapshot['dom_capture'] = {'version': 'coinglass-dom-row-capture-v1', 'status': 'UNAVAILABLE',
+                                       'payload': payload, 'payload_sha256': hashlib.sha256(encoded.encode('utf-8')).hexdigest()}
+    return snapshot
 
 
 def collect_coinglass_dom_snapshot_sync(

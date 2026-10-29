@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 from statistics import median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -51,6 +52,13 @@ DEFAULT_MAX_DECISION_AGE_MINUTES = 45
 DEFAULT_MAX_PREVIOUS_GAP_MINUTES = 90
 SHADOW_PROVENANCE_POLICY_VERSION = "max-pain-shadow-provenance-v1"
 _TRUE = {"1", "true", "yes", "on"}
+DOM_ROW_ARCHIVE_VERSION = "coinglass-dom-row-archive-v1"
+# An independent guard runs before the producer validator or JSONB serializer.
+# The extra allowance covers the producer envelope around its 4 MiB payload.
+DOM_ROW_CAPTURE_MAX_BYTES = 4 * 1024 * 1024 + 64 * 1024
+DOM_ROW_CAPTURE_MAX_NODES = 262144
+DOM_ROW_CAPTURE_MAX_DEPTH = 16
+DOM_ROW_CAPTURE_MAX_STRING_CHARS = 512 * 1024
 
 
 def _utc(value: Any) -> datetime:
@@ -168,6 +176,137 @@ def _canonical(value: Any) -> str:
 
 def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _bounded_dom_capture_copy(value: Any) -> Any:
+    """Copy strict JSON without first serializing an unbounded opaque object."""
+    remaining = DOM_ROW_CAPTURE_MAX_BYTES
+    nodes = 0
+    active: set[int] = set()
+
+    def spend(size: int) -> None:
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError("DOM_CAPTURE_SIZE_BOUND")
+
+    def text_size(text: str) -> int:
+        if len(text) > DOM_ROW_CAPTURE_MAX_STRING_CHARS:
+            raise ValueError("DOM_CAPTURE_STRING_BOUND")
+        return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+
+    def visit(item: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > DOM_ROW_CAPTURE_MAX_NODES or depth > DOM_ROW_CAPTURE_MAX_DEPTH:
+            raise ValueError("DOM_CAPTURE_STRUCTURE_BOUND")
+        kind = type(item)
+        if item is None or kind is bool:
+            spend(4 if item is None or item is True else 5)
+            return item
+        if kind is str:
+            spend(text_size(item))
+            return item
+        if kind is int:
+            if item.bit_length() > 64:
+                raise ValueError("DOM_CAPTURE_INTEGER_BOUND")
+            spend(len(str(item)))
+            return item
+        if kind is float:
+            if not math.isfinite(item):
+                raise ValueError("DOM_CAPTURE_NONFINITE_NUMBER")
+            spend(len(json.dumps(item, allow_nan=False)))
+            return item
+        if kind not in (dict, list):
+            raise ValueError("DOM_CAPTURE_NOT_JSON")
+        if len(item) > DOM_ROW_CAPTURE_MAX_NODES or id(item) in active:
+            raise ValueError("DOM_CAPTURE_STRUCTURE_BOUND")
+        active.add(id(item))
+        try:
+            spend(2 + max(0, len(item) - 1))
+            if kind is list:
+                return [visit(child, depth + 1) for child in item]
+            copied = {}
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ValueError("DOM_CAPTURE_NOT_JSON")
+                spend(text_size(key) + 1)
+                copied[key] = visit(child, depth + 1)
+            return copied
+        finally:
+            active.remove(id(item))
+
+    return visit(value, 0)
+
+
+def _dom_capture_code_hashes() -> Dict[str, Optional[str]]:
+    hashes = {}
+    for name in ("coinglass_dom_reader.py", "research_dom_capture.py", "research_max_pain_archive.py"):
+        try:
+            hashes[name] = hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+        except Exception:
+            hashes[name] = None
+    return hashes
+
+
+def _dom_row_capture_metadata(
+    capture: Any, *, present: bool, cycle_id: str, cycle_time: datetime,
+    started_at: datetime, completed_at: datetime, source: str, collector_version: str,
+) -> Dict[str, Any]:
+    """Diagnostic-only metadata; failure must never change market eligibility."""
+    reasons = []
+    retained = None
+    status = "UNAVAILABLE"
+    if not present:
+        reasons.append("SNAPSHOT_DOM_CAPTURE_MISSING")
+    else:
+        try:
+            retained = _bounded_dom_capture_copy(capture)
+            if type(retained) is not dict:
+                raise ValueError("DOM_CAPTURE_NOT_OBJECT")
+        except Exception as exc:
+            allowed = {
+                "DOM_CAPTURE_SIZE_BOUND", "DOM_CAPTURE_STRING_BOUND", "DOM_CAPTURE_STRUCTURE_BOUND",
+                "DOM_CAPTURE_INTEGER_BOUND", "DOM_CAPTURE_NONFINITE_NUMBER", "DOM_CAPTURE_NOT_JSON", "DOM_CAPTURE_NOT_OBJECT",
+            }
+            reasons.append(str(exc) if type(exc) is ValueError and str(exc) in allowed else "DOM_CAPTURE_COPY_FAILED")
+            retained = None
+        if retained is not None:
+            try:
+                # This module is pure; importing the browser reader is unnecessary.
+                from research_dom_capture import validate_capture
+                validate_capture(retained, snapshot=True)
+                status = retained["status"]
+            except Exception:
+                reasons.append("DOM_CAPTURE_VALIDATION_FAILED")
+                retained = None
+    code_hashes = _dom_capture_code_hashes()
+    if retained is not None:
+        expected_producer = {name: code_hashes.get(name) for name in ("coinglass_dom_reader.py", "research_dom_capture.py")}
+        if retained["payload"].get("source_code_sha256") != expected_producer:
+            reasons.append("DOM_CAPTURE_PRODUCER_CODE_IDENTITY_MISMATCH")
+            if status == "COMPLETE":
+                status = "PARTIAL"
+    if any(value is None for value in code_hashes.values()):
+        reasons.append("DOM_CAPTURE_CODE_IDENTITY_UNAVAILABLE")
+        if status == "COMPLETE":
+            status = "PARTIAL"
+    result = {
+        "version": DOM_ROW_ARCHIVE_VERSION,
+        "status": status,
+        "cycle_binding": {
+            "cycle_id": cycle_id, "cycle_time_utc": _iso(cycle_time),
+            "collection_started_at_utc": _iso(started_at),
+            "collection_completed_at_utc": _iso(completed_at),
+            "source": source, "collector_version": collector_version,
+            "source_code_sha256": code_hashes,
+            "diagnostic_only": True, "study_specific": False,
+        },
+        "capture": retained,
+        "validation_reason_codes": reasons,
+    }
+    result["archive_payload_sha256"] = _sha256(result)
+    return result
 
 
 def canonical_provenance_sha256(value: Any) -> str:
@@ -1063,6 +1202,32 @@ def build_snapshot_payload(
 
     price_result = live_map.get("price_result")
     price_result = dict(price_result) if isinstance(price_result, Mapping) else {}
+    archive_capture_metadata = dict(capture_metadata or {})
+    # Replace any caller-supplied attachment with the independently validated
+    # snapshot capture and this archive set's own immutable cycle linkage.
+    try:
+        dom_attachment = _dom_row_capture_metadata(
+            snapshot_map.get("dom_capture"), present="dom_capture" in snapshot_map,
+            cycle_id=cycle_id, cycle_time=cycle_time, started_at=started_at,
+            completed_at=completed_at, source=source, collector_version=collector_version,
+        )
+    except Exception:
+        # Unexpected diagnostic failure must not suppress the pre-existing
+        # numeric archive. The fallback never copies the untrusted object or
+        # exception text, and explicitly lacks producer-code proof.
+        dom_attachment = {
+            "version": DOM_ROW_ARCHIVE_VERSION, "status": "UNAVAILABLE",
+            "cycle_binding": {
+                "cycle_id": cycle_id, "cycle_time_utc": _iso(cycle_time),
+                "collection_started_at_utc": _iso(started_at),
+                "collection_completed_at_utc": _iso(completed_at),
+                "source": source, "collector_version": collector_version,
+                "source_code_sha256": {}, "diagnostic_only": True, "study_specific": False,
+            },
+            "capture": None, "validation_reason_codes": ["DOM_CAPTURE_ATTACHMENT_FAILED"],
+        }
+        dom_attachment["archive_payload_sha256"] = _sha256(dom_attachment)
+    archive_capture_metadata["dom_row_capture"] = dom_attachment
     source_metadata = {
         "legacy_table_policy": "NEVER_READ_OR_IMPORTED",
         "snapshot_collected_at_utc": snapshot_map.get("collected_at_utc"),
@@ -1090,7 +1255,7 @@ def build_snapshot_payload(
             )
             if key in price_result
         },
-        "capture_metadata": _json_safe(dict(capture_metadata or {})),
+        "capture_metadata": _json_safe(archive_capture_metadata),
     }
     set_record: Dict[str, Any] = {
         "snapshot_key": _sha256(
