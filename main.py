@@ -68,6 +68,7 @@ import research_consumed_inputs
 import research_watch_decision_capture
 import research_alert_decision_watch
 import research_watch_runtime
+import research_background_memory
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -6930,6 +6931,7 @@ async def main():
             "Example: https://crypto-intelligence-platform-1.onrender.com"
         )
 
+    research_background_memory.install(globals())
     init_db()
 
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK

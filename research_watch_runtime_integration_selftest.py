@@ -73,6 +73,7 @@ def named(node, value):
 class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
     def __init__(self):
         self.functions, self.counts = [], {'import': 0, 'initial': 0, 'begin': 0, 'finish': 0, 'cleanup_tail': 0, 'health': 0}
+        self.background_hooks = {'import': 0, 'install': 0}
         self.stages = []
 
     def visit_FunctionDef(self, node):
@@ -87,6 +88,10 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
         assert self.functions and self.functions[0] == 'run_watch_cycle', 'OBSERVER_OUTSIDE_WATCH'
 
     def visit_Import(self, node):
+        if any(alias.name == 'research_background_memory' for alias in node.names):
+            assert not self.functions and len(node.names) == 1 and node.names[0].asname is None, 'BACKGROUND_IMPORT_SHAPE'
+            self.background_hooks['import'] += 1
+            return None
         if any(alias.name == MODULE for alias in node.names):
             assert not self.functions and len(node.names) == 1 and node.names[0].asname is None, 'OBSERVER_IMPORT_SHAPE'
             self.counts['import'] += 1
@@ -107,6 +112,13 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
 
     def visit_Expr(self, node):
         call = node.value
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and
+                named(call.func.value, 'research_background_memory')):
+            assert self.functions == ['main'] and call.func.attr == 'install' and not call.keywords and len(call.args) == 1, 'BACKGROUND_INSTALL_SHAPE'
+            argument = call.args[0]
+            assert isinstance(argument, ast.Call) and named(argument.func, 'globals') and not argument.args and not argument.keywords, 'BACKGROUND_INSTALL_ARGUMENT'
+            self.background_hooks['install'] += 1
+            return None
         if observer_call(call):
             self.in_watch()
             assert call.args and named(call.args[0], HANDLE), 'OBSERVER_HANDLE_ARGUMENT'
@@ -153,6 +165,7 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
         eraser = EraseOnlyApprovedRuntimeHooks()
         original = eraser.visit(deepcopy(self.tree))
         self.assertEqual(eraser.counts, {'import': 1, 'initial': 1, 'begin': 1, 'finish': 1, 'cleanup_tail': 1, 'health': 1})
+        self.assertEqual(eraser.background_hooks, {'import': 1, 'install': 1})
         self.assertCountEqual(eraser.stages, PHASES)
         self.assertEqual(len(eraser.stages), len(PHASES))
         self.assertEqual(pin(original), BASELINE_MAIN_AST)
