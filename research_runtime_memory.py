@@ -18,6 +18,8 @@ import time
 
 VERSION = 'runtime-memory-sample-v1'
 TOP_SCOPE = 'OBSERVED_SELF_AND_DESCENDANT_RSS_NOT_PSS_OR_CONTAINER_OWNERSHIP'
+DEFAULT_BUDGET_MS = 500
+MAX_BUDGET_MS = 1000
 MAX_OUTPUT_BYTES = 8192
 MAX_TOTAL_READ_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024
@@ -86,7 +88,7 @@ def validate_sample(value):
                 if type(item) is not bool: return False
             elif not _integer(item): return False
         if not all(_integer(item) for key, item in limits.items() if key != 'budget_ms') or not _number(limits['budget_ms']): return False
-        if not 1 <= limits['max_processes'] <= 512 or not 1 <= limits['budget_ms'] <= 100: return False
+        if not 1 <= limits['max_processes'] <= 512 or not 1 <= limits['budget_ms'] <= MAX_BUDGET_MS: return False
         if limits['max_directory_entries'] != limits['max_processes'] * 4 + 128 or limits['max_file_bytes'] != MAX_FILE_BYTES or limits['max_total_read_bytes'] != MAX_TOTAL_READ_BYTES: return False
         page_size = limits['page_size_bytes']
         if not 512 <= page_size <= 1024 * 1024 or page_size & (page_size - 1): return False
@@ -103,7 +105,7 @@ def validate_sample(value):
         return False
 
 
-def _empty(max_processes=256, budget_ms=40, page_size=4096):
+def _empty(max_processes=256, budget_ms=DEFAULT_BUDGET_MS, page_size=4096):
     return {'version': VERSION, 'status': 'UNAVAILABLE', 'platform': 'LINUX_PROCFS', 'scope': TOP_SCOPE,
         'self': {'status': 'UNAVAILABLE', 'rss_bytes': None, 'process_count': 0, 'rss_source': None},
         'descendants': {'status': 'UNAVAILABLE', 'browser_named': {'rss_bytes': None, 'process_count': 0},
@@ -266,7 +268,7 @@ def _cgroup(context, proc_root, cgroup_root, anchor):
 
 
 def _sample(proc_root, cgroup_root, pid, max_processes, budget_ms, reader, clock, page_size_bytes):
-    if type(max_processes) is not int or not 1 <= max_processes <= 512 or type(budget_ms) not in (int, float) or not math.isfinite(budget_ms) or not 1 <= budget_ms <= 100:
+    if type(max_processes) is not int or not 1 <= max_processes <= 512 or type(budget_ms) not in (int, float) or not math.isfinite(budget_ms) or not 1 <= budget_ms <= MAX_BUDGET_MS:
         result = _empty(); result['errors']['INVALID_CONFIGURATION'] = 1; return result
     if reader is None and not sys.platform.startswith('linux'):
         result = _empty(max_processes, budget_ms); result['errors']['PROCFS_UNAVAILABLE'] = 1; return result
@@ -377,13 +379,20 @@ def _sample(proc_root, cgroup_root, pid, max_processes, budget_ms, reader, clock
 
 
 def sample_memory(*, proc_root='/proc', cgroup_root='/sys/fs/cgroup', pid=None, max_processes=256,
-                  budget_ms=40, reader=None, clock=None, page_size_bytes=None):
+                  budget_ms=DEFAULT_BUDGET_MS, reader=None, clock=None, page_size_bytes=None):
     """Return bounded aggregates or explicit unavailability; diagnostic failures fail open.
 
     ``reader``/``clock``/``pid``/``page_size_bytes`` support pure fixtures. This
     function performs no native operation, await, thread creation or DB work.
     Its protected diagnostic boundary catches internal BaseException failures;
     cancellation of an operation outside this sampler is unaffected.
+
+    The default cooperative wall budget is 500ms, allowing scheduling/read
+    delays during collection; the caller may request at most 1000ms. Self RSS
+    is identity-checked and cgroup values are read before descendant work.
+    Later scan exhaustion preserves those early observations. The budget is
+    checked between bounded operations: a single read can finish after it.
+    Wall time, not process CPU time, includes scheduling and I/O delays.
     """
     try:
         result = _sample(proc_root, cgroup_root, pid, max_processes, budget_ms, reader, clock, page_size_bytes)

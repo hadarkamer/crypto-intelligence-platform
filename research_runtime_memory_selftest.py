@@ -51,7 +51,135 @@ def sample(reader=None, **kwargs):
         pid=100, page_size_bytes=kwargs.pop('page_size_bytes', 4096), **kwargs)
 
 
+class DelayedReader(FakeReader):
+    """Advance only a fake wall clock, including time lost inside reads."""
+    def __init__(self, delay=.025):
+        base = fixture()
+        super().__init__(base.files, base.pids)
+        self.elapsed, self.delay, self.read_started = 0., delay, []
+
+    def read(self, path, limit):
+        self.read_started.append(self.elapsed)
+        self.elapsed += self.delay
+        return super().read(path, limit)
+
+    def now(self): return self.elapsed
+
+
 class SamplerTests(unittest.TestCase):
+    def test_default_budget_preserves_core_and_children_under_delayed_reads(self):
+        old = DelayedReader()
+        old_value = sample(old, clock=old.now, budget_ms=40)
+        self.assertEqual(old_value['status'], 'UNAVAILABLE')
+        self.assertEqual(old_value['coverage']['read_calls'], 2)
+        self.assertIn('TIME_BUDGET', old_value['errors'])
+        reader = DelayedReader()
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['limits']['budget_ms'], 500)
+        self.assertEqual(value['status'], 'COMPLETE')
+        self.assertEqual(value['self']['rss_bytes'], 123 * 1024)
+        self.assertEqual(value['cgroup']['current_bytes'], 1000000)
+        self.assertEqual(value['descendants']['browser_named']['rss_bytes'], 8 * 4096)
+        self.assertEqual(value['elapsed_ms'], 350.)
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_default_later_descendant_timeout_keeps_early_core(self):
+        reader = DelayedReader()
+        original = reader.iter_pids
+        def slow_enumeration(root):
+            for item in original(root):
+                reader.elapsed += .600
+                yield item
+        reader.iter_pids = slow_enumeration
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['status'], 'PARTIAL')
+        self.assertEqual(value['self']['rss_bytes'], 123 * 1024)
+        self.assertEqual(value['cgroup']['current_bytes'], 1000000)
+        self.assertTrue(value['coverage']['budget_exhausted'])
+        self.assertFalse(value['coverage']['scan_complete'])
+        self.assertEqual(len(reader.reads), 6)
+        self.assertEqual(value['descendants']['browser_named']['process_count'], 0)
+        self.assertIn('ANCESTOR_UNVERIFIED', value['errors'])
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_single_late_core_read_is_not_treated_as_hard_deadline(self):
+        reader = DelayedReader(delay=.600)
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['elapsed_ms'], 600.)
+        self.assertEqual(value['coverage']['read_calls'], 1)
+        self.assertEqual(value['status'], 'UNAVAILABLE')
+        self.assertIsNone(value['self']['rss_bytes'])
+        self.assertTrue(value['coverage']['budget_exhausted'])
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_late_child_read_cannot_trigger_unbounded_followup_reads(self):
+        reader = DelayedReader(delay=0.)
+        reader.files['/proc/101/stat'] = [stat(101, 100, 1010, 2, 'node'), lambda: late()]
+        def late():
+            reader.elapsed += .650
+            return stat(101, 100, 1010, 2, 'node')
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['status'], 'PARTIAL')
+        self.assertEqual(value['elapsed_ms'], 650.)
+        self.assertTrue(value['coverage']['budget_exhausted'])
+        self.assertEqual(reader.reads[-1][0], '/proc/101/stat')
+        self.assertTrue(all(start < .5 for start in reader.read_started))
+        self.assertEqual(value['self']['rss_bytes'], 123 * 1024)
+        self.assertEqual(value['cgroup']['current_bytes'], 1000000)
+        self.assertEqual(value['descendants']['other']['process_count'], 1)
+        self.assertEqual(value['descendants']['browser_named']['process_count'], 0)
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_delayed_core_identity_change_still_discards_self(self):
+        reader = DelayedReader()
+        reader.files['/proc/100/stat'] = [stat(100, 1, 1000, 11), stat(100, 1, 9999, 999)]
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['self']['status'], 'IDENTITY_CHANGED')
+        self.assertEqual(value['status'], 'UNAVAILABLE')
+        self.assertIsNone(value['self']['rss_bytes'])
+        self.assertIn('PID_REUSED', value['errors'])
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_maximum_cooperative_budget_is_accepted_without_expanding_other_caps(self):
+        reader = DelayedReader()
+        value = sample(reader, clock=reader.now, budget_ms=1000)
+        self.assertEqual(value['status'], 'COMPLETE')
+        self.assertEqual(value['limits'], {'max_processes': 256, 'max_directory_entries': 1152,
+            'max_file_bytes': 16384, 'max_total_read_bytes': 2097152, 'budget_ms': 1000, 'page_size_bytes': 4096})
+        self.assertTrue(memory.validate_sample(value))
+
+    def test_over_maximum_budget_is_rejected_before_any_read(self):
+        for budget in (1000.001, 1001, True, float('inf')):
+            reader = DelayedReader()
+            value = sample(reader, clock=reader.now, budget_ms=budget)
+            self.assertEqual(value['errors'], {'INVALID_CONFIGURATION': 1})
+            self.assertEqual(reader.reads, [])
+            self.assertTrue(memory.validate_sample(value))
+
+    def test_closed_schema_rejects_budget_beyond_ceiling(self):
+        value = sample()
+        for budget in (1000.001, True, float('inf')):
+            changed = deepcopy(value); changed['limits']['budget_ms'] = budget
+            self.assertFalse(memory.validate_sample(changed))
+        for budget in (40, 500, 1000):
+            changed = deepcopy(value); changed['limits']['budget_ms'] = budget
+            self.assertTrue(memory.validate_sample(changed))
+
+    def test_delayed_core_keeps_correct_nonroot_cgroup_on_scan_exhaustion(self):
+        reader = DelayedReader(delay=.060)
+        reader.files['/proc/100/cgroup'] = b'0::/service/current\n'
+        reader.files['/proc/100/mountinfo'] = b'1 2 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n'
+        reader.files['/sys/fs/cgroup/service/current/memory.current'] = b'123\n'
+        reader.files['/sys/fs/cgroup/service/current/memory.max'] = b'456\n'
+        value = sample(reader, clock=reader.now)
+        self.assertEqual(value['status'], 'PARTIAL')
+        self.assertEqual(value['self']['rss_bytes'], 123 * 1024)
+        self.assertEqual(value['cgroup']['current_bytes'], 123)
+        self.assertEqual(value['cgroup']['max_bytes'], 456)
+        self.assertTrue(value['coverage']['budget_exhausted'])
+        self.assertFalse(any(path == '/sys/fs/cgroup/memory.current' for path, _limit in reader.reads))
+        self.assertTrue(memory.validate_sample(value))
+
     def test_exact_kib_pages_descendants_and_cgroup_bytes(self):
         value = sample()
         self.assertEqual(value['status'], 'COMPLETE')

@@ -72,7 +72,7 @@ def named(node, value):
 
 class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
     def __init__(self):
-        self.functions, self.counts = [], {'import': 0, 'initial': 0, 'begin': 0, 'finish': 0, 'health': 0}
+        self.functions, self.counts = [], {'import': 0, 'initial': 0, 'begin': 0, 'finish': 0, 'cleanup_tail': 0, 'health': 0}
         self.stages = []
 
     def visit_FunctionDef(self, node):
@@ -113,6 +113,9 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
             if call.func.attr == 'stage':
                 assert len(call.args) == 2 and isinstance(call.args[1], ast.Constant) and type(call.args[1].value) is str and call.args[1].value in PHASES and not call.keywords, 'OBSERVER_STAGE_SHAPE'
                 self.stages.append(call.args[1].value)
+            elif call.func.attr == 'cleanup_tail':
+                assert self.functions == ['run_watch_cycle'] and len(call.args) == 1 and not call.keywords, 'OBSERVER_CLEANUP_TAIL_SHAPE'
+                self.counts['cleanup_tail'] += 1
             else:
                 assert call.func.attr == 'finish' and self.functions == ['run_watch_cycle'] and len(call.args) == 1 and len(call.keywords) == 1 and call.keywords[0].arg == 'cycle_status', 'OBSERVER_FINISH_SHAPE'
                 status = call.keywords[0].value
@@ -149,7 +152,7 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
     def test_complete_main_ast_erases_only_the_approved_passive_hooks(self):
         eraser = EraseOnlyApprovedRuntimeHooks()
         original = eraser.visit(deepcopy(self.tree))
-        self.assertEqual(eraser.counts, {'import': 1, 'initial': 1, 'begin': 1, 'finish': 1, 'health': 1})
+        self.assertEqual(eraser.counts, {'import': 1, 'initial': 1, 'begin': 1, 'finish': 1, 'cleanup_tail': 1, 'health': 1})
         self.assertCountEqual(eraser.stages, PHASES)
         self.assertEqual(len(eraser.stages), len(PHASES))
         self.assertEqual(pin(original), BASELINE_MAIN_AST)
@@ -167,6 +170,7 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
         target = main_try[0]
         self.assertTrue(isinstance(target.body[0], ast.Assign) and observer_call(target.body[0].value, 'begin'))
         self.assertTrue(isinstance(target.finalbody[0], ast.Expr) and observer_call(target.finalbody[0].value, 'finish'))
+        self.assertTrue(isinstance(target.finalbody[-1], ast.Expr) and observer_call(target.finalbody[-1].value, 'cleanup_tail'))
         following = target.finalbody[1]
         self.assertTrue(isinstance(following, ast.Expr) and isinstance(following.value, ast.Call) and isinstance(following.value.func, ast.Attribute) and named(following.value.func.value, 'research_alert_decision_watch') and following.value.func.attr == 'finish')
         initial = [node for node in body[:body.index(target)] if isinstance(node, ast.Assign) and any(named(name, HANDLE) for name in node.targets)]
@@ -194,6 +198,14 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
         node = ast.parse("research_watch_runtime.stage(runtime_observation_handle, native_side_effect())").body[0]
         with self.assertRaisesRegex(AssertionError, 'OBSERVER_STAGE_SHAPE'):
             eraser.visit(node)
+
+    def test_cleanup_tail_cannot_hide_native_work_or_keyword_arguments(self):
+        for text in ("research_watch_runtime.cleanup_tail(runtime_observation_handle, native_side_effect())",
+                     "research_watch_runtime.cleanup_tail(runtime_observation_handle, extra=native_side_effect())"):
+            eraser = EraseOnlyApprovedRuntimeHooks()
+            eraser.functions = ['run_watch_cycle']
+            with self.subTest(source=text), self.assertRaisesRegex(AssertionError, 'OBSERVER_CLEANUP_TAIL_SHAPE'):
+                eraser.visit(ast.parse(text).body[0])
 
     def test_eraser_rejects_observer_hooks_outside_watch_and_native_wrapping(self):
         eraser = EraseOnlyApprovedRuntimeHooks()
