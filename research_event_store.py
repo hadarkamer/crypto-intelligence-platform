@@ -162,6 +162,7 @@ class AsyncResearchEventWriter:
         self.metrics = WriterMetrics()
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
+        self.on_persisted = None
 
     @property
     def enabled(self) -> bool:
@@ -247,8 +248,17 @@ class AsyncResearchEventWriter:
                     await asyncio.to_thread(self._write_batch, batch)
                     self.metrics.inserted_or_deduped += len(batch)
                     self.metrics.batches += 1
-                    for _ in batch:
+                    for _ in range(len(batch)):
                         self.queue.task_done()
+                    # _write_batch has exited the connection context (commit).
+                    # Cleanup failure must never retry a successful DB write.
+                    if self.on_persisted is not None:
+                        try:
+                            self.on_persisted(batch)
+                        except Exception as exc:
+                            print(f"[research-store] memory release failed: {exc!r}", flush=True)
+                    batch.clear()
+                    del first
                     break
                 except Exception as exc:
                     attempt += 1

@@ -329,14 +329,15 @@ def _reference_for_window(rows, now, minutes, symbol=None):
     the requested time.
     """
     target = now - timedelta(minutes=minutes)
-    candidates = []
-
-    for row in rows:
-        if str(row.get("data_quality_status") or "PASS").upper() == "INVALID":
-            continue
-        candidate = dict(row)
-        candidate.setdefault("source", "live_snapshot")
-        candidates.append(candidate)
+    # Keep original rows until the winner is known; only the returned row
+    # needs a copy. min() preserves the first row when distances tie.
+    ref = min(
+        (row for row in rows
+         if str(row.get("data_quality_status") or "PASS").upper() != "INVALID"),
+        key=lambda row: abs((_as_utc(row["collected_at"]) - target).total_seconds()),
+        default=None,
+    )
+    live_reference = True
 
     if symbol:
         historical = history_reference.historical_point_nearest(symbol, target)
@@ -344,22 +345,24 @@ def _reference_for_window(rows, now, minutes, symbol=None):
         # provide only the previous at-or-before bridge.
         if not historical:
             historical = history_reference.historical_point_at_or_before(symbol, target)
-        if historical:
-            candidates.append(dict(historical))
+        if historical and (ref is None or
+                abs((_as_utc(historical["collected_at"]) - target).total_seconds()) <
+                abs((_as_utc(ref["collected_at"]) - target).total_seconds())):
+            ref = historical
+            live_reference = False
 
-    if not candidates:
+    if ref is None:
         return None
 
-    ref = min(
-        candidates,
-        key=lambda row: abs((_as_utc(row["collected_at"]) - target).total_seconds()),
-    )
     ref_time = _as_utc(ref["collected_at"])
     signed_offset_seconds = (ref_time - target).total_seconds()
     absolute_offset_seconds = abs(signed_offset_seconds)
     if absolute_offset_seconds > REFERENCE_TOLERANCE_MINUTES * 60:
         return None
 
+    ref = dict(ref)
+    if live_reference:
+        ref.setdefault("source", "live_snapshot")
     ref["reference_offset_seconds"] = absolute_offset_seconds
     ref["reference_signed_offset_seconds"] = signed_offset_seconds
     ref["reference_target_time"] = target.isoformat()
