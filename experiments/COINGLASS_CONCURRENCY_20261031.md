@@ -1,6 +1,8 @@
 # Isolated CoinGlass concurrency experiment
 
-Status: prepared; no live source or AI calls have been performed by this experiment.
+Status: live attempt completed on 2026-10-31; stopped after the first failed
+serial batch, before any parallel work. Two source scans and one successful AI
+analysis were performed. The approved 12-scan cap was not exhausted.
 
 User-approved scope: BTC Model 3, 12H and 24H; sequential versus simultaneous
 execution, three repetitions, at most 12 fresh maps and 12 existing-model AI
@@ -70,12 +72,31 @@ Synthetic timings and resource values are never capacity measurements.
 The local executor virtualizes PIDs independently of `/proc`; production runs
 fail closed unless `/proc/self/stat` agrees with `os.getpid()`.
 
-## Access blocker
+## Live result and access closure
 
-The installed Render connector lacks one-off job creation. Render CLI v2.34.0
-was installed locally, and browser login succeeded. Automatic approval review
-rejected the `Authorize CLI` click because it would create a token with access
-to Render resources, valid up to seven days, without explicit authorization for
-that access grant. No token was authorized and no live job was started.
-Obtain explicit approval for that grant before retrying; revoke it when the
-experiment is finished. Do not work around the rejection.
+The user explicitly authorized temporary Render CLI access after the approval
+review block. One-off job `job-dbj0sn0ae00c73ctlvfg` ran on `plan-srv-010` from
+15:50:52 to 15:53:13 UTC. The harness verified a 2-CPU quota and 4 GiB memory.
+
+- Model 3 / 12H succeeded in 54.121 seconds, with 43 complete source rows and
+  4 normalized zones; AI analysis took 3.893 seconds (7,741 tokens).
+- Model 3 / 24H failed in 51.412 seconds at `overlay_dismissal`, with
+  `source_capture_failed` / `hover_cookie_overlay`, before screenshot, hover
+  collection or AI analysis. The current diagnostic does not distinguish the
+  exact cookie-button/banner state, so no reader change was made by this test.
+- No parallel jobs ran. No concurrency speedup, p95 or eight-coin capacity can
+  be inferred. Do not automatically retry or relax the source validation.
+- Cgroup CPU use averaged 85.94% and 96.02% of the two available cores over
+  the respective complete batches. Throttling occurred in 410/523 and 476/518
+  CPU periods. Peak kernel-accounted memory for the whole experiment was
+  1,023,275,008 bytes (0.953 GiB). These are not per-process RSS measurements.
+- Cleanup reported zero tracked surviving processes. Render confirmed the job
+  ended. Production plan, instance count and deployed SHA were unchanged.
+- The CLI token was revoked immediately after the attempt; the account page
+  showed `No provisioned CLI tokens.`
+
+Evidence reconstructed from four private log chunks: 116,939 bytes, SHA-256
+`3db3d4e4ef969e0a73f9f6db30ad1d0ba6758096bced696b7324ffafee3874d4`.
+The raw evidence is kept privately with the experiment report, not committed
+to this repository. The harness and production reader were not changed after
+the failure.
