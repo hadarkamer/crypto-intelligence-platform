@@ -110,6 +110,31 @@ class ExperimentTests(unittest.TestCase):
             stages = [x["name"] for x in measurement["events"] if x["kind"] == "stage"]
             self.assertEqual(stages, ["startup", "capture", "analysis"])
 
+    def test_cookie_failure_observation_preserves_original_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);runtime=root/'runtime';runtime.mkdir();output=root/'output'
+            (runtime/'model1_execution.py').write_text(
+                'import contextlib\n_analysis_facts={}\ndef stage(value):pass\n'
+                '@contextlib.contextmanager\ndef capture_operation(name):yield\n'
+                'def remember_analysis(raw):pass\n')
+            (runtime/'heatmap_hover.py').write_text(
+                'class HoverError(RuntimeError):pass\n'
+                'def dismiss_cookie_banner(page):\n    raise HoverError("hover_cookie_overlay")\n')
+            (runtime/'coinglass_cookie_probe_20261031.py').write_text(
+                'def consent_state(page):return {"scoped_decline_visible":True}\n')
+            (runtime/'collection_model1_task.py').write_text(
+                'from heatmap_hover import dismiss_cookie_banner,HoverError\n'
+                'class Page:\n    def screenshot(self,**kwargs):return b"synthetic-image"\n'
+                'try:dismiss_cookie_banner(Page())\nexcept HoverError:raise SystemExit(9)\n')
+            run=subprocess.run([sys.executable,str(HERE/'coinglass_concurrency_20261031.py'),
+                '--child','--runtime',str(runtime),'--output',str(output),'--timeframe','24H','--job-id','synthetic'],
+                env=experiment.safe_environment(os.environ),capture_output=True,timeout=10)
+            self.assertEqual(run.returncode,9)
+            record=json.loads((output/'measurement.json').read_text())['cookie_failure_observation']
+            self.assertEqual(record['function'],'dismiss_cookie_banner')
+            self.assertTrue(record['state']['scoped_decline_visible'])
+            self.assertEqual(record['image_sha256'],hashlib.sha256(b'synthetic-image').hexdigest())
+
     def test_complete_twelve_job_protocol_with_synthetic_capture_and_analysis(self):
         import base64, gzip
         with tempfile.TemporaryDirectory() as d:

@@ -203,17 +203,43 @@ def run_child(runtime, output, timeframe, job_id):
     began_at = stamp()
     sys.argv = [str(runtime / "collection_model1_task.py"), timeframe, job_id, str(output)]
     exit_code = 1
+    cookie_failure = {}
+    prior_trace = sys.gettrace()
+
+    def cookie_trace(frame, event, arg):
+        # Observe only a source failure; successful calls gain no UI actions.
+        if (frame.f_code.co_filename != str(runtime / 'heatmap_hover.py') or
+                frame.f_code.co_name not in ('dismiss_cookie_banner', 'require_cookie_banner_hidden')):
+            return None
+        if event == 'exception' and arg[0].__name__ == 'HoverError' and not cookie_failure:
+            cookie_failure.update(function=frame.f_code.co_name, line=frame.f_lineno,
+                                  observed_at=stamp(), exception_class=arg[0].__name__)
+            try:
+                from coinglass_cookie_probe_20261031 import consent_state
+                page = frame.f_locals['page']
+                cookie_failure['state'] = consent_state(page)
+                image = page.screenshot(type='jpeg', quality=65, full_page=False, timeout=6000)
+                if len(image) <= 1500000:
+                    cookie_failure['image_sha256'] = hashlib.sha256(image).hexdigest()
+                    cookie_failure['image_base64'] = base64.b64encode(image).decode()
+            except Exception as exc:
+                cookie_failure['observation_error_class'] = type(exc).__name__
+        return cookie_trace
+
+    sys.settrace(cookie_trace)
     try:
         runpy.run_path(sys.argv[0], run_name="__main__")
         exit_code = 0
     except SystemExit as exc:
         exit_code = exc.code if isinstance(exc.code, int) else 1
     finally:
+        sys.settrace(prior_trace)
         stage("experiment_finished")
         own, children = resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
         measurement = {"started_at": began_at, "finished_at": stamp(),
                        "elapsed_seconds": time.monotonic() - epoch, "exit_code": exit_code,
                        "events": events, "analysis_facts": facts,
+                       "cookie_failure_observation": cookie_failure,
                        "reaped_process_cpu_seconds": own.ru_utime + own.ru_stime + children.ru_utime + children.ru_stime,
                        "forbidden_modules_loaded": sorted(set(sys.modules) & {"collection_bridge", "psycopg", "psycopg2"})}
         (output / "measurement.json").write_text(json.dumps(measurement, allow_nan=False))
