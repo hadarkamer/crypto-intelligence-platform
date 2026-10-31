@@ -274,6 +274,33 @@ class CacheInputTests(unittest.TestCase):
 
 
 class ProducerInputTests(unittest.TestCase):
+    def test_reference_ties_invalid_rows_fallback_and_input_ownership(self):
+        now = datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+        target = now - timedelta(minutes=30)
+        rows = [
+            {"collected_at": target, "price": 99, "data_quality_status": "INVALID"},
+            {"collected_at": target-timedelta(minutes=1), "price": 10},
+            {"collected_at": target+timedelta(minutes=1), "price": 20},
+        ]
+        saved = [dict(row) for row in rows]
+        historical = {"collected_at": target+timedelta(minutes=1), "price": 30}
+        with patch.object(history, "historical_point_nearest", return_value=historical):
+            result = regime._reference_for_window(rows, now, 30, "ETH")
+        self.assertEqual(result["price"], 10)
+        self.assertEqual(result["source"], "live_snapshot")
+        self.assertEqual(result["reference_signed_offset_seconds"], -60)
+        self.assertEqual(rows, saved)
+        historical["collected_at"] = target
+        with patch.object(history, "historical_point_nearest", return_value=None), \
+             patch.object(history, "historical_point_at_or_before", return_value=historical):
+            result = regime._reference_for_window(rows, now, 30, "ETH")
+        self.assertEqual(result["price"], 30)
+        self.assertNotIn("source", result)
+        self.assertNotIn("reference_offset_seconds", historical)
+        self.assertIsNone(regime._reference_for_window(rows[:1], now, 30))
+        self.assertIsNone(regime._reference_for_window(
+            [{"collected_at": target-timedelta(days=30)}], now, 30))
+
     def test_flow_sql_output_and_record_are_equal(self):
         test_root = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory(dir=test_root) as directory:

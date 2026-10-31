@@ -243,6 +243,20 @@ def run() -> None:
     assert sink.emit(near_miss) is True
     assert len(sink.events()) == 6
 
+    # Committed bodies leave RAM, while the same bounded dedupe window remains.
+    compact = DryRunResearchCapture(max_events=2)
+    compact.emit(event0)
+    compact.emit(event1)
+    compact.release_persisted([event0.event_fingerprint, "unknown"])
+    assert compact.status()["events"] == 2
+    assert compact.status()["retained_event_bodies"] == 1
+    assert compact.events() == [event1.to_dict()]
+    assert compact.emit(event0_replay) is False
+    compact.emit(magnet_event)
+    assert compact.emit(event0_replay) is True, "oldest ID expires at original capacity"
+    compact.clear()
+    assert compact.status()["events"] == 0
+
     try:
         build_signal_state_change(
             symbol="BTC", signal_name="OI_PRICE", old_state="LONG", new_state="LONG", event_time=t0

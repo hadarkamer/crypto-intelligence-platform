@@ -1,7 +1,7 @@
 """Map live Watch/alert shapes into Research Events through a fail-open sidecar.
 
-Every event is retained in a bounded in-memory tracker. Explicit production
-delivery hooks may additionally enqueue it to the asynchronous Research writer;
+Every event is tracked in bounded memory; full bodies are released after the
+Research writer commits them. Explicit production delivery hooks enqueue them;
 shadow replay and self-tests keep persistence disabled. The mapper never alters
 strategy, Watch or scoring state, and capture failure must not block Telegram.
 
@@ -37,6 +37,9 @@ DERIVATIVES_HIGH_THRESHOLD = 65.0
 DERIVATIVES_HIGH_RESET_THRESHOLD = 60.0
 
 SINK = research_event_capture.DryRunResearchCapture(max_events=4000)
+research_event_store.WRITER.on_persisted = lambda rows: SINK.release_persisted(
+    row["event_fingerprint"] for row in rows
+)
 
 _CONFIRMATION_STATE: Dict[str, str] = {}
 _SCORE_CONFIRMATION_STATE: Dict[str, bool] = {}

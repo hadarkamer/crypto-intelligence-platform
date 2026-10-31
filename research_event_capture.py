@@ -13,14 +13,14 @@ Design rules:
 """
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 SCHEMA_VERSION = "research-event-v1"
 MAX_ENGINE_SNAPSHOT_BYTES = 32_000
@@ -725,38 +725,43 @@ def validate_event(event: ResearchEvent) -> None:
 
 
 class DryRunResearchCapture:
-    """Bounded memory-only sink used before production persistence exists."""
+    """Bounded tracker; committed bodies can be released without losing dedupe."""
 
     def __init__(self, max_events: int = DEFAULT_DRY_RUN_EVENTS):
         size = int(max_events)
         if size < 1 or size > 10_000:
             raise ValueError("max_events must be between 1 and 10000")
-        self._events: Deque[ResearchEvent] = deque(maxlen=size)
-        self._fingerprints: set[str] = set()
+        self._capacity = size
+        self._events: OrderedDict[str, Optional[ResearchEvent]] = OrderedDict()
 
     def emit(self, event: ResearchEvent) -> bool:
         validate_event(event)
-        if event.event_fingerprint in self._fingerprints:
+        if event.event_fingerprint in self._events:
             return False
-        if len(self._events) == self._events.maxlen and self._events:
-            dropped = self._events[0]
-            self._fingerprints.discard(dropped.event_fingerprint)
-        self._events.append(event)
-        self._fingerprints.add(event.event_fingerprint)
+        if len(self._events) == self._capacity:
+            self._events.popitem(last=False)
+        self._events[event.event_fingerprint] = event
         return True
 
+    def release_persisted(self, fingerprints: Iterable[str]) -> None:
+        """Drop bodies only after commit; preserve insertion order and identity."""
+        for fingerprint in fingerprints:
+            if fingerprint in self._events:
+                self._events[fingerprint] = None
+
     def events(self) -> List[Dict[str, Any]]:
-        return [event.to_dict() for event in self._events]
+        """Return retained bodies; committed history is read from PostgreSQL."""
+        return [event.to_dict() for event in self._events.values() if event is not None]
 
     def clear(self) -> None:
         self._events.clear()
-        self._fingerprints.clear()
 
     def status(self) -> Dict[str, Any]:
         return {
             "mode": "DRY_RUN_MEMORY_ONLY",
             "schema_version": SCHEMA_VERSION,
             "events": len(self._events),
-            "capacity": self._events.maxlen,
+            "capacity": self._capacity,
+            "retained_event_bodies": sum(event is not None for event in self._events.values()),
             "database_writes": False,
         }
