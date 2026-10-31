@@ -67,6 +67,8 @@ import research_watch_score_capture
 import research_consumed_inputs
 import research_watch_decision_capture
 import research_alert_decision_watch
+import research_watch_runtime
+import research_background_memory
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -4002,9 +4004,11 @@ async def run_watch_cycle(
     alert_decision_handle = research_alert_decision_watch.begin(
         watch_scan_id, general_enabled=general_enabled, top8_only=top8_only,
     )
+    runtime_observation_handle = None
     derivatives_task = None
 
     try:
+        runtime_observation_handle = research_watch_runtime.begin(watch_scan_id)
         scrape_lock = _get_scrape_lock()
         async def _collect_dom():
             async with scrape_lock:
@@ -4033,6 +4037,7 @@ async def run_watch_cycle(
                         )
                         with research_consumed_inputs.safe_collect() as consumed_inputs:
                             snapshot = await asyncio.to_thread(market_confidence_engine.capture_snapshot, snapshot_symbols)
+                        research_watch_runtime.stage(runtime_observation_handle, 'DERIVATIVES_READY')
                         formula_timing["cvd_observations_by_symbol"] = {
                             symbol: value.get("timing_observation", {}) for symbol, value in snapshot.items()
                         }
@@ -4063,6 +4068,7 @@ async def run_watch_cycle(
                             "status": "FAILED", "reason": type(exc).__name__,
                             "cycle_id": watch_scan_id,
                         }
+                    research_watch_runtime.stage(runtime_observation_handle, 'SCORING_READY')
                     # Pure Combined evaluation uses exactly the original Watch
                     # input population. Delivery/lifecycle state is still read
                     # and mutated only at its original point below.
@@ -4113,6 +4119,7 @@ async def run_watch_cycle(
         derivatives_status = await derivatives_task
         rows, live_result = dom_result
         formula_timing["watch_inputs_ready_at_utc"] = live_result.get("watch_inputs_ready_at_utc")
+        research_watch_runtime.stage(runtime_observation_handle, 'INPUTS_READY')
 
         derivatives_snapshot = live_result.pop("watch_derivatives_snapshot")
         all_items = live_result.pop("watch_prepared_items")
@@ -4122,6 +4129,7 @@ async def run_watch_cycle(
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
         research_alert_decision_watch.bind_score(dual_cvd_bundle)
+        research_watch_runtime.stage(runtime_observation_handle, 'BEFORE_DELIVERY')
         # SOL consumes all frozen targets, before any presentation threshold.
         # This adds no DOM/derivatives collector and has an isolated outbox.
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
@@ -4465,6 +4473,7 @@ async def run_watch_cycle(
             pass
         return {"ok": False, "reason": repr(exc)}
     finally:
+        research_watch_runtime.finish(runtime_observation_handle, cycle_status=WATCH_RUNTIME.get('last_cycle_status'))
         research_alert_decision_watch.finish(
             alert_decision_handle, cycle_status=WATCH_RUNTIME.get("last_cycle_status"),
         )
@@ -4476,6 +4485,7 @@ async def run_watch_cycle(
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["cycle_stage"] = None
+        research_watch_runtime.cleanup_tail(runtime_observation_handle)
 
 
 
@@ -5837,6 +5847,7 @@ async def health(request):
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
         "alert_decision_capture": research_alert_decision_watch.status(),
+        "runtime_observability": research_watch_runtime.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
@@ -6920,6 +6931,7 @@ async def main():
             "Example: https://crypto-intelligence-platform-1.onrender.com"
         )
 
+    research_background_memory.install(globals())
     init_db()
 
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK
