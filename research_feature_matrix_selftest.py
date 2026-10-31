@@ -400,11 +400,7 @@ def run() -> None:
         sampler_versions=(legacy_v3,),
         as_of_created_utc=slot_time + timedelta(seconds=2),
     )
-    assert [len(values) for values in frozen_loaded[:4]] == [1, 1, 1, 1]
-    assert frozen_loaded[4] == {
-        slot_row["long_event_id"]: slot_row["frozen_inputs"]["max_pain"],
-        slot_row["short_event_id"]: slot_row["frozen_inputs"]["max_pain"],
-    }
+    assert [len(values) for values in frozen_loaded] == [1, 1, 1, 1]
     assert frozen_loaded[0][0]["price_instrument_id"] is None
     assert frozen_loaded[0][0]["prospective_sampler_version"] == legacy_v3
     try:
@@ -778,9 +774,7 @@ def run() -> None:
             assert streamed[index] == (
                 frozen_loaded[index] + v4_prior[index] + hype_loaded[index]
             )
-        assert streamed[4] == {
-            **frozen_loaded[4], **v4_prior[4], **hype_loaded[4]
-        }
+        assert len(streamed) == 4
         assert connection.fetch_sizes == [2, 2, 2, 2, 2]
         assert connection.closed
         assert len(connection.cursor_names) == 1

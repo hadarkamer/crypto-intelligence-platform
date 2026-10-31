@@ -886,7 +886,6 @@ class ProspectiveAnchorStore:
                 oi_rows,
                 futures_rows,
                 spot_rows,
-                _prior_max_pain,
             ) = research_feature_matrix._load_prospective_frozen_rows(
                 conn,
                 symbols=symbols,

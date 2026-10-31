@@ -2098,7 +2098,6 @@ def _load_prospective_frozen_rows(
     list[Dict[str, Any]],
     list[Dict[str, Any]],
     list[Dict[str, Any]],
-    Dict[int, Dict[str, Any]],
 ]:
     """Rebuild base source series only from immutable prospective slot inputs.
 
@@ -2144,7 +2143,7 @@ def _load_prospective_frozen_rows(
             + ", ".join(unsupported_versions)
         )
     if not normalized_symbols or not accepted_versions:
-        return ([], [], [], [], {})
+        return ([], [], [], [])
     created_cutoff = (
         _as_utc(as_of_created_utc)
         if as_of_created_utc not in (None, "")
@@ -2171,7 +2170,7 @@ def _load_prospective_frozen_rows(
                source_provenance, frozen_inputs,
                feature_bundle_policy_version, feature_bundle_sha256,
                decision_feature_bundle,
-               long_event_id, short_event_id, created_at_utc
+               created_at_utc
         FROM research_prospective_anchor_slots
         WHERE sampler_version=ANY(%s)
           AND symbol=ANY(%s)
@@ -2189,7 +2188,6 @@ def _load_prospective_frozen_rows(
     oi_rows: list[Dict[str, Any]] = []
     futures_rows: list[Dict[str, Any]] = []
     spot_rows: list[Dict[str, Any]] = []
-    max_pain_by_event_id: Dict[int, Dict[str, Any]] = {}
     for source in rows:
         row = dict(source)
         frozen = _mapping_value(row.get("frozen_inputs"))
@@ -2341,16 +2339,11 @@ def _load_prospective_frozen_rows(
         oi_rows.append(oi_row)
         futures_rows.append(futures_row)
         spot_rows.append(spot_row)
-        for event_column in ("long_event_id", "short_event_id"):
-            event_id = row.get(event_column)
-            if event_id is not None:
-                max_pain_by_event_id[int(event_id)] = dict(max_pain)
     return (
         price_rows,
         oi_rows,
         futures_rows,
         spot_rows,
-        max_pain_by_event_id,
     )
 
 
