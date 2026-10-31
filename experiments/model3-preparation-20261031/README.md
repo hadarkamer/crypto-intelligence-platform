@@ -1,6 +1,6 @@
 # Model 3 preparation and candle-tooltip diagnosis
 
-Prepared 2026-10-31. **Offline checks passed; the live Render experiment has not run.**
+Prepared 2026-10-31. **Corrected live experiment succeeded; temporary CLI authorization revoked.**
 This is a finite diagnostic, not a product fix or deployment.
 
 ## Reviewed versions
@@ -88,3 +88,27 @@ first-child evidence and stop if cleanup itself raises. Twelve offline tests now
 include a real owned-process cleanup and full parent output with/without a
 cleanup exception. One corrected manual diagnostic run follows; no scheduled
 retry is installed and no product file is changed.
+
+## Completed live result
+
+Corrected job `job-dbj2bd7b9u1s73cs1f0g` succeeded, 17:30:53–17:32:41 UTC.
+Both Model3/12H and Model2/12H source captures passed, zero surviving children,
+zero cleanup errors, zero AI calls and database writes.
+
+Model 3 CPU across the original/limited/restored three-second windows was
+98.4% / 53.2% / approximately 100% of two CPUs, with render calls 6 / 1 / 6.
+Same label and geometry. This supports a painting contribution, not the safety
+or latency of a full earlier-gate implementation.
+
+Three Model 3 latest-candle positions returned liquidity Price and Liquidation
+Leverage, not OHLC. Model 2 returned a timestamp-matched OHLC candle and the
+existing reader accepted Close 77549.4. Absence at these three positions is
+not proof that no other source control exposes OHLC.
+
+Timeframe selection was 12.88s vs 2.19s; legend preparation 3.83s vs 0.15s;
+row hover 3.25s vs 3.78s (Model3 vs Model2). Total diagnostic durations include
+extra measurement work, so are not production scan latency estimates.
+
+Three source attempts total across the failed harness attempt and one corrected
+run. No scheduled retry or production change. The temporary CLI token was
+revoked and a subsequent whoami was rejected. PR120 remains draft/unmerged.
