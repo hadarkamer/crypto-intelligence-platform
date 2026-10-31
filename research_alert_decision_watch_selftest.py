@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import research_alert_decision_watch as bridge
+from research_watch_runtime_integration_selftest import EraseOnlyApprovedRuntimeHooks
 import research_alert_decision_capture as capture
 import research_alert_decision_store as store
 
@@ -102,7 +103,8 @@ class WatchBridgeTests(unittest.TestCase):
                     assert isinstance(node.args[0],ast.Lambda)
                     return node.args[0].body
                 return self.generic_visit(node)
-        original=EraseDiagnostics().visit(deepcopy(found['run_watch_cycle']))
+        runtime_erased=EraseOnlyApprovedRuntimeHooks().visit(deepcopy(found['run_watch_cycle']))
+        original=EraseDiagnostics().visit(runtime_erased)
         self.assertEqual(hashlib.sha256(ast.dump(original,include_attributes=False).encode()).hexdigest(),WATCH_PIN)
 
     def test_special_projection_and_observation_match_native_repeated_calls(self):
