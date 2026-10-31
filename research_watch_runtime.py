@@ -20,8 +20,9 @@ import time
 
 import research_runtime_journal as journal
 import research_runtime_memory as memory
+import research_runtime_memory_observations as followups
 
-VERSION = 'watch-runtime-observer-v1'
+VERSION = 'watch-runtime-observer-v2'
 INTERVAL_SECONDS = 30.
 MAX_ACTIVE_CYCLES = 2
 MAX_SAMPLES_PER_CYCLE = 24
@@ -34,9 +35,15 @@ _STOP = Event()
 _MONITOR = None
 _ACTIVE = {}
 _LAST_SAMPLE = None
+_TAIL_PLAN = None
+_LAST_TAIL_SAMPLE = None
+_ACTIVITY_REVISION = 0
+TAIL_DELAYS = {2: 30, 3: 120, 4: 300, 5: 600}
 _METRICS = dict(begun=0, finished=0, markers=0, probe_attempts=0, probe_event_calls=0,
     probe_errors=0, late_probe_drops=0, capacity_drops=0, duplicate_begins=0,
-    observer_errors=0, context_reset_errors=0, monitor_start_errors=0, last_error_type=None)
+    observer_errors=0, context_reset_errors=0, monitor_start_errors=0, last_error_type=None,
+    cleanup_tail_calls=0, cleanup_tail_markers=0, tail_plans=0, tail_preemptions=0,
+    tail_plan_refusals=0, tail_probe_attempts=0, tail_probe_event_calls=0, tail_probe_errors=0)
 
 
 @dataclass
@@ -51,6 +58,16 @@ class _Handle:
     closed: bool = False
     token: object = None
     previous: object = None
+    activity_revision: int = 0
+    cleanup_tail_seen: bool = False
+
+
+@dataclass
+class _TailPlan:
+    identity: dict
+    anchor: float
+    activity_revision: int
+    next_index: int = 2
 
 
 def _utc():
@@ -75,7 +92,7 @@ def _code_pins():
     result = {}
     try:
         root = Path(__file__).resolve().parent
-        for name in ('main.py', 'research_watch_runtime.py', 'research_runtime_journal.py', 'research_runtime_memory.py'):
+        for name in ('main.py', 'research_watch_runtime.py', 'research_runtime_journal.py', 'research_runtime_memory.py', 'research_runtime_memory_observations.py'):
             with (root / name).open('rb') as stream:
                 raw = stream.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024: raise ValueError('SOURCE_BYTE_BOUND')
@@ -137,12 +154,19 @@ def _ensure_monitor_locked():
 
 def begin(cycle_id):
     """Enqueue START first; marker and proc sampling never await durability."""
+    global _ACTIVITY_REVISION, _TAIL_PLAN
     handle = None
     journal_handle = None
     try:
-        if type(cycle_id) is not str or not cycle_id or len(cycle_id.encode('utf-8')) > 160:
-            raise ValueError('INVALID_DIAGNOSTIC_CYCLE')
         with _CONDITION:
+            # Even a refused diagnostic begin invalidates a prior no-Watch
+            # observation. Native work may continue without a recorder handle.
+            _ACTIVITY_REVISION += 1
+            if _TAIL_PLAN is not None:
+                _TAIL_PLAN = None
+                _METRICS['tail_preemptions'] += 1
+            if type(cycle_id) is not str or not cycle_id or len(cycle_id.encode('utf-8')) > 160:
+                raise ValueError('INVALID_DIAGNOSTIC_CYCLE')
             if len(_ACTIVE) >= MAX_ACTIVE_CYCLES:
                 _METRICS['capacity_drops'] += 1
                 return None
@@ -153,6 +177,7 @@ def begin(cycle_id):
             if journal_handle is None:
                 raise ValueError('JOURNAL_HANDLE_UNAVAILABLE')
             handle = _Handle(journal_handle=journal_handle, cycle_id=cycle_id)
+            handle.activity_revision = _ACTIVITY_REVISION
             handle.previous = _CURRENT.get()
             handle.token = _CURRENT.set(handle)
             _ACTIVE[id(handle)] = handle
@@ -259,12 +284,18 @@ def _monitor_loop():
                 if _STOP.is_set(): return
                 now = _now()
                 observation = _take_due_locked(now)
-                if observation is None:
+                tail_observation = _take_tail_due_locked(now) if observation is None else None
+                if observation is None and tail_observation is None:
                     due = [max(0.01, h.next_due - now) for h in _ACTIVE.values()
                            if not h.closed and h.probes < MAX_SAMPLES_PER_CYCLE]
+                    if _TAIL_PLAN is not None:
+                        due.append(max(0.01, _TAIL_PLAN.anchor + TAIL_DELAYS[_TAIL_PLAN.next_index] - now))
                     _CONDITION.wait(timeout=min([INTERVAL_SECONDS, *due]))
                     continue
-            _probe(observation)
+            if observation is not None:
+                _probe(observation)
+            else:
+                _probe_tail(tail_observation)
         except BaseException as error:
             with _CONDITION: _error(error)
             _STOP.wait(1.)
@@ -291,6 +322,93 @@ def finish(handle, *, cycle_status=None):
         _safe_reset(handle)
 
 
+def cleanup_tail(handle):
+    """Marker after the existing cleanup statements; never a return/idle proof."""
+    global _TAIL_PLAN
+    try:
+        if not isinstance(handle, _Handle): return None
+        with _CONDITION:
+            _METRICS['cleanup_tail_calls'] += 1
+            if not handle.closed or handle.cleanup_tail_seen: return None
+            handle.cleanup_tail_seen = True
+            original = handle.journal_handle
+            identity = dict(process_session_id=original.process_session_id,
+                origin_cycle_id=handle.cycle_id, cleanup_tail_at_utc=_utc(),
+                runtime_git_commit=original._runtime_commit, source_code_sha256=dict(_code_pins()))
+            anchor = _now()
+            if not _ACTIVE and handle.activity_revision == _ACTIVITY_REVISION:
+                _TAIL_PLAN = _TailPlan(identity, anchor, _ACTIVITY_REVISION)
+                _METRICS['tail_plans'] += 1
+                _ensure_monitor_locked()
+                _CONDITION.notify_all()
+            else:
+                _METRICS['tail_plan_refusals'] += 1
+            try:
+                receipt = followups.record_marker(**identity)
+                _METRICS['cleanup_tail_markers'] += 1
+                return receipt
+            except BaseException as error:
+                _error(error)
+                return None
+    except BaseException as error:
+        try:
+            with _CONDITION: _error(error)
+        except BaseException: pass
+        return None
+
+
+def _take_tail_due_locked(now):
+    global _TAIL_PLAN
+    plan = _TAIL_PLAN
+    if plan is None: return None
+    if _ACTIVE or plan.activity_revision != _ACTIVITY_REVISION:
+        _TAIL_PLAN = None
+        _METRICS['tail_preemptions'] += 1
+        return None
+    if now < plan.anchor + TAIL_DELAYS[plan.next_index]: return None
+    index = plan.next_index
+    plan.next_index += 1
+    if plan.next_index > 5: _TAIL_PLAN = None
+    _METRICS['tail_probe_attempts'] += 1
+    return plan, index, len(_ACTIVE), _ACTIVITY_REVISION
+
+
+def _probe_tail(observation):
+    global _LAST_TAIL_SAMPLE
+    plan, index, before, revision_before = observation
+    sample = None
+    probe_began = _now()
+    if probe_began < plan.anchor: raise ValueError('INVALID_MONOTONIC_DELAY')
+    started = _utc()
+    try:
+        candidate = memory.sample_memory()
+        if not memory.validate_sample(candidate): raise ValueError('INVALID_MEMORY_SAMPLE')
+        sample = candidate
+    except BaseException as error:
+        with _CONDITION: _error(error, 'tail_probe_errors')
+        sample = memory._empty()
+        sample['errors']['SAMPLER_ERROR'] = 1
+    completed = _utc()
+    try:
+        with _CONDITION:
+            # A new begin may already have finished again. The generation
+            # witnesses that overlap even when both endpoint counts are zero.
+            details = dict(observation_index=index,
+                scheduled_delay_seconds=TAIL_DELAYS[index],
+                observed_delay_ms=(probe_began - plan.anchor) * 1000.,
+                sample_started_at_utc=started, sample_completed_at_utc=completed,
+                watch_active_before=before, watch_active_after=len(_ACTIVE),
+                watch_activity_revision_before=revision_before,
+                watch_activity_revision_after=_ACTIVITY_REVISION, memory=sample)
+            receipt = followups.record_sample(**plan.identity, **details)
+            _METRICS['tail_probe_event_calls'] += 1
+            _LAST_TAIL_SAMPLE = dict(origin_cycle_id=plan.identity['origin_cycle_id'], **details)
+            return receipt
+    except BaseException as error:
+        with _CONDITION: _error(error)
+        return None
+
+
 def status():
     """Cached observation metadata only; no filesystem, market or DB reads."""
     try:
@@ -306,8 +424,14 @@ def status():
                 'marker_scope': MARKER_SCOPE, 'finish_scope': FINISH_SCOPE,
                 'counter_scope': 'BRIDGE_CALLS_NOT_DURABLE_ROWS_SEE_JOURNAL_PERSISTENCE',
                 'memory_probes_on_native_thread': False,
+                'post_cleanup_followups': dict(pending_origin_cycle_id=_TAIL_PLAN.identity['origin_cycle_id'] if _TAIL_PLAN else None,
+                    remaining_indices=list(range(_TAIL_PLAN.next_index, 6)) if _TAIL_PLAN else [],
+                    activity_revision=_ACTIVITY_REVISION,
+                    last_sample=json.loads(json.dumps(_LAST_TAIL_SAMPLE, allow_nan=False)),
+                    scope='CLEANUP_TAIL_RELATIVE_NOT_RETURN_GLOBAL_IDLE_OR_MEMORY_OWNERSHIP'),
                 'scope': 'PASSIVE_RUNTIME_OBSERVABILITY_NOT_TRADING_OR_TRANSPORT'}
         result['journal'] = journal.status()
+        result['post_cleanup_followups']['persistence'] = followups.status()
         return result
     except BaseException as error:
         return dict(version=VERSION, status='UNAVAILABLE', error_type=type(error).__name__[:64])

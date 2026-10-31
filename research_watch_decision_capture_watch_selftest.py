@@ -274,7 +274,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                 combined_batch=lambda native, *args, **kwargs: native()),
             'research_watch_runtime': SimpleNamespace(
                 begin=lambda *args, **kwargs: None, stage=lambda *args, **kwargs: None,
-                finish=lambda *args, **kwargs: None),
+                finish=lambda *args, **kwargs: None, cleanup_tail=lambda *args, **kwargs: None),
             'CONFIRMATION_STATE': {}, 'HIGH_SCORE_83_STATE': {},
             'DERIVATIVES_HIGH_STATE': {}, 'SPOT_FAMILY_HIGH_STATE': {},
             'WATCH_PRIORITY_THRESHOLD': 70, '_get_scrape_lock': lambda: asyncio.Lock(),

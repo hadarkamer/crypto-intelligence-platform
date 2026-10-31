@@ -4484,6 +4484,7 @@ async def run_watch_cycle(
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["cycle_stage"] = None
+        research_watch_runtime.cleanup_tail(runtime_observation_handle)
 
 
 
