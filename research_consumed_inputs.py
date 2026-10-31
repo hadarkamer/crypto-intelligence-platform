@@ -788,6 +788,7 @@ def _run():
         cycle, size = _QUEUE.get()
         _persist_one(cycle, size)
         _QUEUE.task_done()
+        del cycle
 
 
 def _ensure_worker():
