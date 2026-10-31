@@ -75,6 +75,42 @@ def _restore(page,key,count):
 
 
 @contextmanager
+def preparation(page,model:int):
+    """Limit the already visible chart while controls and readiness update.
+
+    This is only an optimization: a missing/unready chart keeps the original
+    path. The normal post-selection readiness and clean PNG checks still run.
+    End this scope before observation so that its final geometry is rebound.
+    """
+    if model!=3 or getattr(page.context,_STATE,False) is not True:
+        yield
+        return
+    from capture_readiness import STATE_SCRIPT, geometry_from_state, valid_source
+    geometry=None
+    if valid_source(page.url,model):
+        try:
+            state=page.evaluate(STATE_SCRIPT)
+            measured=state.get('_render_observation',{})
+            geometry=geometry_from_state(state)
+            if (state.get('ready') is not True or measured.get('canvas_count')!=1
+                    or not geometry):
+                geometry=None
+            else:
+                # Discovery compares viewport rectangles; readiness uses page
+                # coordinates. The same observation supplies the scroll offset.
+                geometry['x']-=measured['scroll_x']
+                geometry['y']-=measured['scroll_y']
+        except Exception:
+            geometry=None
+    if geometry is None:
+        _log('original','preparation_chart_unverified')
+        yield
+        return
+    with observation(page,model,geometry):
+        yield
+
+
+@contextmanager
 def observation(page,model:int,geometry:dict):
     if model!=3:
         yield lambda:None
