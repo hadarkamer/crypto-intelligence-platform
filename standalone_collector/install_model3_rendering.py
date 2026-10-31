@@ -1,4 +1,4 @@
-"""Install the measured Model 3 render policy around the existing observation."""
+"""Apply the existing Model 3 policy during preparation and observation."""
 import ast
 from pathlib import Path
 import shutil
@@ -44,6 +44,15 @@ def expand(text):
     scope = ast.parse('with _model3_rendering.observation(page, HEATMAP_MODEL, chart_rect) as _prepare_model3_frame:\n    pass').body[0]
     scope.body = tail
     loop.body[start:] = [scope]
+    selection = [i for i, node in enumerate(loop.body[:start])
+                 if any(isinstance(n, ast.Call) and ast.unparse(n.func) == 'control'
+                        and n.args and ast.unparse(n.args[0]) == '_select_timeframe'
+                        for n in ast.walk(node))]
+    if len(selection) != 1:
+        raise RuntimeError('model3_rendering_selection_layout_changed')
+    early = ast.parse('with _model3_rendering.preparation(page, HEATMAP_MODEL):\n    pass').body[0]
+    early.body = loop.body[selection[0]:start]
+    loop.body[selection[0]:start] = [early]
     index = next(i+1 for i, n in enumerate(tree.body) if isinstance(n, ast.ImportFrom) and n.module == '__future__')
     tree.body.insert(index, ast.Import(names=[ast.alias(name='model3_rendering', asname='_model3_rendering')]))
     result = ast.unparse(ast.fix_missing_locations(tree)) + '\n'
