@@ -60,7 +60,7 @@ per model is a targeted diagnosis, not full nine-map acceptance or capacity proo
 
 `python3 -m unittest discover -s experiments/model3-preparation-20261031 -p test_probe.py -v`
 
-Nine tests passed: credential filtering; hardware guard; three measurement
+Twelve tests passed, including real child cleanup and parent evidence roundtrip: credential filtering; hardware guard; three measurement
 windows; restoration on exception; unknown-hook rejection; changing-map
 invalidation; candle pixel ambiguity; runtime mismatch; and capture-wrapper
 integration for both models using a source fixture. These are diagnostic-tool
@@ -78,3 +78,13 @@ of that one-off instance. Do not modify or deploy service source. Start with
 The invocation path must refer to the temporary diagnostic directory.
 Check completed job state, decoded output hash and zero surviving children;
 revoke the temporary CLI authorization afterward.
+
+## Harness correction after first live attempt
+
+Job `job-dbj291dg1s2s73ej5q80` stopped after the first child at cleanup: the
+extracted resource helper lacked `import time`. No second capture ran and the
+parent did not emit measurement evidence. Add the missing import; preserve
+first-child evidence and stop if cleanup itself raises. Twelve offline tests now
+include a real owned-process cleanup and full parent output with/without a
+cleanup exception. One corrected manual diagnostic run follows; no scheduled
+retry is installed and no product file is changed.

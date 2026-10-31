@@ -8,6 +8,11 @@ import sys
 import tempfile
 import types
 import unittest
+import io
+import subprocess
+import base64
+import gzip
+import hashlib
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parent
@@ -40,6 +45,59 @@ class Page:
         if self.fail and self.enabled:raise RuntimeError('simulated_browser_failure')
 
 class ProbeTests(unittest.TestCase):
+    def test_real_resource_cleanup_reaps_only_owned_process(self):
+        p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)
+        try:
+            stats=probe.resources.proc_stats()
+            tracked={'seen_processes':{(p.pid,stats[p.pid]['start']):True}}
+            probe.resources.clean_tracked_children(tracked)
+            self.assertIsNotNone(p.poll())
+            probe.resources.clean_group(p)
+            probe.resources.clean_tracked_children({'seen_processes':{}})
+        finally:
+            if p.poll() is None:p.kill()
+            p.wait(timeout=3)
+
+    def parent_fixture(self,cleanup_error=False):
+        calls=[]
+        class FinishedChild:
+            pid=99999999;returncode=0
+            def __init__(self,args,**kwargs):
+                model=int(args[args.index('--child')+1]);out=Path(args[args.index('--output')+1])
+                calls.append(model)
+                data={'source_success':True,'forbidden_modules_loaded':[],
+                      'preparation_experiment':{'status':'completed'},
+                      'candle_probe':{'observed_points':[{'exact_reader_accepted':True}]}}
+                (out/'report.json').write_text(json.dumps(data))
+            def poll(self):return 0
+        env={'CG3_DIAGNOSTIC_ONE_OFF':'1','RENDER_SERVICE_ID':probe.SERVICE,
+             'RENDER_GIT_COMMIT':probe.BASE,'COINGLASS_COOKIE_HEADER':'fixture'}
+        output=io.StringIO()
+        with patch.dict(os.environ,env,clear=True),patch.object(sys,'argv',['probe.py','--runtime','/fake']),\
+             patch.object(probe,'verify_runtime',return_value={}),\
+             patch.object(probe.resources,'cgroup_snapshot',group),\
+             patch.object(probe.resources,'proc_stats',return_value={}),\
+             patch.object(probe.resources,'clean_group'),\
+             patch.object(probe.resources,'clean_tracked_children',side_effect=NameError('fixture') if cleanup_error else None),\
+             patch.object(probe.subprocess,'Popen',FinishedChild),contextlib.redirect_stdout(output):
+            code=probe.main()
+        records=[json.loads(line.removeprefix('CG3DIAG ')) for line in output.getvalue().splitlines()]
+        chunks=sorted((r for r in records if 'index' in r),key=lambda x:x['index'])
+        raw=gzip.decompress(base64.b64decode(''.join(r['data'] for r in chunks)))
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),records[-1]['sha256'])
+        return calls,code,json.loads(raw)
+
+    def test_parent_roundtrip_emits_two_results(self):
+        calls,code,data=self.parent_fixture()
+        self.assertEqual(calls,[3,2]);self.assertEqual(code,0)
+        self.assertTrue(all(data['checks'].values()))
+
+    def test_cleanup_failure_retains_first_result_and_stops_second(self):
+        calls,code,data=self.parent_fixture(cleanup_error=True)
+        self.assertEqual(calls,[3]);self.assertEqual(code,1)
+        self.assertTrue(data['runs'][0]['measurement']['source_success'])
+        self.assertEqual(data['runs'][0]['cleanup_errors'],['NameError'])
+        self.assertFalse(data['checks']['captures_completed'])
     def test_credentials_filtered_and_worker_disabled(self):
         env=probe.safe_env({'OPENAI_API_KEY':'secret','DATABASE_URL':'secret',
             'SUPABASE_SERVICE_ROLE_KEY':'secret','COINGLASS_COLLECTOR_TOKEN':'secret',

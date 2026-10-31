@@ -218,7 +218,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='cg3-preparation-') as folder:
         for model in (3,2):
             out=Path(folder)/str(model);out.mkdir()
-            tracked={'seen_processes':{}};samples=[];start=time.monotonic();stop=None
+            tracked={'seen_processes':{}};samples=[];start=time.monotonic();stop=None;cleanup_errors=[]
             with (out/'child.log').open('w') as log:
                 p=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'--runtime',str(runtime),
                                     '--child',str(model),'--output',str(out)],env=safe_env(env,model),
@@ -232,7 +232,9 @@ def main():
                         if time.monotonic()-start>300:stop='timeout';break
                         time.sleep(.5)
                 finally:
-                    resources.clean_group(p);resources.clean_tracked_children(tracked)
+                    for cleanup in (lambda:resources.clean_group(p),lambda:resources.clean_tracked_children(tracked)):
+                        try:cleanup()
+                        except Exception as exc:cleanup_errors.append(type(exc).__name__)
             data=json.loads((out/'report.json').read_text()) if (out/'report.json').is_file() else {'source_success':False}
             current=resources.proc_stats()
             survivors=sum(1 for pid,st in tracked['seen_processes'] if pid in current and current[pid]['start']==st and current[pid]['state']!='Z')
@@ -242,10 +244,11 @@ def main():
                     event=json.loads(line.removeprefix('MODEL3_RENDER '))
                     render_events.append({k:event[k] for k in ('status','reason') if k in event})
             summary['runs'].append({'model':model,'stop':stop,'returncode':p.returncode,'measurement':data,
-                                    'samples':samples,'render_events':render_events,'survivors':survivors})
-            if stop or p.returncode or not data.get('source_success') or survivors:break
+                                    'samples':samples,'render_events':render_events,'survivors':survivors,
+                                    'cleanup_errors':cleanup_errors})
+            if stop or p.returncode or not data.get('source_success') or survivors or cleanup_errors:break
     captures_ok=len(summary['runs'])==2 and all(x['returncode']==0 and not x['stop'] and
-        x['measurement'].get('source_success') and not x['survivors'] for x in summary['runs'])
+        x['measurement'].get('source_success') and not x['survivors'] and not x['cleanup_errors'] for x in summary['runs'])
     measurements={x['model']:x['measurement'] for x in summary['runs']}
     summary['checks']={'captures_completed':captures_ok,
         'gate_experiment_completed':measurements.get(3,{}).get('preparation_experiment',{}).get('status')=='completed',

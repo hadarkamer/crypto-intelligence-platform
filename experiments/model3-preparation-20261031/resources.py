@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import time
 
 def proc_stats():
     found = {}
