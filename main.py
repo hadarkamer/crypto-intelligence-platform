@@ -70,6 +70,7 @@ import research_alert_decision_watch
 import research_watch_runtime
 import research_background_memory
 import research_memory_investigation
+import research_history_memory_followup
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -5850,6 +5851,7 @@ async def health(request):
         "alert_decision_capture": research_alert_decision_watch.status(),
         "runtime_observability": research_watch_runtime.status(),
         "named_cache_memory_investigation": research_memory_investigation.status(),
+        "named_cache_memory_followup": research_history_memory_followup.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
@@ -6935,6 +6937,7 @@ async def main():
 
     research_background_memory.install(globals())
     research_memory_investigation.install()
+    research_history_memory_followup.install()
     init_db()
 
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK
