@@ -119,6 +119,8 @@ def install(runtime: Path):
         '                n = c.execute("SELECT count(*) AS n FROM public.ai_collection_bridge_jobs WHERE created_at > now()-interval \'1 hour\'").fetchone()["n"]\n'
         '                if n >= self.hourly_limit:\n'
         '                    raise BridgeError("rate_limited", "Hourly capture limit reached", 429)\n','')
+    # Remove request-count admission quota; request IDs still deduplicate.
+    text=replace_once(text,'            requests = c.execute("SELECT count(*) AS n FROM public.ai_collection_bridge_requests WHERE created_at > now()-interval \'1 hour\'").fetchone()["n"]\n            if requests >= 200:\n                raise BridgeError("rate_limited", "Too many requests", 429)\n','')
     text=replace_once(text,'JobStore(dsn, int(os.getenv("COLLECTION_BRIDGE_HOURLY_LIMIT", "4")))',
         'JobStore(dsn)')
     text=replace_once(text,"CHECK(timeframe IN ('12H','24H'))","CHECK(timeframe IN ('12H','24H','48H'))")

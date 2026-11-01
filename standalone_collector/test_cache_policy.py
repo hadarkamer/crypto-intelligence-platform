@@ -84,17 +84,14 @@ class StoreTests(unittest.TestCase):
         result = store_with(c).start(str(uuid4()), '12H')
         self.assertEqual(result['status'], 'queued')
         self.assertEqual(c.new_jobs, 1)
-    def test_request_limit_is_still_enforced(self):
-        for requests, allowed in ((199, True), (200, False)):
+    def test_new_requests_are_accepted_above_the_old_hourly_boundary(self):
+        for requests in (199, 200, 201, 1000):
             with self.subTest(requests=requests):
                 c = Connection(requests=requests)
-                if allowed:
-                    self.assertEqual(store_with(c).start(str(uuid4()), '12H')['status'], 'queued')
-                else:
-                    with self.assertRaises(bridge.BridgeError) as caught:
-                        store_with(c).start(str(uuid4()), '12H')
-                    self.assertEqual(caught.exception.code, 'rate_limited')
-                    self.assertEqual(c.new_jobs, 0)
+                self.assertEqual(store_with(c).start(str(uuid4()), '12H')['status'], 'queued')
+                self.assertEqual(c.new_jobs, 1)
+                self.assertEqual(c.new_requests, 1)
+                self.assertFalse(any('SELECT count(*)' in sql for sql, _ in c.commands))
     def test_known_request_reuses_original_even_after_cache_expiry(self):
         saved = row(30)
         c = Connection(existing={**saved, 'requested_timeframe': '12H'})
@@ -133,7 +130,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.saved = row(40)
         self.store = Mock()
         self.store.latest.return_value = bridge.envelope(self.saved)
-        self.store.start.side_effect = bridge.BridgeError('rate_limited', 'Too many requests', 429)
+        self.store.start.side_effect = bridge.BridgeError('rate_limited', 'Upstream rate limit', 429)
         app = web.Application()
         bridge.register_collection_routes(app, store=self.store, token=TOKEN, enabled=True, start_worker=False)
         self.client = TestClient(TestServer(app))
@@ -163,7 +160,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 404)
         self.assertEqual((await response.json())['error']['code'], 'no_cached_result')
         self.store.start.assert_not_called()
-    async def test_request_rate_limit_http_does_not_invent_retry_time(self):
+    async def test_legacy_rate_limit_response_does_not_invent_retry_time(self):
         response = await self.client.post('/api/collection/model1/jobs', headers=self.headers,
             json={'request_id': str(uuid4()), 'timeframe': '12H'})
         self.assertEqual(response.status, 429)
