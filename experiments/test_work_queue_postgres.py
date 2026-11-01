@@ -32,7 +32,8 @@ class QueuePostgresTests(unittest.TestCase):
 
     def setUp(self):
         with self.queue.connect() as c:
-            c.execute('TRUNCATE public.ai_collection_bridge_requests, public.ai_collection_bridge_jobs')
+            c.execute('''TRUNCATE public.ai_collection_bridge_evidence,
+                public.ai_collection_bridge_requests, public.ai_collection_bridge_jobs''')
         self.command = WorkSpec(TENANT, SOURCE, BATCH, 'TESTA', 1, '12H', 'a' * 64)
 
     def parallel(self, n, operation):
