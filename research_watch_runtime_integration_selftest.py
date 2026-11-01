@@ -78,6 +78,7 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
         self.followup_hooks = {'import': 0, 'install': 0, 'health': 0}
         self.retained_hooks = {'import': 0, 'install': 0, 'health': 0}
         self.retained_followup_hooks = {'import': 0, 'install': 0, 'health': 0}
+        self.current_history_hooks = {'import': 0, 'install': 0, 'health': 0}
         self.stages = []
 
     def visit_FunctionDef(self, node):
@@ -92,6 +93,10 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
         assert self.functions and self.functions[0] == 'run_watch_cycle', 'OBSERVER_OUTSIDE_WATCH'
 
     def visit_Import(self, node):
+        if any(a.name=='research_current_history_memory_investigation' for a in node.names):
+            assert not self.functions and len(node.names)==1 and node.names[0].asname is None, 'CURRENT_HISTORY_IMPORT_SHAPE'
+            self.current_history_hooks['import']+=1
+            return None
         if any(a.name=='research_retained_memory_followup' for a in node.names):
             assert not self.functions and len(node.names)==1 and node.names[0].asname is None, 'RETAINED_FOLLOWUP_IMPORT_SHAPE'
             self.retained_followup_hooks['import']+=1
@@ -132,6 +137,10 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
 
     def visit_Expr(self, node):
         call = node.value
+        if isinstance(call,ast.Call) and isinstance(call.func,ast.Attribute) and named(call.func.value,'research_current_history_memory_investigation'):
+            assert self.functions==['main'] and call.func.attr=='install' and not call.args and not call.keywords, 'CURRENT_HISTORY_INSTALL_SHAPE'
+            self.current_history_hooks['install']+=1
+            return None
         if isinstance(call,ast.Call) and isinstance(call.func,ast.Attribute) and named(call.func.value,'research_retained_memory_followup'):
             assert self.functions==['main'] and call.func.attr=='install' and not call.args and not call.keywords, 'RETAINED_FOLLOWUP_INSTALL_SHAPE'
             self.retained_followup_hooks['install']+=1
@@ -179,6 +188,10 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
     def visit_Dict(self, node):
         keys, values = [], []
         for key, value in zip(node.keys, node.values):
+            if isinstance(key,ast.Constant) and key.value=='current_history_memory_investigation':
+                assert self.functions==['health'] and isinstance(value,ast.Call) and isinstance(value.func,ast.Attribute) and named(value.func.value,'research_current_history_memory_investigation') and value.func.attr=='status' and not value.args and not value.keywords, 'CURRENT_HISTORY_HEALTH_SHAPE'
+                self.current_history_hooks['health']+=1
+                continue
             if isinstance(key,ast.Constant) and key.value=='retained_root_memory_followup':
                 assert self.functions==['health'] and isinstance(value,ast.Call) and isinstance(value.func,ast.Attribute) and named(value.func.value,'research_retained_memory_followup') and value.func.attr=='status' and not value.args and not value.keywords, 'RETAINED_FOLLOWUP_HEALTH_SHAPE'
                 self.retained_followup_hooks['health']+=1
@@ -205,6 +218,7 @@ class EraseOnlyApprovedRuntimeHooks(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Call(self, node):
+        assert not(isinstance(node.func,ast.Attribute) and named(node.func.value,'research_current_history_memory_investigation')), 'UNAPPROVED_CURRENT_HISTORY_CONTEXT'
         assert not observer_call(node), 'UNAPPROVED_OBSERVER_CALL_CONTEXT'
         assert not(isinstance(node.func,ast.Attribute) and named(node.func.value,'research_retained_memory_followup')), 'UNAPPROVED_RETAINED_FOLLOWUP_CONTEXT'
         assert not (isinstance(node.func, ast.Attribute) and named(node.func.value, 'research_retained_memory_investigation')), 'UNAPPROVED_RETAINED_CALL_CONTEXT'
@@ -229,12 +243,20 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
         self.assertEqual(eraser.followup_hooks, {'import': 1, 'install': 0, 'health': 1})
         self.assertEqual(eraser.retained_hooks, {'import': 1, 'install': 0, 'health': 1})
         self.assertEqual(eraser.retained_followup_hooks, {'import': 1, 'install': 0, 'health': 1})
+        self.assertEqual(eraser.current_history_hooks, {'import': 1, 'install': 1, 'health': 1})
         self.assertCountEqual(eraser.stages, PHASES)
         self.assertEqual(len(eraser.stages), len(PHASES))
         self.assertEqual(pin(original), BASELINE_MAIN_AST)
 
     def test_cache_memory_eraser_rejects_unapproved_shapes(self):
         bad = (
+            'import research_current_history_memory_investigation as alias',
+            'def main():\n research_current_history_memory_investigation.install(native())',
+            'def wrong():\n research_current_history_memory_investigation.install()',
+            "async def health():\n return {'current_history_memory_investigation': research_current_history_memory_investigation.status(native())}",
+            "async def health():\n return {'current_history_memory_investigation': native()}",
+            'def wrong():\n return research_current_history_memory_investigation.status()',
+            'research_current_history_memory_investigation.hidden()',
             'import research_memory_investigation as alias',
             'def main():\n research_memory_investigation.install(native())',
             'def wrong():\n research_memory_investigation.install()',
