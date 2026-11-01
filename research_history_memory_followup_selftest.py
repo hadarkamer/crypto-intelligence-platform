@@ -151,7 +151,14 @@ class Tests(unittest.TestCase):
     def test_main_additive_and_old_expiry_preserved(self):
         root = Path(__file__).resolve().parent
         text = (root / 'main.py').read_text(encoding='utf-8')
-        self.assertIn('research_history_memory_followup.install()', text)
+        import ast
+        tree = ast.parse(text)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == 'research_history_memory_followup'
+                 and node.func.attr == 'install']
+        self.assertEqual(calls, [])
         self.assertIn('"named_cache_memory_followup": research_history_memory_followup.status()', text)
         self.assertIn("EXPIRES_AT_UTC = '2026-10-31T17:15:00+00:00'",
                       (root / 'research_background_memory.py').read_text(encoding='utf-8'))
