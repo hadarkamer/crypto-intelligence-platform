@@ -75,6 +75,7 @@ import research_retained_memory_investigation
 import research_retained_memory_followup
 import research_current_history_memory_investigation
 import research_resident_memory_investigation
+import research_rebound_memory_investigation
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -5860,6 +5861,7 @@ async def health(request):
         "retained_root_memory_followup": research_retained_memory_followup.status(),
         "current_history_memory_investigation": research_current_history_memory_investigation.status(),
         "resident_memory_investigation": research_resident_memory_investigation.status(),
+        "rebound_memory_investigation": research_rebound_memory_investigation.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
@@ -6948,7 +6950,7 @@ async def main():
     # The completed history-only experiment is not restarted in this process.
     # The completed v1 retained-root experiment is not restarted.
     # The completed v2 retained-root experiment is not restarted.
-    research_resident_memory_investigation.install()
+    research_rebound_memory_investigation.install()
     init_db()
 
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK
