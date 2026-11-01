@@ -151,7 +151,10 @@ class Tests(unittest.TestCase):
     def test_main_additive_and_old_expiry_preserved(self):
         root = Path(__file__).resolve().parent
         text = (root / 'main.py').read_text(encoding='utf-8')
-        self.assertIn('research_retained_memory_investigation.install()', text)
+        import ast
+        tree=ast.parse(text)
+        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and isinstance(n.func.value,ast.Name) and n.func.value.id=='research_retained_memory_investigation' and n.func.attr=='install']
+        self.assertEqual(calls,[])
         self.assertIn('"retained_root_memory_investigation": research_retained_memory_investigation.status()', text)
         self.assertIn("EXPIRES_AT_UTC = '2026-10-31T17:15:00+00:00'",
                       (root / 'research_background_memory.py').read_text(encoding='utf-8'))
