@@ -1,0 +1,60 @@
+name: Isolated work queue checks
+
+on:
+  push:
+    branches: [test/coinglass-concurrency-20261031]
+    paths:
+      - experiments/work_queue_candidate.py
+      - experiments/test_work_queue_postgres.py
+      - standalone_collector/work_identity.py
+      - .github/workflows/isolated-work-queue-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: queue_test
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: coinglass_queue_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPENAI_API_KEY: ''
+      DATABASE_URL: ''
+      COINGLASS_STORAGE_STATE_JSON: ''
+      COINGLASS_COOKIE_HEADER: ''
+      COLLECTION_BRIDGE_ENABLED: 'false'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install offline collector test dependencies
+        run: >-
+          python -m pip install 'aiohttp==3.11.11' 'requests==2.32.5'
+          'psycopg[binary]==3.2.3' 'playwright==1.55.0' 'Pillow==12.3.0'
+      - name: Install synthetic DOM test browser
+        run: python -m playwright install --with-deps chromium
+      - name: Build actual generated runtime and run existing offline contracts
+        run: python standalone_collector/prepare.py
+      - name: Verify immutable work identity
+        working-directory: standalone_collector
+        run: python -m unittest test_work_identity -v
+      - name: Test three queue scenarios and boundary regressions on real PostgreSQL
+        run: python experiments/test_work_queue_postgres.py
+      - name: Check whitespace
+        run: git diff --check
