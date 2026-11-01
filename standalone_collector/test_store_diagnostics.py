@@ -30,7 +30,7 @@ def handler(application,path,method='GET'):
 
 class StoreDiagnosticsTests(unittest.TestCase):
     def store(self):
-        return Mock(dsn='synthetic',hourly_limit=2)
+        return Mock(dsn='synthetic')
 
     def test_installed_route_errors_keep_503_and_log_only_fixed_metadata(self):
         for action in ('start','get','latest','evidence'):
@@ -96,6 +96,7 @@ class StoreDiagnosticsTests(unittest.TestCase):
         self.assertEqual(response.status,200);self.assertEqual(result['mode'],'collection')
         self.assertEqual(result['store_connectivity'],{'checked':True,'ready':False})
         self.assertEqual(result['supported_models'],[1,2,3])
+        self.assertIsNone(result['new_capture_hourly_limit'])
         self.assertNotIn('SECRET',response.text+output.getvalue())
         self.assertIn('"operation": "readiness"',output.getvalue())
         store.initialize.assert_not_called();store.claim.assert_not_called()
