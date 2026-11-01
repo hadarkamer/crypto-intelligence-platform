@@ -63,7 +63,8 @@ _WORKER = None
 _STORE = None
 _METRICS = dict(submitted=0, persisted=0, partial=0, failed=0, dropped=0,
                 linked=0, unlinked=0, link_failures=0, queued_items=0, queued_bytes=0,
-                skipped={}, last=None, last_link=None)
+                skipped={}, last=None, last_link=None, worker_payload_releases=0,
+                last_worker_payload_accounted_bytes=None)
 _SKIPS = {"SOURCE_NOT_QUEUED", "NOT_DELIVERED", "NOT_IN_SCOPE", "PRE_PROCESS_EPOCH"}
 
 
@@ -578,6 +579,14 @@ def _run():
         obs, size = _QUEUE.get()
         _persist_one(obs, size)
         _QUEUE.task_done()
+        released_accounted_bytes = size if type(size) is int and 0 <= size <= MAX_QUEUE_BYTES else None
+        del obs, size
+        try:
+            with _LOCK:
+                _METRICS["worker_payload_releases"] = _METRICS.get("worker_payload_releases", 0) + 1
+                _METRICS["last_worker_payload_accounted_bytes"] = released_accounted_bytes
+        except BaseException:
+            pass
 
 
 def _ensure_worker():
@@ -630,6 +639,7 @@ def status():
     with _LOCK:
         metrics = deepcopy(_METRICS)
     return {"version": VERSION, "contract_sha256": CONTRACT_SHA256, "scope": CONTRACT["scope"],
+        "worker_payload_release_scope": "LOOP_LOCAL_REFERENCE_DELETED_AFTER_TASK_DONE; BYTES_ARE_EXISTING_QUEUE_ACCOUNTING_NOT_HEAP_OR_RSS_RECLAIMED; OTHER_OWNERS_MAY_RETAIN_PAYLOAD",
         "process_started_at_utc": PROCESS_STARTED_AT_UTC, "configured": bool(database_url()),
         "worker_alive": bool(_WORKER and _WORKER.is_alive()), "enrolled_in_existing_study": False,
         "notifications": False, "trade_execution": False,

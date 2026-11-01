@@ -6943,7 +6943,7 @@ async def main():
     research_memory_investigation.install()
     # The completed history-only experiment is not restarted in this process.
     # The completed v1 retained-root experiment is not restarted.
-    research_retained_memory_followup.install()
+    # The completed v2 retained-root experiment is not restarted.
     init_db()
 
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK

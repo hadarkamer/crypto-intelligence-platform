@@ -1,5 +1,6 @@
 """Deterministic lifetime/selection/safety controls; no bot startup or live I/O."""
 from datetime import datetime, timezone
+import ast
 import json
 from pathlib import Path
 import unittest
@@ -150,7 +151,12 @@ class Tests(unittest.TestCase):
     def test_main_additive_and_old_expiry_preserved(self):
         root = Path(__file__).resolve().parent
         text = (root / 'main.py').read_text(encoding='utf-8')
-        self.assertIn('research_retained_memory_followup.install()', text)
+        installs = [node for node in ast.walk(ast.parse(text))
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == 'research_retained_memory_followup'
+                    and node.func.attr == 'install']
+        self.assertEqual(installs, [])
         self.assertIn('"retained_root_memory_followup": research_retained_memory_followup.status()', text)
         self.assertIn("EXPIRES_AT_UTC = '2026-10-31T17:15:00+00:00'",
                       (root / 'research_background_memory.py').read_text(encoding='utf-8'))

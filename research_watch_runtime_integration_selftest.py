@@ -228,7 +228,7 @@ class RuntimeIntegrationPreservationTests(unittest.TestCase):
         self.assertEqual(eraser.cache_memory_hooks, {'import': 1, 'install': 1, 'health': 1})
         self.assertEqual(eraser.followup_hooks, {'import': 1, 'install': 0, 'health': 1})
         self.assertEqual(eraser.retained_hooks, {'import': 1, 'install': 0, 'health': 1})
-        self.assertEqual(eraser.retained_followup_hooks, {'import': 1, 'install': 1, 'health': 1})
+        self.assertEqual(eraser.retained_followup_hooks, {'import': 1, 'install': 0, 'health': 1})
         self.assertCountEqual(eraser.stages, PHASES)
         self.assertEqual(len(eraser.stages), len(PHASES))
         self.assertEqual(pin(original), BASELINE_MAIN_AST)

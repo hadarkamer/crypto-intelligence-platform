@@ -42,7 +42,8 @@ _STORE = None
 _WORKER_LOCK = threading.Lock()
 _LOCK = threading.Lock()
 _METRICS = dict(enqueue_attempts=0,enqueued=0,persisted=0,failed=0,dropped=0,
-    unavailable=0,idempotent_existing=0,queued_items=0,queued_bytes=0,last=None,last_durable=None)
+    unavailable=0,idempotent_existing=0,queued_items=0,queued_bytes=0,last=None,last_durable=None,
+    worker_payload_releases=0,last_worker_payload_accounted_bytes=None)
 
 
 class CapsuleValidationError(ValueError):
@@ -287,6 +288,19 @@ def _run():
             _persist_one(prepared,enqueued_at)
         finally:
             _QUEUE.task_done()
+        try:
+            released_accounted_bytes = prepared['payload_bytes']
+            if type(released_accounted_bytes) is not int or not 0 <= released_accounted_bytes <= MAX_CAPSULE_BYTES:
+                released_accounted_bytes = None
+        except BaseException:
+            released_accounted_bytes = None
+        del prepared, enqueued_at
+        try:
+            with _LOCK:
+                _METRICS['worker_payload_releases'] = _METRICS.get('worker_payload_releases', 0) + 1
+                _METRICS['last_worker_payload_accounted_bytes'] = released_accounted_bytes
+        except BaseException:
+            pass
 
 
 def _ensure_worker():
@@ -340,6 +354,7 @@ def status():
     with _LOCK:
         snapshot = json.loads(json.dumps(_METRICS))
     return dict(version=VERSION,scope='passive-watch-decision-capsules-only',
+        worker_payload_release_scope='LOOP_LOCAL_REFERENCE_DELETED_AFTER_TASK_DONE; BYTES_ARE_EXISTING_CANONICAL_JSON_BYTES_NOT_HEAP_OR_RSS_RECLAIMED; OTHER_OWNERS_MAY_RETAIN_PAYLOAD',
         worker_alive=bool(_WORKER and _WORKER.is_alive()),table=TABLE,
         queue_is_durable=False,shared_research_event_queue_used=False,
         persistence_retry_policy='No automatic retry; a failed capsule is an explicit observation gap.',
