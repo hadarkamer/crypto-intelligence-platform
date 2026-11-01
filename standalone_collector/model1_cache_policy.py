@@ -3,11 +3,9 @@
 Reading an existing result never creates a request, invokes a source/model or
 refreshes its timestamp. Automatic reuse remains bounded to 15 minutes; older
 observations (at most six hours) are available ONLY for explicit review/import.
-No quotas, source permissions or worksheet authorization are changed here.
+Source permissions and worksheet authorization are unchanged.
 """
 from __future__ import annotations
-from datetime import timedelta, timezone
-import math
 from pathlib import Path
 
 AUTO_REUSE_MINUTES = 15
@@ -25,24 +23,6 @@ def latest_ready(store, timeframe):
             ORDER BY (result->>'captured_at')::timestamptz DESC,created_at DESC
             LIMIT 1""", (timeframe,)).fetchone()
     return envelope(row) if row else None
-
-
-def capture_limit_error(connection, limit):
-    """Use DB time and the actual rolling window, including reduced limits."""
-    from collection_bridge import BridgeError
-    error = BridgeError('rate_limited', 'Hourly capture limit reached', 429)
-    row = connection.execute("""SELECT created_at + interval '1 hour' AS retry_at,
-                    now() AS checked_at
-                FROM public.ai_collection_bridge_jobs
-                WHERE created_at > now()-interval '1 hour'
-                ORDER BY created_at DESC OFFSET %s LIMIT 1""",
-                (max(0, int(limit)-1),)).fetchone()
-    if row:
-        retry_at = row['retry_at'] + timedelta(seconds=1)
-        seconds = max(1, math.ceil((retry_at-row['checked_at']).total_seconds()))
-        error.retry_after_seconds = seconds
-        error.retry_at = retry_at.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
-    return error
 
 
 def error_response(error):
@@ -66,14 +46,11 @@ def install(runtime: Path):
     path = runtime/'collection_bridge.py'
     text = path.read_text()
     text = replace_once(text, 'from aiohttp import web',
-        'from aiohttp import web\nfrom model1_cache_policy import latest_ready, capture_limit_error, error_response')
+        'from aiohttp import web\nfrom model1_cache_policy import latest_ready, error_response')
     text = replace_once(text,
         "(result->>'captured_at')::timestamptz > now()-interval '10 minutes'",
         "(result->>'captured_at')::timestamptz >= now()-interval '15 minutes'\n"
         "                AND (result->>'captured_at')::timestamptz <= now()")
-    text = replace_once(text,
-        '                    raise BridgeError("rate_limited", "Hourly capture limit reached", 429)',
-        '                    raise capture_limit_error(c, self.hourly_limit)')
     text = replace_once(text,
         '    def get(self, jid: str) -> dict[str, Any] | None:',
         '    def latest(self, tf: str) -> dict[str, Any] | None:\n'
