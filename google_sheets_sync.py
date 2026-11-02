@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 import research_maxpain_sheet_rows
+import research_sheets_memory_investigation as _sheets_memory
 
 _TRUE = {"1", "true", "yes", "on"}
 _ENABLED = os.getenv("GOOGLE_SHEETS_SYNC_ENABLED", "").strip().lower() in _TRUE
@@ -262,6 +263,8 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
             request_bytes = json.dumps(
                 request_envelope, ensure_ascii=False, default=str
             ).encode("utf-8")
+            if _sheets_memory.active():
+                _sheets_memory.point('REQUEST_READY', {'request_envelope': request_envelope, 'request_bytes': request_bytes})
             if _ACK_MODE == "html_ack_v1":
                 expected_title = "sheets-ack-v1:" + hmac.new(
                     _WEBHOOK_SECRET.encode("utf-8"), b"sheets-ack-v1\n" + request_bytes,
@@ -284,6 +287,8 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                     diagnostic.update(_response_context(response))
                     raw = response.read(_ACK_RESPONSE_MAX_BYTES + 1)
                     diagnostic["response_bytes"] = len(raw)
+                    if _sheets_memory.active():
+                        _sheets_memory.point('ACK_READ', {'ack_raw': raw, 'request_bytes': request_bytes})
                     if len(raw) > _ACK_RESPONSE_MAX_BYTES:
                         outcome = "RESPONSE_TOO_LARGE"
                         raise ValueError(outcome)

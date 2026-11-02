@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover
 import google_sheets_sync
 import research_sheet_outbox
 import research_sheet_reconciliation
+import research_sheets_memory_investigation as _sheets_memory
 
 RECONCILE_VERSION = "committed-snapshot-reconcile-v2-maxpain"
 _PASS_LOCK_ID = 4860059309063875574
@@ -153,6 +154,8 @@ def reconcile_sources(conn, *, limit: int = _SOURCE_LIMIT) -> Dict[str, int]:
         ),
     ).fetchall()
     processed = set()
+    if _sheets_memory.active():
+        _sheets_memory.point('CANDIDATES', {'candidates': candidates})
     for candidate in candidates:
         if int(candidate["event_id"]) in processed:
             continue
@@ -195,6 +198,8 @@ def reconcile_sources(conn, *, limit: int = _SOURCE_LIMIT) -> Dict[str, int]:
             )
             upserts = payload["upserts"]
             children = [candidate]
+        if _sheets_memory.active():
+            _sheets_memory.point('GROUP_READY', {'candidates': candidates, 'children': children, 'upserts': upserts})
         result["staged_rows"] += research_sheet_outbox.stage_upserts(conn, upserts)
         _mark_sources(conn, children)
         processed.update(int(child["event_id"]) for child in children)
@@ -243,11 +248,17 @@ class SnapshotSyncWorker:
             seeded = (0 if self._publication_seeded else
                       research_sheet_outbox.current_publication.seed_legacy(conn))
             staged = reconcile_sources(conn)
+        if _sheets_memory.active():
+            _sheets_memory.point('RECONCILE_DONE', {})
         self._publication_seeded = True
         staged['current_slots_seeded'] = seeded
         # The connection context committed both payloads and source coverage.
         delivered = research_sheet_outbox.drain(url, max_rows=32, max_seconds=45)
+        if _sheets_memory.active():
+            _sheets_memory.point('DRAIN_DONE', {})
         audit = self._sheet_reconciler.run_due(url)
+        if _sheets_memory.active():
+            _sheets_memory.point('AUDIT_DONE', {})
         return {"reconcile": staged, "delivery": delivered, "sheet_audit": audit}
 
     async def start(self) -> bool:
@@ -281,6 +292,7 @@ class SnapshotSyncWorker:
             try:
                 self._runtime["last_result"] = await asyncio.to_thread(self.run_once)
                 self._runtime["last_error"] = None
+                _sheets_memory.after_await(self)
             except Exception as exc:
                 self._runtime["last_error"] = type(exc).__name__
                 print(f"[snapshot-sheet-sync] pass failed: {type(exc).__name__}", flush=True)
