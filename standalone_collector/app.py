@@ -148,7 +148,7 @@ def create_app():
     configured=bool(os.getenv('DATABASE_URL') and os.getenv('OPENAI_API_KEY')
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
     active=enabled and configured
-    store=JobStore(os.getenv('DATABASE_URL',''),hourly_limit=2) if active else None
+    store=JobStore(os.getenv('DATABASE_URL','')) if active else None
     async def health(_):
         from prominent_levels import SELECTION_POLICY, CONTRACT
         from store_diagnostics import store_readiness
@@ -157,7 +157,7 @@ def create_app():
             'scheduled_collection':False,'source_session_configured':source_session_configured(),
             'capture_flow':'original','acceptance':'screenshot-observed-and-numeric-validation',
             'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
-            'new_capture_hourly_limit':store.hourly_limit if store is not None else None,
+            'new_capture_hourly_limit':None,
             'worker_concurrency':1,'automatic_cache_minutes':15}
         result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
         result['numeric_reader']='displayed-hover.v1'

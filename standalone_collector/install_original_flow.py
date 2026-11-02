@@ -110,9 +110,19 @@ def install(runtime: Path):
     text=replace_once(text,'TIMEFRAMES = ("12H", "24H")  # Legacy helper does NOT correctly select 48H.',
         'TIMEFRAMES = ("12H", "24H", "48H")')
     text=replace_once(text,'Only 12H and 24H are supported','Only 12H, 24H and 48H are supported')
-    text=replace_once(text,'        self.hourly_limit = max(1, min(int(hourly_limit), 20))',
-        '        configured_limit = os.getenv("COLLECTION_BRIDGE_HOURLY_LIMIT", str(hourly_limit))\n'
-        '        self.hourly_limit = max(1, min(int(configured_limit), 20))')
+    # The app-owned collector has no hourly capture quota. Keep this adaptation
+    # scoped to its generated runtime; the separate legacy bot is unchanged.
+    text=replace_once(text,'def __init__(self, dsn: str, hourly_limit: int = 4):',
+        'def __init__(self, dsn: str):')
+    text=replace_once(text,'        self.hourly_limit = max(1, min(int(hourly_limit), 20))\n','')
+    text=replace_once(text,
+        '                n = c.execute("SELECT count(*) AS n FROM public.ai_collection_bridge_jobs WHERE created_at > now()-interval \'1 hour\'").fetchone()["n"]\n'
+        '                if n >= self.hourly_limit:\n'
+        '                    raise BridgeError("rate_limited", "Hourly capture limit reached", 429)\n','')
+    # Remove request-count admission quota; request IDs still deduplicate.
+    text=replace_once(text,'            requests = c.execute("SELECT count(*) AS n FROM public.ai_collection_bridge_requests WHERE created_at > now()-interval \'1 hour\'").fetchone()["n"]\n            if requests >= 200:\n                raise BridgeError("rate_limited", "Too many requests", 429)\n','')
+    text=replace_once(text,'JobStore(dsn, int(os.getenv("COLLECTION_BRIDGE_HOURLY_LIMIT", "4")))',
+        'JobStore(dsn)')
     text=replace_once(text,"CHECK(timeframe IN ('12H','24H'))","CHECK(timeframe IN ('12H','24H','48H'))")
     migration='''            row = c.execute("""SELECT pg_get_constraintdef(oid) AS definition
                 FROM pg_constraint WHERE conrelid='public.ai_collection_bridge_jobs'::regclass

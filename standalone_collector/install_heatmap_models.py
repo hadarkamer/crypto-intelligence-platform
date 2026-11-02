@@ -1,7 +1,7 @@
 """Final build adapter for Models1–3. Root bot files are never edited.
 
 This adds an identity dimension, not a relaxed validator. Source sessions,
-normal chart controls, private evidence, numeric range checks and quota logic
+normal chart controls, private evidence, numeric range checks and request protection
 remain the existing implementation. Defaults preserve the Model1 contract.
 """
 from pathlib import Path
@@ -81,8 +81,8 @@ def install(runtime:Path):
     text=once(text,'from aiohttp import web','from aiohttp import web\nfrom heatmap_models import model_number, schema_version, source_url, child_environment')
     text=once(text,'return {"schema_version": SCHEMA, "job_id": str(row["id"]),',
         'return {"schema_version": schema_version(row.get("heatmap_model", 1)), "job_id": str(row["id"]),')
-    text=once(text,'def __init__(self, dsn: str, hourly_limit: int = 4):',
-        'def __init__(self, dsn: str, hourly_limit: int = 4, heatmap_model: int = 1):')
+    text=once(text,'def __init__(self, dsn: str):',
+        'def __init__(self, dsn: str, heatmap_model: int = 1):')
     text=once(text,'        self.dsn = dsn','        self.dsn = dsn\n        self.heatmap_model = model_number(heatmap_model)')
     jobs_end='                finished_at timestamptz, result jsonb, image_png bytea, error_code text)""")'
     text=once(text,jobs_end,jobs_end+'\n'
@@ -137,8 +137,7 @@ def install(runtime:Path):
         'start_worker: bool = True, heatmap_model: int = 1) -> None:')
     text=once(text,'    active = (os.getenv(',
         '    heatmap_model = model_number(heatmap_model)\n    active = (os.getenv(')
-    text=once(text,'JobStore(dsn, int(os.getenv("COLLECTION_BRIDGE_HOURLY_LIMIT", "4")))',
-        'JobStore(dsn, int(os.getenv("COLLECTION_BRIDGE_HOURLY_LIMIT", "4")), heatmap_model=heatmap_model)')
+    text=once(text,'JobStore(dsn)', 'JobStore(dsn, heatmap_model=heatmap_model)')
     # Only route literals are parameterized. Source URLs still come from the allowlist.
     for old,new in [
         ('"/api/collection/model1/jobs"','f"/api/collection/model{heatmap_model}/jobs"'),
@@ -152,7 +151,7 @@ def install(runtime:Path):
     text+='def register_collection_routes(app, *, store=None, token=None, enabled=None, start_worker=True):\n'
     text+='    _register_one_model(app,store=store,token=token,enabled=enabled,start_worker=start_worker,heatmap_model=1)\n'
     text+='    for model in (2,3):\n'
-    text+='        scoped = JobStore(store.dsn,store.hourly_limit,heatmap_model=model) if store is not None else None\n'
+    text+='        scoped = JobStore(store.dsn,heatmap_model=model) if store is not None else None\n'
     text+='        _register_one_model(app,store=scoped,token=token,enabled=enabled,start_worker=False,heatmap_model=model)\n'
     save(path,text)
 

@@ -131,10 +131,12 @@ class ModelTests(unittest.TestCase):
         import collection_bridge as bridge
         self.assertEqual(bridge.WORK_LOCK,748230102)
         self.assertEqual(bridge.CREATE_LOCK,748230101)
-    def test_cap_can_fit_one_nine_item_pass_and_remains_bounded(self):
-        with patch.dict(os.environ,{'COLLECTION_BRIDGE_HOURLY_LIMIT':'12'}):
-            self.assertEqual(JobStore('synthetic').hourly_limit,12)
-        with patch.dict(os.environ,{'COLLECTION_BRIDGE_HOURLY_LIMIT':'999999'}):
-            self.assertEqual(JobStore('synthetic').hourly_limit,20)
+    def test_retired_capture_limit_setting_cannot_block_model_routes(self):
+        for value in ('12', '20', '999999', 'invalid'):
+            with patch.dict(os.environ, {'COLLECTION_BRIDGE_HOURLY_LIMIT': value}):
+                for model in (1, 2, 3):
+                    store = JobStore('synthetic', heatmap_model=model)
+                    self.assertEqual(store.heatmap_model, model)
+                    self.assertFalse(hasattr(store, 'hourly_limit'))
 
 if __name__=='__main__':unittest.main()

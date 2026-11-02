@@ -11,7 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE/'runtime'))
 import collection_bridge as bridge
-from model1_cache_policy import latest_ready, capture_limit_error, error_response
+from model1_cache_policy import latest_ready, error_response
 
 TOKEN = 'synthetic-test-bridge-token-with-no-real-access'
 NOW = datetime(2026, 9, 15, 20, 38, tzinfo=timezone.utc)
@@ -25,8 +25,9 @@ def row(age=12, timeframe='12H'):
 
 class Connection:
     """SQL-observing fixture for start's cache-before-paid-work ordering."""
-    def __init__(self, cached=None, existing=None, captures=2):
+    def __init__(self, cached=None, existing=None, captures=12, requests=0):
         self.cached, self.existing, self.captures = cached, existing, captures
+        self.requests = requests
         self.commands, self.new_jobs, self.new_requests = [], 0, 0
         self.answer = None
     def __enter__(self): return self
@@ -37,13 +38,11 @@ class Connection:
         if 'requested_timeframe' in sql:
             self.answer = self.existing
         elif 'SELECT count(*)' in sql:
-            self.answer = {'n': 0 if 'bridge_requests' in sql else self.captures}
+            self.answer = {'n': self.requests if 'bridge_requests' in sql else self.captures}
         elif 'SELECT *' in sql and 'WHERE timeframe=' in sql:
             if self.cached and self.cached['timeframe'] == args[0]:
                 age = (NOW-datetime.fromisoformat(self.cached['result']['captured_at'])).total_seconds()
                 self.answer = self.cached if 0 <= age <= 900 else None
-        elif "created_at + interval '1 hour'" in sql:
-            self.answer = {'retry_at': NOW+timedelta(minutes=36), 'checked_at': NOW}
         elif 'INSERT INTO public.ai_collection_bridge_jobs' in sql:
             self.new_jobs += 1
             self.answer = {'id': args[0], 'timeframe': args[1], 'status': 'queued', 'result': None}
@@ -54,14 +53,13 @@ class Connection:
 
 
 def store_with(connection):
-    store = bridge.JobStore('synthetic-not-a-dsn', hourly_limit=2)
-    store.hourly_limit = 2
+    store = bridge.JobStore('synthetic-not-a-dsn')
     store.connect = Mock(return_value=connection)
     return store
 
 
 class StoreTests(unittest.TestCase):
-    def test_12minute_result_reused_before_capture_budget(self):
+    def test_12minute_result_reused_without_new_capture(self):
         saved = row(12)
         c = Connection(cached=saved)
         result = store_with(c).start(str(uuid4()), '12H')
@@ -75,19 +73,25 @@ class StoreTests(unittest.TestCase):
         self.assertIn("(result->>'captured_at')::timestamptz <= now()", queries)
         self.assertNotIn('Hourly capture', queries)
         self.assertFalse(any('SELECT count(*)' in sql and 'bridge_jobs' in sql for sql, _ in c.commands))
-    def test_stale_result_does_not_bypass_automatic_limit(self):
-        c = Connection(cached=row(16))
-        with self.assertRaises(bridge.BridgeError) as ctx:
-            store_with(c).start(str(uuid4()), '12H')
-        self.assertEqual(ctx.exception.status, 429)
-        self.assertEqual(c.new_jobs, 0)
-        self.assertEqual(c.new_requests, 0)
-        self.assertEqual(ctx.exception.retry_after_seconds, 2161)
+    def test_stale_result_creates_new_job_after_twelve_captures(self):
+        c = Connection(cached=row(16), captures=12)
+        result = store_with(c).start(str(uuid4()), '12H')
+        self.assertEqual(result['status'], 'queued')
+        self.assertEqual(c.new_jobs, 1)
+        self.assertEqual(c.new_requests, 1)
     def test_other_timeframe_is_not_reused(self):
         c = Connection(cached=row(1, '48H'))
-        with self.assertRaises(bridge.BridgeError):
-            store_with(c).start(str(uuid4()), '12H')
-        self.assertEqual(c.new_jobs, 0)
+        result = store_with(c).start(str(uuid4()), '12H')
+        self.assertEqual(result['status'], 'queued')
+        self.assertEqual(c.new_jobs, 1)
+    def test_new_requests_are_accepted_above_the_old_hourly_boundary(self):
+        for requests in (199, 200, 201, 1000):
+            with self.subTest(requests=requests):
+                c = Connection(requests=requests)
+                self.assertEqual(store_with(c).start(str(uuid4()), '12H')['status'], 'queued')
+                self.assertEqual(c.new_jobs, 1)
+                self.assertEqual(c.new_requests, 1)
+                self.assertFalse(any('SELECT count(*)' in sql for sql, _ in c.commands))
     def test_known_request_reuses_original_even_after_cache_expiry(self):
         saved = row(30)
         c = Connection(existing={**saved, 'requested_timeframe': '12H'})
@@ -100,15 +104,6 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(bridge.BridgeError) as ctx:
             store_with(c).start(str(uuid4()), '48H')
         self.assertEqual(ctx.exception.status, 409)
-    def test_retry_has_db_time_and_correct_order_for_reduced_limit(self):
-        c = Connection()
-        err = capture_limit_error(c, 2)
-        self.assertEqual(c.commands[0][1], (1,))
-        self.assertIn('ORDER BY created_at DESC', c.commands[0][0])
-        body, headers = error_response(err)
-        self.assertEqual(headers['Retry-After'], '2161')
-        self.assertEqual(body['error']['retry_at'], '2026-09-15T21:14:01Z')
-        self.assertEqual(body['error']['code'], 'rate_limited')
     def test_no_retry_timestamp_is_invented_if_missing(self):
         err = bridge.BridgeError('rate_limited', 'Request limit', 429)
         body, headers = error_response(err)
@@ -135,7 +130,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.saved = row(40)
         self.store = Mock()
         self.store.latest.return_value = bridge.envelope(self.saved)
-        self.store.start.side_effect = capture_limit_error(Connection(), 2)
+        self.store.start.side_effect = bridge.BridgeError('rate_limited', 'Upstream rate limit', 429)
         app = web.Application()
         bridge.register_collection_routes(app, store=self.store, token=TOKEN, enabled=True, start_worker=False)
         self.client = TestClient(TestServer(app))
@@ -165,11 +160,11 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 404)
         self.assertEqual((await response.json())['error']['code'], 'no_cached_result')
         self.store.start.assert_not_called()
-    async def test_rate_limit_http_contains_computed_retry_after(self):
+    async def test_legacy_rate_limit_response_does_not_invent_retry_time(self):
         response = await self.client.post('/api/collection/model1/jobs', headers=self.headers,
             json={'request_id': str(uuid4()), 'timeframe': '12H'})
         self.assertEqual(response.status, 429)
-        self.assertEqual(response.headers['Retry-After'], '2161')
-        self.assertEqual((await response.json())['error']['retry_at'], '2026-09-15T21:14:01Z')
+        self.assertNotIn('Retry-After', response.headers)
+        self.assertEqual((await response.json())['error']['code'], 'rate_limited')
 
 if __name__ == '__main__': unittest.main()
