@@ -137,14 +137,16 @@ class InstalledGateTests(unittest.TestCase):
             patch('model1_legend.prepare_legend_for_capture'),\
             patch.object(scanner,'analyze_heatmap_images') as ai:
             self.assertEqual(execution.run_task(task.main,'12H','job',directory),1)
-            ai.assert_not_called();page.screenshot.assert_called_once()
+            ai.assert_not_called();self.assertEqual(page.screenshot.call_count, 2)
+            page.reload.assert_called_once_with(wait_until="domcontentloaded", timeout=60000)
+            context.close.assert_called_once();browser.close.assert_called_once()
             report=json.loads((Path(directory)/'error.json').read_text())
             self.assertEqual(report['code'],'source_not_readable')
             self.assertEqual(report['capture_phase'],'render_readiness')
-            self.assertEqual(report['capture_operations'][-1]['phase'],'render_readiness')
-            self.assertEqual(report['capture_operations'][-1]['status'],'failed')
-            self.assertEqual(report['capture_operations'][-2]['phase'],'screenshot')
-            self.assertEqual(report['capture_operations'][-2]['status'],'completed')
+            failed=[op for op in report['capture_operations'] if op['status']=='failed']
+            self.assertTrue(failed);self.assertTrue(all(op['phase']=='render_readiness' for op in failed))
+            self.assertEqual(report['capture_operations'][-1]['phase'],'browser_close')
+            self.assertEqual(report['capture_operations'][-1]['status'],'completed')
             self.assertEqual(report['source_readiness']['reason'],reason)
             self.assertIsNone(report['usage']);self.assertFalse((Path(directory)/'result.json').exists())
             image,diagnostic=evidence_payload(directory,'12H')
