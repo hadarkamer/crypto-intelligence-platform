@@ -105,6 +105,10 @@ def prepare():
     install_hover(RUNTIME)
     from install_model3_rendering import install as install_rendering
     install_rendering(RUNTIME)
+    # The rendering suite pins the pre-reload capture AST. Run that unchanged
+    # contract before adding the separately tested common recovery wrapper.
+    subprocess.run([sys.executable,'-m','unittest','test_model3_rendering','-v'],
+        cwd=HERE,check=True,timeout=90)
     from install_capture_readiness import install_reload
     install_reload(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
@@ -113,7 +117,7 @@ def prepare():
         'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','test_capture_failure_diagnostics',
         'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
-        'test_failure_diagnostic_integration','test_model3_rendering','test_source_reload','-v'],
+        'test_failure_diagnostic_integration','test_source_reload','-v'],
         cwd=HERE,check=True,timeout=240)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,

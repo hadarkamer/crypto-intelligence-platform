@@ -57,7 +57,7 @@ def expand_capture_readiness(text):
     driver.body[start:finish]=[ast.Try(body=driver.body[start:finish],handlers=[handler],orelse=[],finalbody=[])]
     index=next(i+1 for i,n in enumerate(tree.body) if isinstance(n,ast.ImportFrom) and n.module=='__future__')
     tree.body.insert(index,ast.ImportFrom(module='capture_readiness',names=[ast.alias(name=n)
-        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source','geometry_from_state','record_source_reload')],level=0))
+        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source','geometry_from_state')],level=0))
     tree.body.insert(index+1,ast.ImportFrom(module='capture_failure_observer',
         names=[ast.alias(name='observe_capture_failure')],level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'
@@ -71,6 +71,10 @@ def install(runtime:Path):
 
 def expand_source_reload(source):
     tree = ast.parse(source)
+    index = next((i + 1 for i, node in enumerate(tree.body)
+                  if isinstance(node, ast.ImportFrom) and node.module == '__future__'), 0)
+    tree.body.insert(index, ast.ImportFrom(module='capture_readiness',
+                    names=[ast.alias(name='record_source_reload')], level=0))
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                     and n.name == 'capture_heatmaps')
     loops = [n for n in ast.walk(function) if isinstance(n, ast.For)

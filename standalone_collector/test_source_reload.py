@@ -55,6 +55,9 @@ class ReloadTests(unittest.TestCase):
                   _select_model_one=lambda p: calls.append(('model',)),
                   _select_symbol_mode=lambda p: calls.append(('symbol',)))
         exec(compile(expand(SOURCE), '<test-capture>', 'exec'), ns)
+        # The installed adapter imports the production evidence helper.
+        # Keep this decision-only test independent of filesystem operations.
+        ns['record_source_reload'] = lambda *a: calls.append(('record', a[1]))
         error = None
         result = None
         try:

@@ -45,8 +45,12 @@ class CaptureDiagnosticsTests(unittest.TestCase):
             report=json.loads(path.read_text())
             self.assertEqual(report['code'],'source_timeout')
             self.assertEqual(report['capture_phase'],operation)
-            self.assertEqual(report['capture_operations'][-1]['phase'],operation)
-            self.assertEqual(report['capture_operations'][-1]['status'],'failed')
+            failed=[item for item in report['capture_operations'] if item['status']=='failed']
+            self.assertEqual([item['phase'] for item in failed],[operation])
+            if hasattr(capture,'record_source_reload') and operation!='browser_launch':
+                context.close.assert_called_once();browser.close.assert_called_once()
+                self.assertEqual(report['capture_operations'][-1]['phase'],'browser_close')
+                self.assertEqual(report['capture_operations'][-1]['status'],'completed')
             self.assertLess(path.stat().st_size,4096)
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 execution.read_failure(path,'job',1)
