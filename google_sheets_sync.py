@@ -1269,6 +1269,8 @@ def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None)
             raise SheetReceiverBusy("SHEET_RECEIVER_BUSY")
         request = Request(_WEBHOOK_URL, data=json.dumps(envelope).encode("utf-8"),
                           headers={"Content-Type": "application/json"}, method="POST")
+        if _sheets_memory.active():
+            _sheets_memory.point("REQUEST_READY", {"request_envelope": envelope, "request_bytes": request.data})
         started_at = time.monotonic()
         diagnostic = {"http_status": None, "response_stage": "REQUEST_OR_REDIRECT",
                       "response_host": None, "content_type": None, "response_bytes": None}
@@ -1288,6 +1290,8 @@ def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None)
                 # The receiver emits no raw texts; this bound prevents accidental
                 # HTML or arbitrary download responses from becoming audit data.
                 raw = response.read(512_001)
+                if _sheets_memory.active():
+                    _sheets_memory.point("ACK_READ", {"ack_raw": raw, "request_bytes": request.data})
                 diagnostic["response_bytes"] = len(raw)
             if len(raw) > 512_000:
                 raise ValueError("SHEET_AUDIT_RESPONSE_TOO_LARGE")
