@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
 import google_sheets_sync
+import research_sheets_memory_investigation as _sheets_memory
 import research_sheet_publication as publication
 import research_outcome_publication as outcome_publication
 import research_current_publication as current_publication
@@ -108,6 +109,8 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
             item['source_time_utc'] = source_time.isoformat() if source_time else None
         payload = _json(item)
         records[(sheet, row_key)] = (sheet, row_key, payload, hashlib.sha256(payload.encode()).hexdigest())
+    if _sheets_memory.active():
+        _sheets_memory.point('STAGE_RECORDS', {'stage_records': records, 'upserts': upserts})
     if not records:
         return current_outcomes
     with conn.cursor() as cur:
@@ -283,6 +286,8 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
                 if not rows:
                     break
                 summary['claimed'] += len(rows)
+                if _sheets_memory.active():
+                    _sheets_memory.point('DRAIN_BATCH', {'drain_rows': rows})
                 delivered = google_sheets_sync.deliver_now({'kind':'research_sheet_upserts','upserts':[row['payload'] for row in rows]}, attempts=1)
                 with _connect(database_url) as conn:
                     for row in rows:

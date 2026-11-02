@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import time
 import google_sheets_sync
 import research_sheet_outbox
+import research_sheets_memory_investigation as _sheets_memory
 
 VERSION = "delivered-sheet-fingerprints-v1"
 MAX_EVENTS = research_sheet_outbox.current_publication.TELEGRAM_MAX_ROWS
@@ -74,6 +75,8 @@ class SheetReconciler:
         if len(rows) > MAX_EVENTS:
             raise ValueError("AUDIT_POPULATION_EXCEEDS_CAPACITY")
         self.expected = {str(row["event_fingerprint"]): dict(row) for row in rows}
+        if _sheets_memory.active():
+            _sheets_memory.point('AUDIT_BEGIN', {'audit_rows': rows, 'audit_expected': self.expected})
         if len(self.expected) != len(rows):
             raise ValueError("DUPLICATE_DATABASE_EVENT_FINGERPRINT")
         self.seen.clear()
@@ -120,6 +123,8 @@ class SheetReconciler:
         self.unexpected.update(unexpected)
         self.next_row = page["next_row"]
         self.normalized += normalized
+        if _sheets_memory.active():
+            _sheets_memory.point('CONSUME_DONE', {'audit_page': page, 'audit_seen': self.seen, 'audit_unexpected': self.unexpected})
         return bool(page["complete"])
 
     def _record_failure(self, exc: Exception, *, phase: str, reset: bool) -> str:
@@ -225,6 +230,8 @@ class SheetReconciler:
             self.runtime["status"] = "SCANNING"
             phase = "READ"
             page = google_sheets_sync.read_telegram_audit_page(start_row=self.next_row, last_row=self.last_row)
+            if _sheets_memory.active():
+                _sheets_memory.point('AUDIT_PAGE', {'audit_page': page, 'audit_expected': self.expected})
             phase = "CONSUME"
             if self.scan_deadline is not None and time.monotonic() >= self.scan_deadline:
                 raise ValueError("SHEET_AUDIT_CYCLE_EXPIRED")
