@@ -363,6 +363,102 @@ class Tests(unittest.TestCase):
         self.assertIs(caught.exception, failure)
         self.assertEqual(len(self.worker.calls), 2)
 
+    def test_prospective_class_unbound_method_and_instance_callable_preserve_binding(self):
+        self.owner.restore()
+        calls = []
+        answer = object()
+        failure = RuntimeError("SECRET_SAMPLING")
+        class Service:
+            def run_once(service_self, *args, **kwargs):
+                calls.append((service_self, args, kwargs))
+                if kwargs.get("fail"):
+                    raise failure
+                return answer
+        def fetcher(*args, **kwargs):
+            calls.append(("fetch", args, kwargs))
+            return answer
+        prospective_worker = SimpleNamespace(_price_fetcher=fetcher)
+        original_method = Service.__dict__["run_once"]
+        service = Service()
+        self.owner = m.Investigation(
+            self.worker, google=self.google, clock=lambda: self.clock[0], process=self.process,
+            spawn=self.spawned.append,
+            targets=[("prospective_prices", prospective_worker, "_price_fetcher"),
+                     ("prospective_sampling", Service, "run_once")])
+        self.owner.attach()
+        m.legacy._OWNER = self.owner
+        self.assertIs(service.run_once(1, key=answer), answer)
+        self.assertIs(Service.run_once(service, 2), answer)
+        self.assertIs(prospective_worker._price_fetcher(3, key=answer), answer)
+        with self.assertRaises(RuntimeError) as caught:
+            service.run_once(fail=True)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(calls[0], (service, (1,), {"key": answer}))
+        self.assertEqual(calls[1], (service, (2,), {}))
+        self.assertEqual(calls[2], ("fetch", (3,), {"key": answer}))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(self.owner.background["prospective_sampling"],
+                         dict(started=3, completed=3, active=0, revision=6))
+        self.owner.restore()
+        self.assertIs(Service.__dict__["run_once"], original_method)
+        self.assertIs(prospective_worker._price_fetcher, fetcher)
+        self.assertEqual(self.samples, 0)
+
+    def test_default_seven_fixed_targets_resolve_dotted_owners_without_async_worker(self):
+        self.owner.restore()
+        m._OWNER = None
+        async def async_worker():
+            return 5
+        def sync(*args, **kwargs):
+            return 8
+        class Service:
+            def run_once(self, *args, **kwargs):
+                return 9
+        prospective_worker = SimpleNamespace(_price_fetcher=sync, run_once=async_worker)
+        fake_modules = {
+            "research_watch_scan_measurement_worker": SimpleNamespace(run_once=sync),
+            "research_watch_scan_formula_worker": SimpleNamespace(run_once=sync, register_catalog=sync),
+            "research_watch_scan_formula_timeframe_worker": SimpleNamespace(run_once=sync, register_catalog=sync),
+            "research_prospective_anchor_worker": SimpleNamespace(WORKER=prospective_worker),
+            "research_prospective_anchor_store": SimpleNamespace(ProspectiveAnchorService=Service),
+        }
+        old_import = m.importlib.import_module
+        m.importlib.import_module = fake_modules.__getitem__
+        try:
+            from datetime import datetime, timezone
+            result = m.install(worker=self.worker, google=self.google,
+                               process=lambda: {"status": "COMPLETE"},
+                               clock=lambda: self.clock[0], spawn=self.spawned.append,
+                               now=datetime(2026, 11, 2, 10, tzinfo=timezone.utc), pin_paths={})
+            self.assertEqual(len(result["background_installed"]), 7)
+            self.assertEqual(result["background_missing"], [])
+            self.assertIs(prospective_worker.run_once, async_worker)
+            self.assertEqual(Service().run_once(), 9)
+            self.assertEqual(prospective_worker._price_fetcher(), 8)
+            self.assertTrue(result["background_counts_as_of_health_read"])
+            self.assertTrue(result["background_work_may_still_be_running"])
+            self.assertEqual(len(m.SOURCE_NAMES), 15)
+            m._OWNER.restore()
+            self.assertIs(prospective_worker._price_fetcher, sync)
+            self.assertIs(prospective_worker.run_once, async_worker)
+        finally:
+            if m._OWNER is not None:
+                m._OWNER.restore()
+            m.importlib.import_module = old_import
+
+    def test_async_callable_is_refused_by_sync_background_wrapper(self):
+        self.owner.restore()
+        async def async_business():
+            return 4
+        owner = SimpleNamespace(run_once=async_business)
+        self.owner = m.Investigation(
+            self.worker, google=self.google, clock=lambda: self.clock[0],
+            process=self.process, spawn=self.spawned.append,
+            targets=[("prospective_sampling", owner, "run_once")])
+        self.owner.attach()
+        self.assertIs(owner.run_once, async_business)
+        self.assertIn("prospective_sampling", self.owner.missing_labels)
+
 
 if __name__ == "__main__":
     unittest.main()

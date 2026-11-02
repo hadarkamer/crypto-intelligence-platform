@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import functools
 import hashlib
 import importlib
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -33,6 +34,8 @@ TARGET_SPECS = (
     ("watch_scan_timeframe", "research_watch_scan_formula_timeframe_worker", "run_once"),
     ("formula_catalog", "research_watch_scan_formula_worker", "register_catalog"),
     ("timeframe_catalog", "research_watch_scan_formula_timeframe_worker", "register_catalog"),
+    ("prospective_prices", "research_prospective_anchor_worker", "WORKER._price_fetcher"),
+    ("prospective_sampling", "research_prospective_anchor_store", "ProspectiveAnchorService.run_once"),
 )
 SOURCE_NAMES = (
     "main.py", "research_snapshot_sync_worker.py", "research_sheet_outbox.py",
@@ -42,6 +45,7 @@ SOURCE_NAMES = (
     "research_scalar_sync_memory_investigation.py",
     "research_watch_scan_measurement_worker.py", "research_watch_scan_formula_worker.py",
     "research_watch_scan_formula_timeframe_worker.py",
+    "research_prospective_anchor_worker.py", "research_prospective_anchor_store.py",
 )
 _OWNER = None
 _EXTRA_LABELS = {"TRANSPORT_ENTRY", "TRANSPORT_RETURN", "BACKGROUND_START", "BACKGROUND_END"}
@@ -146,7 +150,7 @@ class Investigation(previous.Investigation):
                 continue
             try:
                 original = getattr(owner, attribute)
-                if not callable(original):
+                if not callable(original) or inspect.iscoroutinefunction(original):
                     continue
                 def make_wrapper(fn, static_label):
                     @functools.wraps(fn)
@@ -472,6 +476,10 @@ class Investigation(previous.Investigation):
                          tail_start_failed=self.tail_start_failed, restored=self.restored,
                          background_installed=sorted(self.installed_labels), background_missing=sorted(self.missing_labels),
                          background_counts={name: dict(row) for name, row in self.background.items()},
+                         background_counts_as_of_health_read=True,
+                         background_work_may_still_be_running=True,
+                         window_finalized_scope="RECORD_WRITES_DRAINED_AND_WRAPPERS_RESTORED_NOT_BACKGROUND_BUSINESS_COMPLETION",
+                         window_analysis_context="PER_RECORD_COPIED_ACTIVITY_COUNTS_HEALTH_COUNTERS_MAY_ADVANCE_AFTER_RESTORE",
                          activity_revision=self.activity_revision, background_coverage_complete=False,
                          other_workers_unknown=True, preinstallation_calls_unknown=True,
                          background_labels_may_be_nested=True,
@@ -502,7 +510,12 @@ def install(*, worker=None, google=None, targets=None, process=None, clock=time.
             targets = []
             for label, module, attribute in TARGET_SPECS:
                 try:
-                    targets.append((label, importlib.import_module(module), attribute))
+                    # Paths are fixed source constants, never business input.
+                    target_owner = importlib.import_module(module)
+                    parts = attribute.split(".")
+                    for part in parts[:-1]:
+                        target_owner = getattr(target_owner, part)
+                    targets.append((label, target_owner, parts[-1]))
                 except BaseException:
                     pass
         owner = Investigation(worker, google=google, targets=targets, duration=duration,
