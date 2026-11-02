@@ -419,3 +419,19 @@ def verify_saved_render(page,timeframe,heatmap_model,state,image_path,diagnostic
         error._model1_source_network=network
         raise error
     return verdict
+
+
+def record_source_reload(output, timeframe, error):
+    # Keep the rejected PNG and its existing verdict before the normal filename
+    # is reused by the second capture. Never keep credentials or exception text.
+    output = Path(output)
+    failed = output / 'before-reload'
+    failed.mkdir(exist_ok=True)
+    for suffix in ('.png', '.render.json'):
+        original = output / f'coinglass_btc_heatmap_{timeframe}{suffix}'
+        if original.is_file():
+            (failed / original.name).write_bytes(original.read_bytes())
+    (output / 'reload.json').write_text(json.dumps({
+        'reload_requested': 1, 'timeframe': timeframe,
+        'trigger': error.code, 'phase': error._model1_capture_phase,
+    }))

@@ -57,7 +57,7 @@ def expand_capture_readiness(text):
     driver.body[start:finish]=[ast.Try(body=driver.body[start:finish],handlers=[handler],orelse=[],finalbody=[])]
     index=next(i+1 for i,n in enumerate(tree.body) if isinstance(n,ast.ImportFrom) and n.module=='__future__')
     tree.body.insert(index,ast.ImportFrom(module='capture_readiness',names=[ast.alias(name=n)
-        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source','geometry_from_state')],level=0))
+        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source','geometry_from_state','record_source_reload')],level=0))
     tree.body.insert(index+1,ast.ImportFrom(module='capture_failure_observer',
         names=[ast.alias(name='observe_capture_failure')],level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'
@@ -67,3 +67,59 @@ def install(runtime:Path):
     path=runtime/'market_vision/coinglass_heatmap_capture.py'
     text=expand_capture_readiness(path.read_text());compile(text,str(path),'exec')
     path.write_text(text,encoding='utf-8')
+
+
+def expand_source_reload(source):
+    tree = ast.parse(source)
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == 'capture_heatmaps')
+    loops = [n for n in ast.walk(function) if isinstance(n, ast.For)
+             and ast.unparse(n.target) == 'timeframe'
+             and ast.unparse(n.iter) == 'timeframes']
+    if len(loops) != 1:
+        raise RuntimeError('Unexpected capture loop; reload adaptation not applied')
+    loop = loops[0]
+    retry = ast.parse('''
+for _capture_attempt in range(2):
+    try:
+        pass
+    except Exception as _capture_error:
+        if (_capture_attempt or getattr(_capture_error, 'code', None) != 'source_not_readable'
+            or getattr(_capture_error, '_model1_capture_phase', None) != 'render_readiness'
+            or getattr(_capture_error, '_model1_source_readiness', {}).get('reason') == 'request-limit'):
+            raise
+        record_source_reload(out, timeframe, _capture_error)
+        with capture_operation('navigation'):
+            page.reload(wait_until='domcontentloaded', timeout=60000)
+        with capture_operation('overlay_dismissal'):
+            _dismiss_capture_blockers(page)
+        with capture_operation('wait_for_chart'):
+            _wait_for_heatmap(page)
+        with capture_operation('model_selection'):
+            _select_model_one(page)
+        with capture_operation('symbol_selection'):
+            _select_symbol_mode(page)
+    else:
+        break
+''').body[0]
+    retry.body[0].body = loop.body
+    loop.body = [retry]
+    # Existing cleanup must also run if the second capture or reload fails.
+    driver = next(n for n in function.body if isinstance(n, ast.With)
+                  and ast.unparse(n.items[0].context_expr) == 'sync_playwright()')
+    guarded = [n for n in driver.body if isinstance(n, ast.Try)]
+    closers = [n for n in driver.body if isinstance(n, ast.With)
+               and ast.unparse(n.items[0].context_expr) in
+               ("capture_operation('context_close')", "capture_operation('browser_close')")]
+    if len(guarded) != 1 or len(closers) != 2 or guarded[0].finalbody:
+        raise RuntimeError('Unexpected capture cleanup; reload adaptation not applied')
+    guarded[0].finalbody = [ast.Try(body=[closers[0]], handlers=[], orelse=[], finalbody=[closers[1]])]
+    driver.body = [n for n in driver.body if n not in closers]
+    return ast.unparse(ast.fix_missing_locations(tree)) + '\n'
+
+
+def install_reload(runtime: Path):
+    path = runtime / "market_vision/coinglass_heatmap_capture.py"
+    text = expand_source_reload(path.read_text())
+    compile(text, str(path), "exec")
+    path.write_text(text, encoding="utf-8")

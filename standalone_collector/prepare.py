@@ -97,7 +97,7 @@ def prepare():
     from install_store_diagnostics import install as install_store_diagnostics
     install_store_diagnostics(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
-        'test_capture_diagnostics','test_capture_readiness','test_source_login_required','test_timeout_retention',
+        'test_capture_diagnostics','test_source_login_required','test_timeout_retention',
         'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','-v'],
         cwd=HERE,check=True,timeout=90)
@@ -105,13 +105,15 @@ def prepare():
     install_hover(RUNTIME)
     from install_model3_rendering import install as install_rendering
     install_rendering(RUNTIME)
+    from install_capture_readiness import install_reload
+    install_reload(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
         'test_response_shape','test_capture_diagnostics','test_capture_readiness',
         'test_source_login_required','test_timeout_retention','test_source_compatibility',
         'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','test_capture_failure_diagnostics',
         'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
-        'test_failure_diagnostic_integration','test_model3_rendering','-v'],
+        'test_failure_diagnostic_integration','test_model3_rendering','test_source_reload','-v'],
         cwd=HERE,check=True,timeout=240)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -129,7 +131,8 @@ def prepare():
         'capture_diagnostics':'bounded per-operation duration and failure phase',
         'failure_diagnostics':'capture-failure.v1; bounded original-observation facts and fitted-grid residuals',
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
-        'render_gate':'selected-map data/loading/blur checks and stable geometry around one retained PNG',
+        'render_gate':'existing source checks; one page reload after a source-readiness failure, then original validation',
+        'source_reload':'one attempt per model/timeframe; no login, request-limit, numeric or AI retry',
         'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
