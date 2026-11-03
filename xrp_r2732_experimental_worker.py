@@ -116,7 +116,10 @@ class R2732Worker:
             except Exception as exc:
                 self.runtime.update(ready=False, state="EVIDENCE_UNAVAILABLE",
                                     last_error_type=type(exc).__name__)
-                print(f"[r2732] evidence unavailable type={type(exc).__name__}", flush=True)
+                code = exc.code if isinstance(exc, hyperliquid.HyperliquidSourceError) else None
+                self.runtime["last_source_error_code"] = code
+                print(f"[r2732] evidence unavailable stage={self.runtime.get('stage')} "
+                      f"type={type(exc).__name__} code={code}", flush=True)
             await asyncio.sleep(10)
 
     def position_cache(self, active):
@@ -128,6 +131,7 @@ class R2732Worker:
         raise ValueError('Position source provenance is missing or unsupported')
 
     async def monitor(self, scope, state, closed_end):
+        self.runtime["stage"] = "MONITOR"
         active = state.get("active")
         # Bounded recovery after an outage; no new entry while recovery is incomplete.
         if active and active.get("monitor_status") != "AMBIGUOUS":
@@ -154,13 +158,18 @@ class R2732Worker:
         pending = next((i for i in state["intents"] if i["status"] == "PENDING"), None)
         if not pending or not state.get("active") or pending["position_id"] != state["active"]["position_id"]:
             return
+        vetted_coverage_end = None
         if pending and state.get("active"):
             position = state["active"]
             if self.clock() < ms(pending["expires_at"]):
                 # Live extrema only veto stale notification; they never resolve
                 # a position or enter historical signal features.
                 end = self.clock() // MINUTE * MINUTE + MINUTE
-                rows = await asyncio.to_thread(self.cache.fetch, "XRP", ms(position["entry_at"]), end)
+                start = ms(position["entry_at"])
+                self.runtime["stage"] = "PRE_SEND_SOURCE"
+                rows = await asyncio.to_thread(self.cache.fetch, "XRP", start, end)
+                if [r[0] for r in rows] != list(range(start, end, MINUTE)):
+                    raise ValueError("Incomplete pre-send minute coverage")
                 levels = signal.build_levels(position["entry_price"])
                 if any(r[2] >= levels["stop_loss"] or
                        (position["entry_price"] - r[3]) / levels["original_risk_distance"] >= 2.0
@@ -169,17 +178,33 @@ class R2732Worker:
                                   reason="BARRIER_OR_LOCK_ALREADY_OBSERVED_BEFORE_SEND")
                     self.runtime["last_delivery_status"] = "BARRIER_OR_LOCK_ALREADY_OBSERVED_BEFORE_SEND"
                     return
+                if self.clock() // MINUTE * MINUTE + MINUTE != end:
+                    # A slow fetch crossed into an unobserved live minute.
+                    # Retry with fresh coverage; never extend the original TTL.
+                    self.runtime["last_delivery_status"] = "WAITING_FRESH_PRE_SEND_COVERAGE"
+                    return
+                vetted_coverage_end = end
+        self.runtime["stage"] = "DELIVERY_CLAIM"
         intent = await self.db(store.claim_pending, scope, dt(self.clock()),
                                expected_position_id=pending["position_id"])
         if not intent:
             return
         message_id = None
+        error_type = None
         if not self.allowed(chat_id) or self.clock() >= ms(intent["expires_at"]):
             terminal = "FAILED"
+        elif vetted_coverage_end != self.clock() // MINUTE * MINUTE + MINUTE:
+            # Waiting for the durable claim can cross into a live minute that
+            # was not vetted. The claimed attempt must never be reset/retried.
+            terminal = "FAILED"
+            error_type = "PRE_SEND_COVERAGE_EXPIRED_DURING_CLAIM"
         else:
             try:
+                self.runtime["stage"] = "TELEGRAM_SEND"
+                remaining_seconds = (ms(intent["expires_at"]) - self.clock()) / 1000
                 message = await asyncio.wait_for(self.bot.send_message(
-                    chat_id=chat_id, text=intent["text"], parse_mode="HTML"), timeout=20)
+                    chat_id=chat_id, text=intent["text"], parse_mode="HTML"),
+                    timeout=min(20, remaining_seconds))
                 message_id = getattr(message, "message_id", None)
                 terminal = "DELIVERED" if type(message_id) is int and message_id > 0 else "UNKNOWN"
             except asyncio.CancelledError:
@@ -187,7 +212,8 @@ class R2732Worker:
             except Exception as exc:
                 terminal = "FAILED" if type(exc).__name__ in {"BadRequest", "Forbidden"} else "UNKNOWN"
         acknowledged = await self.db(store.finish_attempt, scope, intent["intent_id"], intent["attempt_token"],
-                                     terminal, dt(self.clock()), message_id=message_id)
+                                     terminal, dt(self.clock()), message_id=message_id,
+                                     error_type=error_type)
         if not acknowledged:
             raise RuntimeError("R2732 delivery acknowledgement not persisted")
         self.runtime["last_delivery_status"] = terminal
@@ -209,18 +235,22 @@ class R2732Worker:
             return
         scope = subscription_scope(chat_id)
         allowed = self.allowed(chat_id)
+        self.runtime["stage"] = "SCOPE_STATE"
         if scope not in self.scopes:
             if not allowed:
                 return
             state = await self.db(store.initialize_scope, scope, dt(self.clock()), migrate_all_prices=True)
             self.runtime["source_migration"] = state.get("all_prices_source_migration")
             self.scopes.add(scope)
-        else:
-            # Cheap polling is minute-aligned. Delivery retries never resend IN_FLIGHT.
-            minute = self.clock() // MINUTE
-            if self.last_poll_minute == (scope, minute):
-                return
-            state = await asyncio.to_thread(store.snapshot, scope)
+        # Pending delivery has its own short run-loop cadence, before both
+        # minute gating and potentially slow/failing historical monitoring.
+        # The original expiry, live barrier veto and durable claim still apply.
+        # IN_FLIGHT/UNKNOWN intents are never retried by deliver().
+        await self.deliver(scope, chat_id)
+        minute = self.clock() // MINUTE
+        if self.last_poll_minute == (scope, minute):
+            return
+        state = await asyncio.to_thread(store.snapshot, scope)
         current = self.clock()
         closed_end = current - current % MINUTE
         self.last_poll_minute = (scope, current // MINUTE)
@@ -229,7 +259,6 @@ class R2732Worker:
         if not allowed:
             self.runtime.update(state="WATCH_OFF")
             return
-        await self.deliver(scope, chat_id)
         decision = signal.last_closed_decision_ms(self.clock())
         entry = decision + MINUTE
         self.runtime["next_decision_at"] = dt(decision + 15 * MINUTE).isoformat()
@@ -238,6 +267,7 @@ class R2732Worker:
         starts = signal.required_history_start_ms(decision)
         if not self.cache.rows["XRP"]:
             self.runtime.update(state="WARMING_HISTORY")
+            self.runtime["stage"] = "SIGNAL_SOURCE"
             await self.signal_rows(decision)
         if decision <= ms(state["activated_at"]) or (
                 state.get("decision_cursor") and decision <= ms(state["decision_cursor"])):
@@ -256,6 +286,7 @@ class R2732Worker:
         if reason:
             result = await self.db(store.record_no_signal, scope, dt(decision), dt(self.clock()), reason=reason)
         else:
+            self.runtime["stage"] = "SIGNAL_SOURCE"
             rows = await self.signal_rows(decision)
             evaluation = signal.evaluate_signal(rows, decision)
             evaluation.update(formula_id=FORMULA_ID, price_source=store.PRICE_SOURCE, source_contract_version=store.SOURCE_CONTRACT_VERSION)
@@ -264,6 +295,7 @@ class R2732Worker:
                                       reason=evaluation.get("reason", "NO_MATCH"))
             else:
                 # This row may be unfinished: ONLY its immutable OPEN is used.
+                self.runtime["stage"] = "ENTRY_SOURCE"
                 entry_rows = await asyncio.to_thread(self.cache.fetch, "XRP", entry, entry + MINUTE)
                 if len(entry_rows) != 1 or entry_rows[0][0] != entry:
                     raise ValueError("Entry open unavailable")
@@ -272,9 +304,11 @@ class R2732Worker:
                     return
                 result = await self.db(store.reserve_signal, scope, dt(decision), dt(entry), price,
                                        evaluation, dt(self.clock()), text=render_alert(price, entry))
+                # Prioritize the short-lived intent. deliver() independently
+                # checks all entry-to-live extrema before claiming the send.
+                await self.deliver(scope, chat_id)
                 state = await asyncio.to_thread(store.snapshot, scope)
                 await self.monitor(scope, state, self.clock() // MINUTE * MINUTE)
-                await self.deliver(scope, chat_id)
         self.runtime.update(state=result["status"], last_decision_at=dt(decision).isoformat())
         self.cache.prune({**starts, "BTC": decision})
         state = await asyncio.to_thread(store.snapshot, scope)
