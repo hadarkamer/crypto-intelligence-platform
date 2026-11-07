@@ -1,0 +1,119 @@
+{
+  "repository": "hadarkamer/crypto-intelligence-platform",
+  "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+  "files": [
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_capture_readiness.py",
+      "blob": "aee7c1344b464e4285daa0231614528188539253",
+      "bytes": 16141,
+      "ends_newline": true,
+      "verified_blob": "aee7c1344b464e4285daa0231614528188539253",
+      "verified_bytes": 16141,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "ReadinessTests",
+          "test_methods": 9
+        },
+        {
+          "name": "InstalledGateTests",
+          "test_methods": 3
+        },
+        {
+          "name": "RenderDOMTests",
+          "test_methods": 9
+        }
+      ]
+    },
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_execution_progress.py",
+      "blob": "538d8607a809828371e734f9a973d606de27d7ff",
+      "bytes": 4712,
+      "ends_newline": true,
+      "verified_blob": "538d8607a809828371e734f9a973d606de27d7ff",
+      "verified_bytes": 4712,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "ExecutionProgressTests",
+          "test_methods": 5
+        }
+      ]
+    },
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_heatmap_models.py",
+      "blob": "e71bbc3e941e3d3c886374b863463d56b03a407c",
+      "bytes": 7902,
+      "ends_newline": true,
+      "verified_blob": "e71bbc3e941e3d3c886374b863463d56b03a407c",
+      "verified_bytes": 7902,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "FakeResult",
+          "test_methods": 0
+        },
+        {
+          "name": "FakeConnection",
+          "test_methods": 0
+        },
+        {
+          "name": "ModelTests",
+          "test_methods": 14
+        }
+      ]
+    },
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_response_shape.py",
+      "blob": "2ab128f4dcd6322cc1f77ace1ca31d25919622b5",
+      "bytes": 3013,
+      "ends_newline": true,
+      "verified_blob": "2ab128f4dcd6322cc1f77ace1ca31d25919622b5",
+      "verified_bytes": 3013,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "ResponseShapeTests",
+          "test_methods": 4
+        }
+      ]
+    },
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_source_login_required.py",
+      "blob": "944f30e84ee95dfbe78a2b4f9f0340aabd5d6633",
+      "bytes": 6368,
+      "ends_newline": true,
+      "verified_blob": "944f30e84ee95dfbe78a2b4f9f0340aabd5d6633",
+      "verified_bytes": 6368,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "SourceLoginTests",
+          "test_methods": 11
+        }
+      ]
+    },
+    {
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "path": "standalone_collector/test_timeout_retention.py",
+      "blob": "86d61572a08ef207a0118044b30d9c664ff83b3d",
+      "bytes": 8065,
+      "ends_newline": true,
+      "verified_blob": "86d61572a08ef207a0118044b30d9c664ff83b3d",
+      "verified_bytes": 8065,
+      "verified": true,
+      "test_classes": [
+        {
+          "name": "TimeoutRetentionTests",
+          "test_methods": 7
+        }
+      ]
+    }
+  ],
+  "verified": true
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "image": "python:3.12.12-slim-bookworm",
+    "index_digest": "sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c",
+    "computed_sha256": "593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c",
+    "amd64": [
+      "sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301"
+    ]
+  },
+  {
+    "image": "node:24.10.0-bookworm-slim",
+    "index_digest": "sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9",
+    "computed_sha256": "b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9",
+    "amd64": [
+      "sha256:a22207f28e3e25751471503a7c3859a88adb5c71d8992304f77b4ab9ba48458a"
+    ]
+  },
+  {
+    "image": "postgres:16.10-bookworm",
+    "index_digest": "sha256:38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74",
+    "computed_sha256": "38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74",
+    "amd64": [
+      "sha256:94f23d40fdaf5e60cb2fd8a98c22f02a7b8724949f310d95a0ddf075e8c8b208"
+    ]
+  }
+]

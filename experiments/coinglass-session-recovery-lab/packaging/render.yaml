@@ -1,0 +1,18 @@
+# Proposed temporary test worker only. Apply solely to the approved test branch.
+# Billing deadline/deletion is an external operator responsibility: 24h maximum.
+services:
+  - type: worker
+    name: coinglass-session-recovery-lab
+    runtime: docker
+    repo: https://github.com/hadarkamer/crypto-intelligence-platform
+    branch: lab/coinglass-session-recovery-20261107
+    region: oregon
+    plan: 1c-2g
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    dockerfilePath: ./experiments/coinglass-session-recovery-lab/packaging/Dockerfile
+    dockerContext: ./experiments/coinglass-session-recovery-lab
+    maxShutdownDelaySeconds: 30
+
+previews:
+  generation: 'off'

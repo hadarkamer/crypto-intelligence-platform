@@ -1,0 +1,15 @@
+{
+  "suite": "session_handoff",
+  "tests": 10,
+  "failures": 0,
+  "errors": 0,
+  "passed": true,
+  "elapsed_seconds": 1.426,
+  "environment": "local unit and PTY only",
+  "dummy_only": true,
+  "source_requests": 0,
+  "browser_launches": 0,
+  "postgres_launches": 0,
+  "ai_calls": 0,
+  "scope": "new bounded TTY reader and synthetic full Cookie header handoff; not Render or account validation"
+}

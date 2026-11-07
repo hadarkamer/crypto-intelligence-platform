@@ -1,0 +1,2 @@
+revoke all on function public.tg_legacy_cycle_first_close() from public, anon, authenticated;
+revoke all on function public.v2_manual_payload_fingerprint(uuid,timestamptz,text,text,text,jsonb,timestamptz) from public, anon, authenticated;

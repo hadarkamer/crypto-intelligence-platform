@@ -1,0 +1,1 @@
+REVOKE ALL ON FUNCTION public.tg_activity_touch_project() FROM PUBLIC, anon, authenticated;

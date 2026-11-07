@@ -1,0 +1,1540 @@
+{
+  "format": "native-serial-inputs.v1",
+  "app_ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+  "collector_ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+  "serial_lab_ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+  "pinned_inputs": [
+    {
+      "path": "app/.github/labs/btc-full-flow/README.md",
+      "algorithm": "git-blob-sha1",
+      "digest": "b92b5cc4c7819cde80d0d6e0a97d203b9aa5458c"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/backend-tail.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "2f1803926b8f3681f32d1a1c39fb35357ceaf119"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/browser.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "bb5deb145cac7f4c46abdfc73319c57983c77122"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/build-ui.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "e3148c37abdafa8fe71064dd6c0f481ed2c84362"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/prepare.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "8b076495d9b48b5bb00efdc8b01c7aefe19b41c5"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/run.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "3d8612558d9bde7a86d66540c82d87ae7fec1566"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/serve.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "4af6bbf0ee393d911045fcdb6a56252ffe05f9bc"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/sitecustomize.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "eb24e87faa408a3a3139f5f8ed3f7bad39df1a37"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/transport.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "300a44cb8c9e504e5970fcb628d03d55e0ce85d3"
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/ui.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "94caa2f9a63be73fcfcff4176e7afc5be3df2eb7"
+    },
+    {
+      "path": "app/.github/labs/coinglass-cadence.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "ed9b1d84afd1e56e035ea01224ab45b2fdb38231"
+    },
+    {
+      "path": "app/.github/labs/model3-real-queue/prepare_lab.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "ee89a33c679aa5dce785f65cf1dc892e72d353da"
+    },
+    {
+      "path": "app/.github/operations/coinglass-six-hour-cadence.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4fec932d713fb5b18ba576cd5ddd38369740d7cd"
+    },
+    {
+      "path": "app/.github/sql/legacy-dry-run-bootstrap.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ebfece50aeb42576857a4626c4de9fc41dd27fe5"
+    },
+    {
+      "path": "app/.github/sql/live-september-clone-function-fixture.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "e427b5aaa776d16baa7edacd90cebfc32ffc5c14"
+    },
+    {
+      "path": "app/.github/sql/live-september-schema-fixture.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "0fcd02fd820f4f0a6287d254a9d783f4b079863a"
+    },
+    {
+      "path": "app/.github/tests/coinglass-collect-core.test.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "5b5254b14a2f5173e7ad3f07f465777a4ec6c43d"
+    },
+    {
+      "path": "app/.github/tests/coinglass-models.test.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "d3ea4035589303d17070440d00786ad51ddcbd77"
+    },
+    {
+      "path": "app/bun.lock",
+      "algorithm": "git-blob-sha1",
+      "digest": "ebc2fea7c77d51f5cdd5b0fa6fd7b14a7488e0a9"
+    },
+    {
+      "path": "app/package.json",
+      "algorithm": "git-blob-sha1",
+      "digest": "41e2fb2200fc39234d9d6a1ff5ba63cd292522b5"
+    },
+    {
+      "path": "app/scripts/collection-autofill-relay.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "b5972e1a81fe333b23018e1c28f275571265f7f5"
+    },
+    {
+      "path": "app/src/components/LtrNumeric.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "468c97fa6ff0fe41aba45617fe9542005bcb2a61"
+    },
+    {
+      "path": "app/src/components/PreviousAnswer.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "de184ed1b1ec7b67171297b42e789f2bf8dc2575"
+    },
+    {
+      "path": "app/src/components/ReadOnlyStage.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "9f7d85723fa487af6cbd7ee501c61fbbfbe380b3"
+    },
+    {
+      "path": "app/src/components/RichTextView.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "ff3e49781b22fe50a326c0b34bc43a7d847cf922"
+    },
+    {
+      "path": "app/src/components/StructuredTables.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "4bbb07f748bedc629cf61e42e1aad355219c061f"
+    },
+    {
+      "path": "app/src/components/ui/button-variants.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "8dcf7d98b211c328dc0dd0de07258c5a647d2bb4"
+    },
+    {
+      "path": "app/src/components/ui/button.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "04c0142fcf36fc245ad5356b4be86f73113e9976"
+    },
+    {
+      "path": "app/src/components/ui/checkbox.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "f01d47c865e9ce28610b16bfa4021a88beebec3e"
+    },
+    {
+      "path": "app/src/components/ui/input.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "7db524115c08e80b10d5282d1bb504b06b238d17"
+    },
+    {
+      "path": "app/src/components/ui/select.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "3fdfc929eb90d4f33e2591e94cdfb2278d1b5c38"
+    },
+    {
+      "path": "app/src/components/ui/textarea.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "29330b61811cf9aaac31a94f981728f898229bd5"
+    },
+    {
+      "path": "app/src/components/v2/CoinglassSheetBatch.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "461d02ebbbcddd8b9b94b95da0adbece0ab17743"
+    },
+    {
+      "path": "app/src/components/v2/LiquidityAutoFill.tsx",
+      "algorithm": "git-blob-sha1",
+      "digest": "7c10cbff81fc28993da3a20558e43038b0d16365"
+    },
+    {
+      "path": "app/src/components/v2/useCoinglassBatch.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "64e2c82149fef8f6cff0192a089814432ab2f670"
+    },
+    {
+      "path": "app/src/hooks/useNewsLanguage.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "c0ef80ebdcb713c83f99a7a23d1cc74a27f29afb"
+    },
+    {
+      "path": "app/src/integrations/supabase/auth-middleware.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "4ee311cfbb2da3c06c0405801b347b92e29082c4"
+    },
+    {
+      "path": "app/src/integrations/supabase/client.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "f63eeb841c3a7954fc501f2c9f225429dd35cf2d"
+    },
+    {
+      "path": "app/src/integrations/supabase/client.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "3d892cfb4e51330a89ccee3c2f98b49a868c4935"
+    },
+    {
+      "path": "app/src/integrations/supabase/previewAuthStorage.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "62feb42c29949010faaf346eea23762078be4b25"
+    },
+    {
+      "path": "app/src/integrations/supabase/types.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "8d09c23a4de66dcd3b74bb71b0d31805382ef495"
+    },
+    {
+      "path": "app/src/lib/api.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "5b3e662718542f342108e9453d54e7d6f7f9cf4d"
+    },
+    {
+      "path": "app/src/lib/authWriteScope.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "036581efd5c5cfc3f1069f3051f154ac8ad1d046"
+    },
+    {
+      "path": "app/src/lib/capitalMarketPresence.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "294caa0deb2e9b0dbeedb6aeedf46ac81f4fa337"
+    },
+    {
+      "path": "app/src/lib/coinglassBatch.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "fae3255d52e181e9fc4c8641929254f357d8dfa6"
+    },
+    {
+      "path": "app/src/lib/coinglassCollect.functions.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "ceeee01a0d9c408ac686c1cf1829d7055916e8fc"
+    },
+    {
+      "path": "app/src/lib/coinglassCollectCore.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "d6b9eff705766cae658a950d206cec492ecdda60"
+    },
+    {
+      "path": "app/src/lib/coinglassCollector.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "e38227d90958a7d78eb75c788125b1c56162f296"
+    },
+    {
+      "path": "app/src/lib/coinglassCollector.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "009f48d0234e59883860b2acae57d423d52fb44c"
+    },
+    {
+      "path": "app/src/lib/coinglassHover.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "49f72a77ac8bffe71406af6912a02e9e72e57f34"
+    },
+    {
+      "path": "app/src/lib/coinglassModel1.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "1dbca864373d477807561e353b462c09c4eaa558"
+    },
+    {
+      "path": "app/src/lib/coinglassPending.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "a90a894799e667140f9014ba28e62913c298b5d0"
+    },
+    {
+      "path": "app/src/lib/coinglassQuantities.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "0a23eb7e0e9b4853ae0c5208efe2fc3f7c46c4e7"
+    },
+    {
+      "path": "app/src/lib/coinglassTicket.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "96f440ba927291334bb939c4bde251f28f2cc566"
+    },
+    {
+      "path": "app/src/lib/collectionAutofill.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "bf57f4a7ca0e6f6fe926912751a3da9375c89597"
+    },
+    {
+      "path": "app/src/lib/collectionAutofill.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "e62c6fa4040b9ea52e132e6f76c0415b1ba361b4"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillBridge.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "c887a1bdd985fd3362b2d22ef2b669972e10e737"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillDisplay.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "c78efc4320627f90e1d69202405eba1d8bd83245"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillModel.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "5f41e27f8f2498d2397e12d4ce8d6b57b0f5504e"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillPublications.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "201ec52c02ed1bfcb5246ed35103190d909ed0a4"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillQueue.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "6c462d51a40562c6ab882ae2dd051cd354798642"
+    },
+    {
+      "path": "app/src/lib/collectionAutofillSchedule.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "285d48ae83306e2983a0c6d360d3925a41af283f"
+    },
+    {
+      "path": "app/src/lib/collectionBtcLiquidityPresentation.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "9244f31a1bcf167d270896de059e0efca870da04"
+    },
+    {
+      "path": "app/src/lib/collectionBtcLiquiditySource.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "f74e26c22e71747b1eddf2e3c237fbc077b9f435"
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarket.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "10484e9e5f6d529eb7487af1c6734c61601c1f16"
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarket.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "aedb51f101a56058e16c1350f32b0ab21a2a18c5"
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarketConfig.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "6a2d63ef8b51e3a9ccbae3b32b2ebcbec11910b0"
+    },
+    {
+      "path": "app/src/lib/collectionCapture.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "8039feb0c88c5b93e00e5259d68f6ed4760172ca"
+    },
+    {
+      "path": "app/src/lib/collectionChartScripts.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "4132e331f0b52ae5f91e840bddba0e5a7d1ab048"
+    },
+    {
+      "path": "app/src/lib/collectionDominanceChart.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "f05f4da6f84fd50c2a3dbabeeab36fbb9746674d"
+    },
+    {
+      "path": "app/src/lib/collectionDominanceMetrics.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "854557f14294455d137b76915ce754998692cebd"
+    },
+    {
+      "path": "app/src/lib/collectionDominancePresentation.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "4f0385c9e19f5f939f833ebdffd51c4e5c182130"
+    },
+    {
+      "path": "app/src/lib/collectionEconomicCalendar.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "667a787b52c347dde5c5e830e558b6ff57c840a7"
+    },
+    {
+      "path": "app/src/lib/collectionEconomicCalendarSource.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "b34c23970a4e73b6863735b7550dd8a884fa2e8f"
+    },
+    {
+      "path": "app/src/lib/collectionEtfFlowChart.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "e8b4e98f2de882bcc36714d18a0396c6266096a7"
+    },
+    {
+      "path": "app/src/lib/collectionEtfTooltip.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "a25ec3ab2fcdfe7a4ac20073df11744e9ad695df"
+    },
+    {
+      "path": "app/src/lib/collectionExpiry.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "efbe5b3cc2ab2a4c94b6d86cff7fdca0a29d8edd"
+    },
+    {
+      "path": "app/src/lib/collectionExpiryHistory.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "792a7426278b25a4dc11985b76882eba7b148b1c"
+    },
+    {
+      "path": "app/src/lib/collectionExpirySource.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "615188971efc53c9eb37d2cfe7ba8c3a66a8a5b4"
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidChart.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "7749ae37458edbd3bfe2d19521b4774fea2f32dd"
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidChartScripts.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "f532d46f4ca168a2c193be39d02f9e8d2cd45121"
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidSource.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "0a0bbcaf18cb1d3e6381d97ab8398729aaa51cff"
+    },
+    {
+      "path": "app/src/lib/collectionInstagramBrowser.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "a9423360169768e84d5ebb7d43a13963eab61338"
+    },
+    {
+      "path": "app/src/lib/collectionInstagramBrowserScripts.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "7ebadea81c21de395626c802b5f5f092043e2835"
+    },
+    {
+      "path": "app/src/lib/collectionInstagramStories.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "810790b8a3db5f73887b2f2126966ef422af79e4"
+    },
+    {
+      "path": "app/src/lib/collectionInstagramVision.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "84e1f14d048ed3903c05ed89a8fef1e101722516"
+    },
+    {
+      "path": "app/src/lib/collectionManagedSnapshot.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "e87c9d666787af999c0c634322ccdada6da0f116"
+    },
+    {
+      "path": "app/src/lib/collectionMarketSource.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "a63d3a7796ecba5aa093504ba4122585c0258e63"
+    },
+    {
+      "path": "app/src/lib/collectionNewsFeedback.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "bab509e5a03af1f8a0a6f775c7d7af849296b8d0"
+    },
+    {
+      "path": "app/src/lib/collectionNewsIdentity.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "326881da16e1840dc16c0ab828c16d34bebd992f"
+    },
+    {
+      "path": "app/src/lib/collectionNewsLanguage.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "3119a731fa37553b3469df0da6f77de20a296abf"
+    },
+    {
+      "path": "app/src/lib/collectionNewsLearning.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "1f33cd75620a62862977b700929a643481e128dc"
+    },
+    {
+      "path": "app/src/lib/collectionNewsMedia.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "72d01301eb813d5b5b1f0e9ac6ef75f77645e025"
+    },
+    {
+      "path": "app/src/lib/collectionNewsPresentation.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "73b7d3cd019b20927a28e084718a0ac436f4cd5f"
+    },
+    {
+      "path": "app/src/lib/collectionNewsRelevance.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "5032e936a7db408f5987dc3879dcf1daaf36b3b6"
+    },
+    {
+      "path": "app/src/lib/collectionOpenInterestChart.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "4639e0afe45eec991ed8fa4748f6e175944a819a"
+    },
+    {
+      "path": "app/src/lib/collectionOpenInterestChartScripts.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "cf66423a09a5c3777fbd6829166b5fdbdb46e6e5"
+    },
+    {
+      "path": "app/src/lib/collectionScreenshotCrop.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "8a53e313dd6a63f7207a9ba02927cacdf2836830"
+    },
+    {
+      "path": "app/src/lib/collectionSheets.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "ba857f3adf39612cc7ee3609f989b70fed194afa"
+    },
+    {
+      "path": "app/src/lib/collectionSources.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "fcd6ef3b9dcfd64238da5097967da1fd621cbc0d"
+    },
+    {
+      "path": "app/src/lib/collectionStructured.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "47bdb2c2e9b394354a2f3509abd791e583140495"
+    },
+    {
+      "path": "app/src/lib/collectionUnbiasWeekly.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "e54497e68f58bc129a080846c90154a3ab20d901"
+    },
+    {
+      "path": "app/src/lib/collectionUnbiasWeeklyScripts.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "ee139c8dd73f973c2b4a0d2516fd34f0994cbeb7"
+    },
+    {
+      "path": "app/src/lib/collectionYouTube.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "d07f7361d23442b72905cb1742a5e6c2b82b9419"
+    },
+    {
+      "path": "app/src/lib/collectionYouTubeSource.server.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "0dafab6f38fbf3b836697335a20512b7467a0507"
+    },
+    {
+      "path": "app/src/lib/content.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "c6ece92822f4d71353e9156f178839256bfb893b"
+    },
+    {
+      "path": "app/src/lib/domain.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "ebc43ccc7d6721c75807937d9263086b5e39ec7d"
+    },
+    {
+      "path": "app/src/lib/effectiveTime.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "63a19583a9e7943d84de0d866bd8ff91db6790aa"
+    },
+    {
+      "path": "app/src/lib/journalFields.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "eda3dbbd4836f685a66c5ef2dac418bbc5dff2d3"
+    },
+    {
+      "path": "app/src/lib/keysetPage.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "dba11f771636fedeeeab15c99b4ab2b8f0281076"
+    },
+    {
+      "path": "app/src/lib/legacyCollectionHistory.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "58d04fe9408720272e7089397668d47a098a281d"
+    },
+    {
+      "path": "app/src/lib/multiTradeReports.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "8058d92ed41bdd746c8900f6e522f48b9a67224a"
+    },
+    {
+      "path": "app/src/lib/newsLanguage.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "aead0e3d3a679947000e90e529feee4856a2ee1d"
+    },
+    {
+      "path": "app/src/lib/newsLanguagePreferences.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "cbde23c8604398c6f1a4b496a038e53aeefec7fd"
+    },
+    {
+      "path": "app/src/lib/newsSentimentStyle.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "80bb3fe95d08ab3c6ad872ee76ca2658c8c39f26"
+    },
+    {
+      "path": "app/src/lib/readAllPages.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "ca141a8f8665dc4255f5a18bbb171a1791ca492e"
+    },
+    {
+      "path": "app/src/lib/richtext.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "94a5115ec2148aad965632517c94582211be34ea"
+    },
+    {
+      "path": "app/src/lib/richtextImages.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "d6d37fc5077492341a07603eaaa79cb8c943bfd2"
+    },
+    {
+      "path": "app/src/lib/scenarioEvidence.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "30da5f4fec14a7596330b73895a2581c0ee26ab4"
+    },
+    {
+      "path": "app/src/lib/structured.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "b3acddf2e7af2c241234eee3abb91581b23555ff"
+    },
+    {
+      "path": "app/src/lib/utils.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "a5ef193506d07d0459fec4f187af08283094d7c8"
+    },
+    {
+      "path": "app/src/lib/v2ScenarioTrade.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "20050979fcbd4c78e971a643c6fc852e2e5d1467"
+    },
+    {
+      "path": "app/src/lib/v2TradeFieldPolicy.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "1bea8ae69ed340ddbf96177e446cc3445f474236"
+    },
+    {
+      "path": "app/src/lib/worksheetClearTimestamp.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "6b3b31ce17e175827170cde06db57da8aadbbd76"
+    },
+    {
+      "path": "app/src/lib/worksheetDraftState.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "3dca9b8a4a5b19c7274fb65826e9a084a9a40b8e"
+    },
+    {
+      "path": "app/src/lib/workspaceReadModels.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "776a3b888ad79ce696253e0a71660610ed13d72a"
+    },
+    {
+      "path": "app/src/lib/workspaceUserTextColors.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "fcf578b6add1d93f05d4fc86c5837c5500f9d8aa"
+    },
+    {
+      "path": "app/src/lib/workspaceV1.ts",
+      "algorithm": "git-blob-sha1",
+      "digest": "fbe43cb8642316d431a9fc4c5857bbf6a720457c"
+    },
+    {
+      "path": "app/supabase/migrations/20260731092749_94d73ddc-06f9-429f-b2d1-dc1b295699c7.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "cbed6e6895228a863a15687a44d7069695893970"
+    },
+    {
+      "path": "app/supabase/migrations/20260731092812_16b0b9e6-57ca-454c-bb3d-cd774ac1a93e.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "a1ced55cfaf5ef3983be2f01eb180020d88e2f81"
+    },
+    {
+      "path": "app/supabase/migrations/20260731144916_1667afb3-63d9-4937-8d6c-3756d9945c0a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "0b7b0f8f0b9937583c3393b65d2724c32cdf2fdd"
+    },
+    {
+      "path": "app/supabase/migrations/20260731144937_b6822a91-a3bf-4de5-b2e5-9f3ba41d345a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4e9b589a9beca04f2e397b0bf6ecf0e7a0cfe231"
+    },
+    {
+      "path": "app/supabase/migrations/20260801120817_7f44f3a9-2035-4c74-a894-29cf6d563ed9.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "b2089c1a46c6d1a68022374d9424337aa875c0a4"
+    },
+    {
+      "path": "app/supabase/migrations/20260801120917_2b61d6fd-a56b-44a1-b0ec-dabb5c769c0e.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "daddc960badd3de7c16328da9a47727ca74c0abd"
+    },
+    {
+      "path": "app/supabase/migrations/20260802152043_a4f2a364-b0b5-4e6a-944e-7373daeab9bd.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "57408b9af09f21b4114e147c2dc61cf95bf1f6ff"
+    },
+    {
+      "path": "app/supabase/migrations/20260804171041_e15af61f-09de-4584-9fa8-142bcfd7d140.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "6f7a4517f9292bf2cf2183119d24ef1aae8c89fb"
+    },
+    {
+      "path": "app/supabase/migrations/20260805111939_4937ff7f-c622-4c91-a4c3-94f8c2c934b6.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "a0bd7a0d0a97158c77e8c6baab089a86b0760947"
+    },
+    {
+      "path": "app/supabase/migrations/20260805114235_5ecf38ad-23e9-48f5-b683-8ae4485f1adf.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "108a5a9f81a0555d3091087d7fb4e5903f5921cb"
+    },
+    {
+      "path": "app/supabase/migrations/20260805115755_5045ef24-ed00-4667-bde1-93afb76a9ea8.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "1c0b18e05218fa0c30610d78e033fa3422b3ca9d"
+    },
+    {
+      "path": "app/supabase/migrations/20260808073402_29a414e9-68d3-4a69-9b7a-31b3ab1963a8.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "989dcef0a8fe924957f44f3d01da171c29c79230"
+    },
+    {
+      "path": "app/supabase/migrations/20260816043640_8f54bd64-322c-490e-9c75-b46b55bc1e0a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ba40c2b7169c3d93ccb5e7dddc455700ba2ac957"
+    },
+    {
+      "path": "app/supabase/migrations/20260816120453_18e1a6cf-a49e-4663-8ae8-1567ac1921d8.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ec75e8498e58f68f1e3fdda16ec18de56f0c1cb6"
+    },
+    {
+      "path": "app/supabase/migrations/20260816120543_b88720aa-0a4d-4e7c-92be-23701bca5e37.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "48b053552310ea11bec0ca8492af2f7fbb874c6f"
+    },
+    {
+      "path": "app/supabase/migrations/20260816121324_1864067d-b806-4dcf-a41c-ecbe310b0e2a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "b719ea4a904ab189ab4129db3e947e2a779ee8fc"
+    },
+    {
+      "path": "app/supabase/migrations/20260816121417_843381b2-3699-46df-a3ff-86f7041b146d.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "6304e4af30257e25c86716f7fb100d20f15a68a6"
+    },
+    {
+      "path": "app/supabase/migrations/20260816121657_65af9e3e-abdc-4c1e-b055-4f148fd762fa.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ea87801bcbeea42d57adce0747db9a0b1a12ed33"
+    },
+    {
+      "path": "app/supabase/migrations/20260818135813_e5143663-258f-4e2b-bb33-28d50c3c3c89.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d491fa4dc33ef4b01db632a05243c9130ef18c4e"
+    },
+    {
+      "path": "app/supabase/migrations/20260818140113_e2148e3b-c4eb-4a4f-9f3e-71e874bf376e.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "2e669498674ce6175c236aa5a9b5b3c47a6c6675"
+    },
+    {
+      "path": "app/supabase/migrations/20260818140416_9868f79d-64c6-4285-8284-b7351a8201c7.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "855705172a985fc4f11e6ccdd9622053960459fc"
+    },
+    {
+      "path": "app/supabase/migrations/20260818141353_b3ba9e9c-e993-4b7b-9d0c-23335887c580.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "42e5cef630a9cb9f820b2aed7d48795f4cc1ac10"
+    },
+    {
+      "path": "app/supabase/migrations/20260819071622_1f3104d8-c8b6-49fd-92d5-5f141fe2518c.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "27c53ced7bfff750e4c7772fb9bece872fc08d60"
+    },
+    {
+      "path": "app/supabase/migrations/20260819071642_3ab5a456-8ec7-41cf-87e5-028039d2cfac.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "b49237da8bc06718a46b2d2fe38cd020de520f9b"
+    },
+    {
+      "path": "app/supabase/migrations/20260819074950_af15153b-e9f8-4b7b-bf98-a1404685af57.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "26f56221d425426cebddec48ba4e334910ed38e7"
+    },
+    {
+      "path": "app/supabase/migrations/20260819075941_d9850e8f-9154-46e2-9a0e-e6c9be5b3dc3.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "e42d78662720a94f894288bdeb8399cc6f71ffe2"
+    },
+    {
+      "path": "app/supabase/migrations/20260819080007_6961ff4f-405d-4fa1-a21d-cccb15e2a63b.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "cc064b61cb933289d317b850f0bff3cf2c6d0720"
+    },
+    {
+      "path": "app/supabase/migrations/20260819081017_937d279b-797d-4b30-917e-bd44959f81fe.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d68de9c156ca6ceb4421c1ea4391bcec33b459fd"
+    },
+    {
+      "path": "app/supabase/migrations/20260819081359_cdda4b21-6b47-4a1e-87fb-56825b02fa47.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "f3641dc0e7aa4da42ed65496c819ad24902d5d08"
+    },
+    {
+      "path": "app/supabase/migrations/20260819084451_d10eb08c-4f75-43c6-84a6-e84068c731c0.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "c638ff57cc8e0efd36498c733b9b2cbe08b84f07"
+    },
+    {
+      "path": "app/supabase/migrations/20260825090402_a887177f-2515-47ab-baef-45ea029f09a5.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "68bd0483917ff4d64fcd9a5b020c8b78bb2a748b"
+    },
+    {
+      "path": "app/supabase/migrations/20260825094000_23eeba97-b2d4-4fe3-8410-d6f14372cf9c.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "84a5afb1325f12fb8a79cd71525c60b63e43b6d7"
+    },
+    {
+      "path": "app/supabase/migrations/20260825094029_7c6375a1-5c4b-40f3-9f80-59485e1ecc3a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "99c01f7b3e2f3eeca3253dc00e12a260301d4cc2"
+    },
+    {
+      "path": "app/supabase/migrations/20260826120000_phase4b_liquidity_integrity.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "6c117ce10d8e6251149aa09ee54348e8cd44f683"
+    },
+    {
+      "path": "app/supabase/migrations/20260826123000_economic_calendar.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "e687938843d1ac24134ac9ff1d837caf9e4df429"
+    },
+    {
+      "path": "app/supabase/migrations/20260826143000_template_safety_and_yoav_questions.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "e7121e2ef9aa484e4712f8cade83c917842733ce"
+    },
+    {
+      "path": "app/supabase/migrations/20260826150000_multi_trade_cycles.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "257be9c1fcf955e14cc38124a699958f5501149e"
+    },
+    {
+      "path": "app/supabase/migrations/20260905103000_modular_workspace_v1_foundation.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "09bcb7ef626b70670b72c2fd4a92873e669baa5e"
+    },
+    {
+      "path": "app/supabase/migrations/20260905105000_v2_workspace_role_invariants.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "5005e9f4fcc02a4ca35bc6cac8893c5f1c87ca8e"
+    },
+    {
+      "path": "app/supabase/migrations/20260905105100_v2_workspace_owner_change_guard.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "c3660506f7dfc6440064216167e0efb6d3017db6"
+    },
+    {
+      "path": "app/supabase/migrations/20260905105200_v2_workspace_reference_integrity.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "22c8b9cea3836d001ee821e1f5beb0ccd767c14e"
+    },
+    {
+      "path": "app/supabase/migrations/20260905110000_v2_recurring_calendar_and_asset_settings.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "b0efe2d1d3ab6241385783607f9abcc5a83db123"
+    },
+    {
+      "path": "app/supabase/migrations/20260905120000_v2_workspace_runtime_integrity.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "abbfcbbe3138573a5b15a6c10a7e7418b6bd62a6"
+    },
+    {
+      "path": "app/supabase/migrations/20260905121000_legacy_project_duplicate_and_reminder_reset.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ccec8268cb9b317e5f918bc0a3a9894235589e43"
+    },
+    {
+      "path": "app/supabase/migrations/20260905122000_v2_scenario_trade_workflow.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "e1bdbad6737c51f15fd1a83b19920fd3127a90ce"
+    },
+    {
+      "path": "app/supabase/migrations/20260905123000_v2_collection_news.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d00f8127eac2048e6adb6f20dbd65f6657f2cba5"
+    },
+    {
+      "path": "app/supabase/migrations/20260905124000_v2_spot_ledger_and_personal_targets.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "14bb7db81d6b02bbfd59596cb2cd781042af4058"
+    },
+    {
+      "path": "app/supabase/migrations/20260905125000_v2_personal_economic_reminders.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "1d93db0aea278352debfe755ed110dc08028229c"
+    },
+    {
+      "path": "app/supabase/migrations/20260905130000_v2_template_versioning.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7e163145ce4e4cb921ea46d8b311e3d429aff981"
+    },
+    {
+      "path": "app/supabase/migrations/20260905210000_v2_trade_template_backend_alignment.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7befd1fc1dadd7b5de69864263a3620f0ed5b4f0"
+    },
+    {
+      "path": "app/supabase/migrations/20260905211000_v2_collection_news_backend_alignment.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d251ce027efa75e785a25d72614a47a4b88dff67"
+    },
+    {
+      "path": "app/supabase/migrations/20260905212000_v2_asset_identity_integrity.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "3b0f16a2c261358c1e1eb6fb8ca8f873de813483"
+    },
+    {
+      "path": "app/supabase/migrations/20260905220000_v2_complete_sheet_contract.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "86ebb6f81fbf5a478c73e447cdc0ec20a2595a62"
+    },
+    {
+      "path": "app/supabase/migrations/20260905220500_v2_news_source_history.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "f626d05669c9db468e0e20b2ba06da0bd51555cf"
+    },
+    {
+      "path": "app/supabase/migrations/20260905221500_v2_template_editor_versions.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "78b771b97dd4c34d1ba8ce1003ac42bcf7e41b4d"
+    },
+    {
+      "path": "app/supabase/migrations/20260905223000_v2_economic_reminder_snooze.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "61c31d65396683e948e5cbcddaaa882e12b03cd5"
+    },
+    {
+      "path": "app/supabase/migrations/20260905224000_v2_trade_limit_buttons.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "96ef94cac8825e43176316edf68ac7474e663b88"
+    },
+    {
+      "path": "app/supabase/migrations/20260905225000_v2_empty_worksheet_upgrade.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "70898274b97d6f609160426ca11c776bed133a62"
+    },
+    {
+      "path": "app/supabase/migrations/20260907123501_764efb94-6d1f-4a6a-8d21-6ba3aad8b8b5.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7545cb7d0bc731cb9a7bc48f7ecb816c4cadd744"
+    },
+    {
+      "path": "app/supabase/migrations/20260907133336_e218d24f-6cd4-4935-b881-bd6e528a0e60.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "44b7aee6804455f1ced06e16b03891c9f4cc31c8"
+    },
+    {
+      "path": "app/supabase/migrations/20260908100000_collection_history_notifications.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "a829061666905b7e318a4fc2657c717722add444"
+    },
+    {
+      "path": "app/supabase/migrations/20260908110000_collection_live_templates.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "31a210768aea293f8e3599bda0f8b4c63ca6bd16"
+    },
+    {
+      "path": "app/supabase/migrations/20260908114556_da1b8aa5-a0c4-4bc1-8a5d-3a76558cc9ed.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "56766a5ff923a1680c5f4fdc7428aa745556a470"
+    },
+    {
+      "path": "app/supabase/migrations/20260908130000_collection_import_rpc_permissions.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d1b99783a6c8356ac0df2e67974984d84f1308a7"
+    },
+    {
+      "path": "app/supabase/migrations/20260909100000_news_summary.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "81ebbb662a9aeb54092241b3f6931d9dc5556c14"
+    },
+    {
+      "path": "app/supabase/migrations/20260910100000_news_pins.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "9dfdd9e6fe13872d177266b180cda97aa2fe84b1"
+    },
+    {
+      "path": "app/supabase/migrations/20260910110000_news_pins_all_sheets.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "74d2d44bae4abf6bc317fe74bb00d182d8c7aacb"
+    },
+    {
+      "path": "app/supabase/migrations/20260910130000_currency_fields.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "0b9a4439df0b3081b8ae6ba743607efd6f970994"
+    },
+    {
+      "path": "app/supabase/migrations/20260910131000_reasons_evidence_fields.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7858248a65bf1c5818a7f80ba4e2ac87051f7a6a"
+    },
+    {
+      "path": "app/supabase/migrations/20260911110234_trade_creation_scenario_context.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "b660e2f498273841875425457b69bce65aac59f2"
+    },
+    {
+      "path": "app/supabase/migrations/20260911110258_configurable_trade_button_gates.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "2ffc1478051524b9406479f76e1b773fc5f6ad2b"
+    },
+    {
+      "path": "app/supabase/migrations/20260911110331_journal_field_types.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "5afede645f24a1cec48a78831a318eb161e7d7ab"
+    },
+    {
+      "path": "app/supabase/migrations/20260913121306_07d71316-48ec-45f9-b0d0-d98cc2891a88.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "9f7443becbf588f3a81a5a61cba61368cf58061d"
+    },
+    {
+      "path": "app/supabase/migrations/20260913122538_8d03ac59-923f-4c70-a141-143599427f42.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "410697d2aee0c351d92ee855a374392a6335fe50"
+    },
+    {
+      "path": "app/supabase/migrations/20260913122603_74b86b33-a961-4b09-890c-1505fd97d41f.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "51ce312b5a2fff8e7d50621ec5bfb06b41a2aaa1"
+    },
+    {
+      "path": "app/supabase/migrations/20260915192729_97007ece-2a7d-4034-8710-4259236455e7.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4345a4630fe740d9051f51f0672a2e7fb6c142a4"
+    },
+    {
+      "path": "app/supabase/migrations/20260915222046_5f150561-3e5f-4540-80ea-795144f537c8.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "01e90280c2f052d0b522332e07f9dc22d5e0f7d3"
+    },
+    {
+      "path": "app/supabase/migrations/20260916144440_3a617fcc-4f5c-41e1-baf7-c1e22171ad5b.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "20dc826f7b29a710f6f2766f34ba0a151142a1d2"
+    },
+    {
+      "path": "app/supabase/migrations/20260916144455_6af511c0-19ba-427d-854e-c05eb65df7e0.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "522da240a049162f78b0f72ff77dbe96a3144781"
+    },
+    {
+      "path": "app/supabase/migrations/20260916151057_90deedc1-5cef-4bc7-8da1-7221044efd76.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d4f8ef49ace81e45aa87f854841601e0be9e3554"
+    },
+    {
+      "path": "app/supabase/migrations/20260916151117_8fa28575-5e9d-4591-b29c-1323a61d345f.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "96e81c767e2eb8d8d218d1abaec142be228cbb80"
+    },
+    {
+      "path": "app/supabase/migrations/20260916152954_294e85a1-0fa9-4b8b-8766-8c384ecb098b.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "004bd853ccef383548fd955f79927caf4a960e93"
+    },
+    {
+      "path": "app/supabase/migrations/20260916153010_a9a2925a-127b-4586-b9c5-b7dbbcf766c8.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4165989d05c150678c83830b111c787f7340c550"
+    },
+    {
+      "path": "app/supabase/migrations/20260916203922_ae1e1602-831d-4a34-bd2f-a9adb932b053.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "bd99e52d41a6c3d81086a4704b218763717a9973"
+    },
+    {
+      "path": "app/supabase/migrations/20260916205712_2bff5b62-0cb9-414c-85b8-51c206066f1a.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "631567964a1fdc9838259432f9ee6bf09860ec6b"
+    },
+    {
+      "path": "app/supabase/migrations/20260917075621_a8fb01ec-41c6-4aec-a87f-bcd6ac8289b3.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "3ca1277e5fbe9b855e03b9ae80884c5af7971cb2"
+    },
+    {
+      "path": "app/supabase/migrations/20260917084923_c31d3be1-ab5c-459f-9c11-d7bc3cd5826e.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ef51c2ffbd05da7f91cd9127d6ab46bdc2c606eb"
+    },
+    {
+      "path": "app/supabase/migrations/20260917123814_9c84c652-3b7f-4ba4-a3e7-7580c68b1753.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "c84f547aa718c25a1e7d09de913b528917300aff"
+    },
+    {
+      "path": "app/supabase/migrations/20260917145029_fix_economic_reminder_access.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ce9d507863ceb1d2c76c932facd02733fc9d64fb"
+    },
+    {
+      "path": "app/supabase/migrations/20260926131551_924ff530-83ca-4450-a50b-7931709dfbb6.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "008f466a16d794a9958ddf2ac5770e175690458b"
+    },
+    {
+      "path": "app/supabase/migrations/20260926132500_restrict_automated_trade_card_grants.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "86747f188c9a606cf697a56dededdf6ebcb27a61"
+    },
+    {
+      "path": "app/supabase/migrations/20261001100000_collection_autofill.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4cb1717c183479dc3130b2b1cff5da046b53e320"
+    },
+    {
+      "path": "app/supabase/migrations/20261003211500_coinglass_prominent_level_metadata.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "78e546777a49d52338c4090daa039b4569c0b1cb"
+    },
+    {
+      "path": "app/supabase/migrations/20261003214500_fix_collection_autofill_append_precedence.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "347431fa908e1f72460f5acad0036bdbd9d1615f"
+    },
+    {
+      "path": "app/supabase/migrations/20261005150000_collection_autofill_image_scope.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "56b806b759126b4cd9ca67161a85918fecb7a833"
+    },
+    {
+      "path": "app/supabase/migrations/20261006110000_keep_manual_collection_scan_session.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "cc72afb0a756005eebf9e3690b2a880e90b89644"
+    },
+    {
+      "path": "app/supabase/migrations/20261006160000_collection_expiry_statistics.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "206b2b0ecdc0586fbc56f7978a4ce18682d1f58d"
+    },
+    {
+      "path": "app/supabase/migrations/20261008180000_workspace_account_sync.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "378800eb44bfec832581cd1486401824c853fb63"
+    },
+    {
+      "path": "app/supabase/migrations/20261009190000_collection_managed_snapshots.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "a8e815188922b5221016d06ad753cf76abed5bff"
+    },
+    {
+      "path": "app/supabase/migrations/20261009200000_collection_scoped_clear.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "edf0c1fea4787c35eacebb41087826abf2420ccb"
+    },
+    {
+      "path": "app/supabase/migrations/20261009220000_collection_scenarios.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "abc592db446a016a72ab325f9400e686592a4552"
+    },
+    {
+      "path": "app/supabase/migrations/20261009221000_collection_news_order.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "724490f291337549d0f2155a07d88ab122749adf"
+    },
+    {
+      "path": "app/supabase/migrations/20261009233000_collection_news_personal_view.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "1b99d41123e889b055d1e348b535b15d36a8fb45"
+    },
+    {
+      "path": "app/supabase/migrations/20261010001500_collection_news_language.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "78fcf091cfd04f019010917f46d5feec8bec8369"
+    },
+    {
+      "path": "app/supabase/migrations/20261010012000_collection_news_feedback.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "732b5e5e18fccd50123833ccf473d6ac6ad6e13b"
+    },
+    {
+      "path": "app/supabase/migrations/20261010103000_collection_news_crypto_schema.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "959793e3bd4bbc88ac49559b2c45d18c94847356"
+    },
+    {
+      "path": "app/supabase/migrations/20261010130000_collection_news_all_feedback.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7b90377c2aaeef2b2ce838d4a51808d59bb09d98"
+    },
+    {
+      "path": "app/supabase/migrations/20261010133000_collection_alt_plain_value.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "6cec26f933058861d6521be38209cab7db63ed9d"
+    },
+    {
+      "path": "app/supabase/migrations/20261010150000_collection_timeframe_scenarios.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "14e3b836abfe6e367cfb57dda2ea9e8c22ddd3e5"
+    },
+    {
+      "path": "app/supabase/migrations/20261010180000_collection_news_source_identity.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "fccd8636064e1fb1ace9870235fa25c6f548b788"
+    },
+    {
+      "path": "app/supabase/migrations/20261010190000_collection_market_format.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4e05829c1b396937c378168645cda29917cc6ac3"
+    },
+    {
+      "path": "app/supabase/migrations/20261013120000_collection_save_receipt.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ad7a5079ca23319dee24b6d8b1ebe41efffafbb9"
+    },
+    {
+      "path": "app/supabase/migrations/20261013121000_editor_field_receipts.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "381129a2fcdfb0159a4f182db0765d9123abcd3f"
+    },
+    {
+      "path": "app/supabase/migrations/20261013230000_collection_economic_calendar.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "1722c239ddcfe024e99ea67d9c7d69434b99e589"
+    },
+    {
+      "path": "app/supabase/migrations/20261014100000_economic_reminder_coalescing.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "d30e8b5a9507af8f297e0a5eb4e691c8eba2e355"
+    },
+    {
+      "path": "app/supabase/migrations/20261014101000_us_equity_open_schedule.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "544ac1d8e1d68eabbeabdff2e8d203bdb8343aea"
+    },
+    {
+      "path": "app/supabase/migrations/20261014200000_collection_scenario_evidence.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "db08553c42f7d04dd524fde52ae21c112d05669a"
+    },
+    {
+      "path": "app/supabase/migrations/20261015090000_economic_reminder_event_cutoff.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "be8311ca787e602caffe9adbb1f078ceff931f9c"
+    },
+    {
+      "path": "app/supabase/migrations/20261015110000_collection_concurrent_save.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "8f11b1f21999297a2e98f0903bc3dbd7e6d1adad"
+    },
+    {
+      "path": "app/supabase/migrations/20261015111000_collection_independent_sources.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "5782afb163cda17835bc62a0886b169428f1c4d2"
+    },
+    {
+      "path": "app/supabase/migrations/20261015112000_collection_source_titles.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "c767b0b75cdf61cfdfeabe889c8271b8fce43502"
+    },
+    {
+      "path": "app/supabase/migrations/20261015124940_restore_existing_template_schema.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "2d498e902fdb0ce0985094d6c71107f8c95fc3f6"
+    },
+    {
+      "path": "app/supabase/migrations/20261016090000_economic_notification_preferences.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7beefab97f0833108025a5b70e9f8f19c6309db0"
+    },
+    {
+      "path": "app/supabase/migrations/20261016100000_collection_permanent_schema.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "00bc5db8e022cd3fa6e579df5cc537ad3a746b5d"
+    },
+    {
+      "path": "app/supabase/migrations/20261016130000_collection_news_groups.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "bb6772b6e7a9b8e3fac13dcfeb90e8dff65ca2e9"
+    },
+    {
+      "path": "app/supabase/migrations/20261016150000_collection_unbias_weekly_snapshot.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "0c14e15107f6eb2e04fda64de0355186537983b6"
+    },
+    {
+      "path": "app/supabase/migrations/20261016170000_collection_permanent_schema_sync_dedup.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "7db02001a0f610ad303594b2e0905b00fba8a1ab"
+    },
+    {
+      "path": "app/supabase/migrations/20261017103906_coinglass_hover_evidence.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ee695d17892c03e361e959ae9128a5842dbf347f"
+    },
+    {
+      "path": "app/supabase/migrations/20261017110000_collection_previous_answer_pins.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4b2a8fdc7ece1697b2c9250bcbba6613518429f9"
+    },
+    {
+      "path": "app/supabase/migrations/20261017120000_collection_publication_profiles.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "947887772215b2425a8c7aad6043f6f3ed4332e0"
+    },
+    {
+      "path": "app/supabase/migrations/20261017121000_collection_calendar_schedule.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4f1505af7d9875009f10789283cdb927e72cc526"
+    },
+    {
+      "path": "app/supabase/migrations/20261018110000_economic_reminder_upcoming.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "f6c15a8a09398819e8442bfda85e9d3b00a71087"
+    },
+    {
+      "path": "app/supabase/migrations/20261018111000_collection_previous_news_actions.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "eea2f8e1e86d843cf215cdcedaeff1a9aedb1cd4"
+    },
+    {
+      "path": "app/supabase/migrations/20261018130000_collection_autofill_current_settings.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "744a06586507788d50e76a6f1bb8d671618bf9ac"
+    },
+    {
+      "path": "app/supabase/migrations/20261022194829_serialize_existing_youtube_leases.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "dac38de6ecdeb74ec5750b5d5aaae0dfd1024589"
+    },
+    {
+      "path": "app/supabase/migrations/20261024170000_resume_coinglass_autofill.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "3276c6895d8520cb8d853e96fd09ce3f889338fc"
+    },
+    {
+      "path": "app/supabase/migrations/20261028161501_collection_youtube_pending_message.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "a37f9f0e9d3cf8159b955b420b3f5005c04b0635"
+    },
+    {
+      "path": "app/supabase/migrations/20261029110000_collection_news_group_read_through.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "f42b5425e0c16144ab94a93907f9eb53407ca13c"
+    },
+    {
+      "path": "app/supabase/migrations/20261029120000_capital_market.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "4d5b37f21949f5c48e86e2835ce17d51cd50e442"
+    },
+    {
+      "path": "app/supabase/migrations/20261029140000_collection_timeframe_editing.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "ee4ca172b98385eb72f9d19e2564be5255e6b03e"
+    },
+    {
+      "path": "app/supabase/migrations/20261029141000_workspace_user_text_colors.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "982a69657fe6da4f991f4bff21fe926fe74c61d9"
+    },
+    {
+      "path": "app/supabase/migrations/20261030090651_x_summary_continuation.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "401d36dafc35aa4d550e10a4831155d47bc560cb"
+    },
+    {
+      "path": "app/supabase/migrations/20261101100000_read_markers_done_not_done.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "2ce2f7f759708cbf5c0030e912cddbb2dcde1f38"
+    },
+    {
+      "path": "app/supabase/migrations/20261101110000_managed_snapshot_update_times.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "2e7cf1a05400446785e907c0b0d5e989ad6bc595"
+    },
+    {
+      "path": "app/supabase/migrations/20261101131122_remove_coinglass_hourly_audit_quota.sql",
+      "algorithm": "git-blob-sha1",
+      "digest": "aeb989e475234787176c14be66c4c268fda9afbc"
+    },
+    {
+      "path": "app/tests/coinglass-batch-lifecycle.test.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "232bf046e4e44cac5395a38dab7dc07d5f8904eb"
+    },
+    {
+      "path": "app/tests/coinglass-collector.test.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "b8155ca2c16bf1e2c65f5c16f3daff4d0bb64bed"
+    },
+    {
+      "path": "app/tests/coinglass-hover.test.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "cd9dd5b773378690a3701f2054ed6d4a188bdbf9"
+    },
+    {
+      "path": "app/tests/collection-coinglass-resume.test.mjs",
+      "algorithm": "git-blob-sha1",
+      "digest": "6bd848d1e27462026141be6071c041bd9b570b45"
+    },
+    {
+      "path": "app/tsconfig.json",
+      "algorithm": "git-blob-sha1",
+      "digest": "63749a8c032b10b64fda864bb8f237782a41c3ca"
+    },
+    {
+      "path": "collector/experiments/model3-preparation-fix-20261031/check_capture.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "697832bb6d92ab2cedb5363c9bfc4c22199e0069"
+    },
+    {
+      "path": "collector/standalone_collector/app.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "a4b4ccb737fb08b84db70c3d01446935e1fe76ee"
+    },
+    {
+      "path": "collector/standalone_collector/prepare.py",
+      "algorithm": "git-blob-sha1",
+      "digest": "14f4bac1d65d4a174bc22dc9625560533517c22e"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/capture_failure_diagnostics.py",
+      "algorithm": "sha256",
+      "digest": "cceba361a68533f0603a373088f15c97af80f515edb1fa1bf0e79b8202e76a68"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/capture_failure_observer.py",
+      "algorithm": "sha256",
+      "digest": "71296d89a9be7aa4fd86ea968ad1baef9443497b1c639b8a368a6e066f18f9ae"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/capture_readiness.py",
+      "algorithm": "sha256",
+      "digest": "a21fcb00acfc4ba20bb1d54d6342e2f89521ad2d941792822cbbd20de7cc437a"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/collection_bridge.py",
+      "algorithm": "sha256",
+      "digest": "ccb98befa94c322888522771e435da32ceaa5ff16decf9882ef65c0e1e1f0543"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/collection_model1_task.py",
+      "algorithm": "sha256",
+      "digest": "8936397cf637eb700dbb95357e08770203a6e4b2d66bacae2ae3c585b53b89ea"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/heatmap_hover.py",
+      "algorithm": "sha256",
+      "digest": "693aa6739a8b1f50d0550cd802dde99cff4c68edfad6c643c1adf8d6bc05f820"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/heatmap_models.py",
+      "algorithm": "sha256",
+      "digest": "de2ed269648628bd124b83e159d4abb302cb024479721a7babfb0ad92ec7bf7e"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/image_detail.py",
+      "algorithm": "sha256",
+      "digest": "3f627a2713c17c02b7fd64e2ec1af1daaef62fd7fee91f80c29ebc777292c30c"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/__init__.py",
+      "algorithm": "sha256",
+      "digest": "62d4b90186aefa26b1b1c26f7ea48319f4e140966615a0b5bcb10eb2169a1954"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/coinglass_heatmap_capture.py",
+      "algorithm": "sha256",
+      "digest": "3a8778e0c6de4b4c1e24dc8dea3292e2e6c5ce2e2163bad251c3edc12a2f129a"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/openai_heatmap_scanner.py",
+      "algorithm": "sha256",
+      "digest": "6b72fbf59c0693775de351cf8af89bc4d5f6825de75e01d78f08408baa1cdfb8"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_cache_policy.py",
+      "algorithm": "sha256",
+      "digest": "08c25329224c25fc2ef67030fb2d01e9209d75f8f321a3e8038cc65f9501d54e"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_diagnostics.py",
+      "algorithm": "sha256",
+      "digest": "06fa878880e757bab0ebb2c7442d4edd0c7d3b626b33304d055d4296c1d39483"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_evidence_format.py",
+      "algorithm": "sha256",
+      "digest": "1a0676b0a6389e5e29eecc5072ffbaed149ab516b75d924baa1a5e0c2ee77125"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_execution.py",
+      "algorithm": "sha256",
+      "digest": "5a82f410b089307d3ad465d3abb016f4616a0932c3f7c75a00a2584a95117693"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_legend.py",
+      "algorithm": "sha256",
+      "digest": "fe17cbf48509b57073a4762d941d2e9b3539df7c3c085dcdef8dd5613ca75a86"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_page_flow.py",
+      "algorithm": "sha256",
+      "digest": "f4ed7d254972cf492305caeedc174503168eecd27c108de2dd1eb1307de9f3a0"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_price_range.py",
+      "algorithm": "sha256",
+      "digest": "208678109f933cd13cf6a93313dcc27520f58cb4b7e4137b646ba98dc094c57f"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_readiness.py",
+      "algorithm": "sha256",
+      "digest": "55b27b3d08dde0258ccac2eb6870efad0dbc4bfb8f6e193c04627b4140825015"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_clean_frame.py",
+      "algorithm": "sha256",
+      "digest": "d6de22fff174eba2702d537879f94e33162c91c5810f8437c3a643443b6714ba"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_render_gate.js",
+      "algorithm": "sha256",
+      "digest": "80b533ef6ad274f7fc2532964de308d7bb8a066fe386508551866f04f3dbda8a"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_rendering.py",
+      "algorithm": "sha256",
+      "digest": "b3193d4cf58304637485a8aeb2852dff5dbb45be5ea2628396b31ebd5863ce8f"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/price_detail_input.py",
+      "algorithm": "sha256",
+      "digest": "03d0577f996aa05bfade8f61c8cf3b8cf83a3dd40de3442d3cb13f58fed88655"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/prominent_levels.py",
+      "algorithm": "sha256",
+      "digest": "84e82f7e44f64245750e6a37cb741fe97b2360287a69c44743e98dd153cbb151"
+    },
+    {
+      "path": "collector/standalone_collector/runtime/store_diagnostics.py",
+      "algorithm": "sha256",
+      "digest": "e72a339ca4c7e6bd2a9830ebc1703a8856b600d791158b342ba47b5ede07909e"
+    }
+  ],
+  "source_files_modified": false,
+  "runtime_execution": "not run locally; Render acceptance pending"
+}

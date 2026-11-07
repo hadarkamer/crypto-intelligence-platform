@@ -1,0 +1,2 @@
+ALTER TABLE public.template_questions ADD COLUMN IF NOT EXISTS field_key text;
+CREATE INDEX IF NOT EXISTS template_questions_field_key_idx ON public.template_questions (field_key) WHERE field_key IS NOT NULL;

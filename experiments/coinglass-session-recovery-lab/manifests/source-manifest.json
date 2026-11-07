@@ -1,0 +1,1133 @@
+{
+  "app_ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+  "collector_ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+  "serial_lab_ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+  "files": [
+    {
+      "path": "app/.github/labs/btc-full-flow/README.md",
+      "sha": "b92b5cc4c7819cde80d0d6e0a97d203b9aa5458c",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 3743,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/backend-tail.mjs",
+      "sha": "2f1803926b8f3681f32d1a1c39fb35357ceaf119",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 3910,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/browser.py",
+      "sha": "bb5deb145cac7f4c46abdfc73319c57983c77122",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 6922,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/build-ui.mjs",
+      "sha": "e3148c37abdafa8fe71064dd6c0f481ed2c84362",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 742,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/prepare.py",
+      "sha": "8b076495d9b48b5bb00efdc8b01c7aefe19b41c5",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 1561,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/run.py",
+      "sha": "3d8612558d9bde7a86d66540c82d87ae7fec1566",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 9618,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/serve.py",
+      "sha": "4af6bbf0ee393d911045fcdb6a56252ffe05f9bc",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 1088,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/sitecustomize.py",
+      "sha": "eb24e87faa408a3a3139f5f8ed3f7bad39df1a37",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 6371,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/transport.ts",
+      "sha": "300a44cb8c9e504e5970fcb628d03d55e0ce85d3",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 866,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/btc-full-flow/ui.tsx",
+      "sha": "94caa2f9a63be73fcfcff4176e7afc5be3df2eb7",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 1852,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/model3-real-queue/prepare_lab.py",
+      "sha": "ee89a33c679aa5dce785f65cf1dc892e72d353da",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 5206,
+      "verified": true
+    },
+    {
+      "path": "app/.github/labs/coinglass-cadence.mjs",
+      "sha": "ed9b1d84afd1e56e035ea01224ab45b2fdb38231",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 32261,
+      "verified": true
+    },
+    {
+      "path": "app/.github/operations/coinglass-six-hour-cadence.sql",
+      "sha": "4fec932d713fb5b18ba576cd5ddd38369740d7cd",
+      "ref": "5cc8e326153aad2a5d39006e92333b4bf740bcc8",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "archived_serial_fixture",
+      "bytes": 4820,
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassCollector.ts",
+      "sha": "009f48d0234e59883860b2acae57d423d52fb44c",
+      "bytes": 51958,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassCollectCore.ts",
+      "sha": "d6b9eff705766cae658a950d206cec492ecdda60",
+      "bytes": 33346,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassCollector.server.ts",
+      "sha": "e38227d90958a7d78eb75c788125b1c56162f296",
+      "bytes": 8581,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/v2/CoinglassSheetBatch.tsx",
+      "sha": "461d02ebbbcddd8b9b94b95da0adbece0ab17743",
+      "bytes": 3546,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/StructuredTables.tsx",
+      "sha": "4bbb07f748bedc629cf61e42e1aad355219c061f",
+      "bytes": 28376,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofill.server.ts",
+      "sha": "bf57f4a7ca0e6f6fe926912751a3da9375c89597",
+      "bytes": 82818,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/scripts/collection-autofill-relay.ts",
+      "sha": "b5972e1a81fe333b23018e1c28f275571265f7f5",
+      "bytes": 12313,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillBridge.server.ts",
+      "sha": "c887a1bdd985fd3362b2d22ef2b669972e10e737",
+      "bytes": 10084,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassModel1.ts",
+      "sha": "1dbca864373d477807561e353b462c09c4eaa558",
+      "bytes": 20004,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassQuantities.ts",
+      "sha": "0a23eb7e0e9b4853ae0c5208efe2fc3f7c46c4e7",
+      "bytes": 11234,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassHover.ts",
+      "sha": "49f72a77ac8bffe71406af6912a02e9e72e57f34",
+      "bytes": 12201,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassTicket.ts",
+      "sha": "96f440ba927291334bb939c4bde251f28f2cc566",
+      "bytes": 7719,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/button.tsx",
+      "sha": "04c0142fcf36fc245ad5356b4be86f73113e9976",
+      "bytes": 744,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/integrations/supabase/client.ts",
+      "sha": "3d892cfb4e51330a89ccee3c2f98b49a868c4935",
+      "bytes": 2502,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassBatch.ts",
+      "sha": "fae3255d52e181e9fc4c8641929254f357d8dfa6",
+      "bytes": 3719,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/v2/useCoinglassBatch.ts",
+      "sha": "64e2c82149fef8f6cff0192a089814432ab2f670",
+      "bytes": 8977,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/LtrNumeric.tsx",
+      "sha": "468c97fa6ff0fe41aba45617fe9542005bcb2a61",
+      "bytes": 612,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/workspaceUserTextColors.ts",
+      "sha": "fcf578b6add1d93f05d4fc86c5837c5500f9d8aa",
+      "bytes": 1445,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/input.tsx",
+      "sha": "7db524115c08e80b10d5282d1bb504b06b238d17",
+      "bytes": 776,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/textarea.tsx",
+      "sha": "29330b61811cf9aaac31a94f981728f898229bd5",
+      "bytes": 677,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/checkbox.tsx",
+      "sha": "f01d47c865e9ce28610b16bfa4021a88beebec3e",
+      "bytes": 1043,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/select.tsx",
+      "sha": "3fdfc929eb90d4f33e2591e94cdfb2278d1b5c38",
+      "bytes": 5749,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/structured.ts",
+      "sha": "b3acddf2e7af2c241234eee3abb91581b23555ff",
+      "bytes": 18217,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/domain.ts",
+      "sha": "ebc43ccc7d6721c75807937d9263086b5e39ec7d",
+      "bytes": 14703,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/utils.ts",
+      "sha": "a5ef193506d07d0459fec4f187af08283094d7c8",
+      "bytes": 169,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/RichTextView.tsx",
+      "sha": "ff3e49781b22fe50a326c0b34bc43a7d847cf922",
+      "bytes": 10349,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/newsSentimentStyle.ts",
+      "sha": "80bb3fe95d08ab3c6ad872ee76ca2658c8c39f26",
+      "bytes": 1321,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsLanguage.ts",
+      "sha": "3119a731fa37553b3469df0da6f77de20a296abf",
+      "bytes": 13956,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsRelevance.ts",
+      "sha": "5032e936a7db408f5987dc3879dcf1daaf36b3b6",
+      "bytes": 5300,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsFeedback.server.ts",
+      "sha": "bab509e5a03af1f8a0a6f775c7d7af849296b8d0",
+      "bytes": 1494,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillPublications.server.ts",
+      "sha": "201ec52c02ed1bfcb5246ed35103190d909ed0a4",
+      "bytes": 8926,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofill.ts",
+      "sha": "e62c6fa4040b9ea52e132e6f76c0415b1ba361b4",
+      "bytes": 14106,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionSheets.ts",
+      "sha": "ba857f3adf39612cc7ee3609f989b70fed194afa",
+      "bytes": 2442,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionYouTube.ts",
+      "sha": "d07f7361d23442b72905cb1742a5e6c2b82b9419",
+      "bytes": 2794,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionSources.server.ts",
+      "sha": "fcd6ef3b9dcfd64238da5097967da1fd621cbc0d",
+      "bytes": 57942,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionCapture.server.ts",
+      "sha": "8039feb0c88c5b93e00e5259d68f6ed4760172ca",
+      "bytes": 16931,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionExpirySource.server.ts",
+      "sha": "615188971efc53c9eb37d2cfe7ba8c3a66a8a5b4",
+      "bytes": 6983,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillModel.server.ts",
+      "sha": "5f41e27f8f2498d2397e12d4ce8d6b57b0f5504e",
+      "bytes": 68266,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsMedia.ts",
+      "sha": "72d01301eb813d5b5b1f0e9ac6ef75f77645e025",
+      "bytes": 4118,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionBtcLiquiditySource.server.ts",
+      "sha": "f74e26c22e71747b1eddf2e3c237fbc077b9f435",
+      "bytes": 50016,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionBtcLiquidityPresentation.ts",
+      "sha": "9244f31a1bcf167d270896de059e0efca870da04",
+      "bytes": 6045,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionManagedSnapshot.ts",
+      "sha": "e87c9d666787af999c0c634322ccdada6da0f116",
+      "bytes": 4276,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionDominanceChart.ts",
+      "sha": "f05f4da6f84fd50c2a3dbabeeab36fbb9746674d",
+      "bytes": 11946,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionUnbiasWeekly.ts",
+      "sha": "e54497e68f58bc129a080846c90154a3ab20d901",
+      "bytes": 7191,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionOpenInterestChart.ts",
+      "sha": "4639e0afe45eec991ed8fa4748f6e175944a819a",
+      "bytes": 7988,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidSource.server.ts",
+      "sha": "0a0bbcaf18cb1d3e6381d97ab8398729aaa51cff",
+      "bytes": 9265,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidChart.ts",
+      "sha": "7749ae37458edbd3bfe2d19521b4774fea2f32dd",
+      "bytes": 15441,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionEtfTooltip.ts",
+      "sha": "a25ec3ab2fcdfe7a4ac20073df11744e9ad695df",
+      "bytes": 19339,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionMarketSource.ts",
+      "sha": "a63d3a7796ecba5aa093504ba4122585c0258e63",
+      "bytes": 8082,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/workspaceV1.ts",
+      "sha": "fbe43cb8642316d431a9fc4c5857bbf6a720457c",
+      "bytes": 25951,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillQueue.ts",
+      "sha": "6c462d51a40562c6ab882ae2dd051cd354798642",
+      "bytes": 3138,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionEconomicCalendar.ts",
+      "sha": "667a787b52c347dde5c5e830e558b6ff57c840a7",
+      "bytes": 16887,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionEconomicCalendarSource.server.ts",
+      "sha": "b34c23970a4e73b6863735b7550dd8a884fa2e8f",
+      "bytes": 11894,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarket.server.ts",
+      "sha": "10484e9e5f6d529eb7487af1c6734c61601c1f16",
+      "bytes": 13002,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionDominancePresentation.ts",
+      "sha": "4f0385c9e19f5f939f833ebdffd51c4e5c182130",
+      "bytes": 3100,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionExpiryHistory.server.ts",
+      "sha": "792a7426278b25a4dc11985b76882eba7b148b1c",
+      "bytes": 6988,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/integrations/supabase/client.server.ts",
+      "sha": "f63eeb841c3a7954fc501f2c9f225429dd35cf2d",
+      "bytes": 2766,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ui/button-variants.ts",
+      "sha": "8dcf7d98b211c328dc0dd0de07258c5a647d2bb4",
+      "bytes": 1250,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/integrations/supabase/types.ts",
+      "sha": "8d09c23a4de66dcd3b74bb71b0d31805382ef495",
+      "bytes": 200469,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/integrations/supabase/previewAuthStorage.ts",
+      "sha": "62feb42c29949010faaf346eea23762078be4b25",
+      "bytes": 7306,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassCollect.functions.ts",
+      "sha": "ceeee01a0d9c408ac686c1cf1829d7055916e8fc",
+      "bytes": 4346,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/coinglassPending.ts",
+      "sha": "a90a894799e667140f9014ba28e62913c298b5d0",
+      "bytes": 10469,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/richtext.ts",
+      "sha": "94a5115ec2148aad965632517c94582211be34ea",
+      "bytes": 9690,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillDisplay.ts",
+      "sha": "c78efc4320627f90e1d69202405eba1d8bd83245",
+      "bytes": 8153,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/content.ts",
+      "sha": "c6ece92822f4d71353e9156f178839256bfb893b",
+      "bytes": 3867,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/capitalMarketPresence.ts",
+      "sha": "294caa0deb2e9b0dbeedb6aeedf46ac81f4fa337",
+      "bytes": 959,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/api.ts",
+      "sha": "5b3e662718542f342108e9453d54e7d6f7f9cf4d",
+      "bytes": 25636,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/hooks/useNewsLanguage.ts",
+      "sha": "c0ef80ebdcb713c83f99a7a23d1cc74a27f29afb",
+      "bytes": 2538,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/richtextImages.ts",
+      "sha": "d6d37fc5077492341a07603eaaa79cb8c943bfd2",
+      "bytes": 2591,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsIdentity.ts",
+      "sha": "326881da16e1840dc16c0ab828c16d34bebd992f",
+      "bytes": 4589,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsLearning.ts",
+      "sha": "1f33cd75620a62862977b700929a643481e128dc",
+      "bytes": 3028,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionAutofillSchedule.ts",
+      "sha": "285d48ae83306e2983a0c6d360d3925a41af283f",
+      "bytes": 14262,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionYouTubeSource.server.ts",
+      "sha": "0dafab6f38fbf3b836697335a20512b7467a0507",
+      "bytes": 36593,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionInstagramBrowser.server.ts",
+      "sha": "a9423360169768e84d5ebb7d43a13963eab61338",
+      "bytes": 18250,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarketConfig.ts",
+      "sha": "6a2d63ef8b51e3a9ccbae3b32b2ebcbec11910b0",
+      "bytes": 696,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionNewsPresentation.ts",
+      "sha": "73b7d3cd019b20927a28e084718a0ac436f4cd5f",
+      "bytes": 7923,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/workspaceReadModels.ts",
+      "sha": "776a3b888ad79ce696253e0a71660610ed13d72a",
+      "bytes": 4127,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionScreenshotCrop.server.ts",
+      "sha": "8a53e313dd6a63f7207a9ba02927cacdf2836830",
+      "bytes": 5217,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionUnbiasWeeklyScripts.ts",
+      "sha": "ee139c8dd73f973c2b4a0d2516fd34f0994cbeb7",
+      "bytes": 8204,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionChartScripts.ts",
+      "sha": "4132e331f0b52ae5f91e840bddba0e5a7d1ab048",
+      "bytes": 13963,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionHyperliquidChartScripts.ts",
+      "sha": "f532d46f4ca168a2c193be39d02f9e8d2cd45121",
+      "bytes": 22403,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionOpenInterestChartScripts.ts",
+      "sha": "cf66423a09a5c3777fbd6829166b5fdbdb46e6e5",
+      "bytes": 9203,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionStructured.ts",
+      "sha": "47bdb2c2e9b394354a2f3509abd791e583140495",
+      "bytes": 1423,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionExpiry.ts",
+      "sha": "efbe5b3cc2ab2a4c94b6d86cff7fdca0a29d8edd",
+      "bytes": 13592,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionEtfFlowChart.server.ts",
+      "sha": "e8b4e98f2de882bcc36714d18a0396c6266096a7",
+      "bytes": 6797,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionDominanceMetrics.ts",
+      "sha": "854557f14294455d137b76915ce754998692cebd",
+      "bytes": 3107,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/readAllPages.ts",
+      "sha": "ca141a8f8665dc4255f5a18bbb171a1791ca492e",
+      "bytes": 798,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/v2TradeFieldPolicy.ts",
+      "sha": "1bea8ae69ed340ddbf96177e446cc3445f474236",
+      "bytes": 1909,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/authWriteScope.ts",
+      "sha": "036581efd5c5cfc3f1069f3051f154ac8ad1d046",
+      "bytes": 978,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/worksheetDraftState.ts",
+      "sha": "3dca9b8a4a5b19c7274fb65826e9a084a9a40b8e",
+      "bytes": 4661,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/v2ScenarioTrade.ts",
+      "sha": "20050979fcbd4c78e971a643c6fc852e2e5d1467",
+      "bytes": 6317,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionCapitalMarket.ts",
+      "sha": "aedb51f101a56058e16c1350f32b0ab21a2a18c5",
+      "bytes": 9048,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/integrations/supabase/auth-middleware.ts",
+      "sha": "4ee311cfbb2da3c06c0405801b347b92e29082c4",
+      "bytes": 3191,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/multiTradeReports.ts",
+      "sha": "8058d92ed41bdd746c8900f6e522f48b9a67224a",
+      "bytes": 9019,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/newsLanguage.ts",
+      "sha": "aead0e3d3a679947000e90e529feee4856a2ee1d",
+      "bytes": 786,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/newsLanguagePreferences.ts",
+      "sha": "cbde23c8604398c6f1a4b496a038e53aeefec7fd",
+      "bytes": 1445,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionInstagramStories.ts",
+      "sha": "810790b8a3db5f73887b2f2126966ef422af79e4",
+      "bytes": 19469,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionInstagramBrowserScripts.ts",
+      "sha": "7ebadea81c21de395626c802b5f5f092043e2835",
+      "bytes": 13848,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/collectionInstagramVision.server.ts",
+      "sha": "84e1f14d048ed3903c05ed89a8fef1e101722516",
+      "bytes": 5806,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/worksheetClearTimestamp.ts",
+      "sha": "6b3b31ce17e175827170cde06db57da8aadbbd76",
+      "bytes": 840,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/scenarioEvidence.ts",
+      "sha": "30da5f4fec14a7596330b73895a2581c0ee26ab4",
+      "bytes": 13200,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/journalFields.ts",
+      "sha": "eda3dbbd4836f685a66c5ef2dac418bbc5dff2d3",
+      "bytes": 3022,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/effectiveTime.ts",
+      "sha": "63a19583a9e7943d84de0d866bd8ff91db6790aa",
+      "bytes": 1619,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/keysetPage.ts",
+      "sha": "dba11f771636fedeeeab15c99b4ab2b8f0281076",
+      "bytes": 1423,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/lib/legacyCollectionHistory.ts",
+      "sha": "58d04fe9408720272e7089397668d47a098a281d",
+      "bytes": 22391,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/ReadOnlyStage.tsx",
+      "sha": "9f7d85723fa487af6cbd7ee501c61fbbfbe380b3",
+      "bytes": 6486,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/src/components/PreviousAnswer.tsx",
+      "sha": "de184ed1b1ec7b67171297b42e789f2bf8dc2575",
+      "bytes": 12400,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/package.json",
+      "sha": "41e2fb2200fc39234d9d6a1ff5ba63cd292522b5",
+      "bytes": 2479,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "app/bun.lock",
+      "sha": "ebc2fea7c77d51f5cdd5b0fa6fd7b14a7488e0a9",
+      "bytes": 179954,
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_product_copy",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/prepare.py",
+      "sha": "14f4bac1d65d4a174bc22dc9625560533517c22e",
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "repo": "hadarkamer/crypto-intelligence-platform",
+      "role": "collector_fixture_and_entrypoint",
+      "bytes": 9144,
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/app.py",
+      "sha": "a4b4ccb737fb08b84db70c3d01446935e1fe76ee",
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "repo": "hadarkamer/crypto-intelligence-platform",
+      "role": "collector_fixture_and_entrypoint",
+      "bytes": 10091,
+      "verified": true
+    },
+    {
+      "path": "collector/experiments/model3-preparation-fix-20261031/check_capture.py",
+      "sha": "697832bb6d92ab2cedb5363c9bfc4c22199e0069",
+      "ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+      "repo": "hadarkamer/crypto-intelligence-platform",
+      "role": "collector_fixture_and_entrypoint",
+      "bytes": 8369,
+      "verified": true
+    }
+  ],
+  "files_verified": 125
+}

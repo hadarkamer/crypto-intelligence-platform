@@ -1,0 +1,157 @@
+{
+  "collector_ref": "33bad18f8be322009108584a6b71f3d65fa9b351",
+  "reconstruction_provenance": "nov6_model1/reconstruction_manifest.json",
+  "live_runtime_attestation": false,
+  "files": [
+    {
+      "path": "collector/standalone_collector/runtime/capture_failure_diagnostics.py",
+      "sha256": "cceba361a68533f0603a373088f15c97af80f515edb1fa1bf0e79b8202e76a68",
+      "expected": "cceba361a68533f0603a373088f15c97af80f515edb1fa1bf0e79b8202e76a68",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/capture_failure_observer.py",
+      "sha256": "71296d89a9be7aa4fd86ea968ad1baef9443497b1c639b8a368a6e066f18f9ae",
+      "expected": "71296d89a9be7aa4fd86ea968ad1baef9443497b1c639b8a368a6e066f18f9ae",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/capture_readiness.py",
+      "sha256": "a21fcb00acfc4ba20bb1d54d6342e2f89521ad2d941792822cbbd20de7cc437a",
+      "expected": "a21fcb00acfc4ba20bb1d54d6342e2f89521ad2d941792822cbbd20de7cc437a",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/collection_bridge.py",
+      "sha256": "ccb98befa94c322888522771e435da32ceaa5ff16decf9882ef65c0e1e1f0543",
+      "expected": "ccb98befa94c322888522771e435da32ceaa5ff16decf9882ef65c0e1e1f0543",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/collection_model1_task.py",
+      "sha256": "8936397cf637eb700dbb95357e08770203a6e4b2d66bacae2ae3c585b53b89ea",
+      "expected": "8936397cf637eb700dbb95357e08770203a6e4b2d66bacae2ae3c585b53b89ea",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/heatmap_hover.py",
+      "sha256": "693aa6739a8b1f50d0550cd802dde99cff4c68edfad6c643c1adf8d6bc05f820",
+      "expected": "693aa6739a8b1f50d0550cd802dde99cff4c68edfad6c643c1adf8d6bc05f820",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/heatmap_models.py",
+      "sha256": "de2ed269648628bd124b83e159d4abb302cb024479721a7babfb0ad92ec7bf7e",
+      "expected": "de2ed269648628bd124b83e159d4abb302cb024479721a7babfb0ad92ec7bf7e",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/image_detail.py",
+      "sha256": "3f627a2713c17c02b7fd64e2ec1af1daaef62fd7fee91f80c29ebc777292c30c",
+      "expected": "3f627a2713c17c02b7fd64e2ec1af1daaef62fd7fee91f80c29ebc777292c30c",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/__init__.py",
+      "sha256": "62d4b90186aefa26b1b1c26f7ea48319f4e140966615a0b5bcb10eb2169a1954",
+      "expected": "62d4b90186aefa26b1b1c26f7ea48319f4e140966615a0b5bcb10eb2169a1954",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/coinglass_heatmap_capture.py",
+      "sha256": "3a8778e0c6de4b4c1e24dc8dea3292e2e6c5ce2e2163bad251c3edc12a2f129a",
+      "expected": "3a8778e0c6de4b4c1e24dc8dea3292e2e6c5ce2e2163bad251c3edc12a2f129a",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/market_vision/openai_heatmap_scanner.py",
+      "sha256": "6b72fbf59c0693775de351cf8af89bc4d5f6825de75e01d78f08408baa1cdfb8",
+      "expected": "6b72fbf59c0693775de351cf8af89bc4d5f6825de75e01d78f08408baa1cdfb8",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_cache_policy.py",
+      "sha256": "08c25329224c25fc2ef67030fb2d01e9209d75f8f321a3e8038cc65f9501d54e",
+      "expected": "08c25329224c25fc2ef67030fb2d01e9209d75f8f321a3e8038cc65f9501d54e",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_diagnostics.py",
+      "sha256": "06fa878880e757bab0ebb2c7442d4edd0c7d3b626b33304d055d4296c1d39483",
+      "expected": "06fa878880e757bab0ebb2c7442d4edd0c7d3b626b33304d055d4296c1d39483",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_evidence_format.py",
+      "sha256": "1a0676b0a6389e5e29eecc5072ffbaed149ab516b75d924baa1a5e0c2ee77125",
+      "expected": "1a0676b0a6389e5e29eecc5072ffbaed149ab516b75d924baa1a5e0c2ee77125",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_execution.py",
+      "sha256": "5a82f410b089307d3ad465d3abb016f4616a0932c3f7c75a00a2584a95117693",
+      "expected": "5a82f410b089307d3ad465d3abb016f4616a0932c3f7c75a00a2584a95117693",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_legend.py",
+      "sha256": "fe17cbf48509b57073a4762d941d2e9b3539df7c3c085dcdef8dd5613ca75a86",
+      "expected": "fe17cbf48509b57073a4762d941d2e9b3539df7c3c085dcdef8dd5613ca75a86",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_page_flow.py",
+      "sha256": "f4ed7d254972cf492305caeedc174503168eecd27c108de2dd1eb1307de9f3a0",
+      "expected": "f4ed7d254972cf492305caeedc174503168eecd27c108de2dd1eb1307de9f3a0",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_price_range.py",
+      "sha256": "208678109f933cd13cf6a93313dcc27520f58cb4b7e4137b646ba98dc094c57f",
+      "expected": "208678109f933cd13cf6a93313dcc27520f58cb4b7e4137b646ba98dc094c57f",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model1_readiness.py",
+      "sha256": "55b27b3d08dde0258ccac2eb6870efad0dbc4bfb8f6e193c04627b4140825015",
+      "expected": "55b27b3d08dde0258ccac2eb6870efad0dbc4bfb8f6e193c04627b4140825015",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_clean_frame.py",
+      "sha256": "d6de22fff174eba2702d537879f94e33162c91c5810f8437c3a643443b6714ba",
+      "expected": "d6de22fff174eba2702d537879f94e33162c91c5810f8437c3a643443b6714ba",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_render_gate.js",
+      "sha256": "80b533ef6ad274f7fc2532964de308d7bb8a066fe386508551866f04f3dbda8a",
+      "expected": "80b533ef6ad274f7fc2532964de308d7bb8a066fe386508551866f04f3dbda8a",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/model3_rendering.py",
+      "sha256": "b3193d4cf58304637485a8aeb2852dff5dbb45be5ea2628396b31ebd5863ce8f",
+      "expected": "b3193d4cf58304637485a8aeb2852dff5dbb45be5ea2628396b31ebd5863ce8f",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/price_detail_input.py",
+      "sha256": "03d0577f996aa05bfade8f61c8cf3b8cf83a3dd40de3442d3cb13f58fed88655",
+      "expected": "03d0577f996aa05bfade8f61c8cf3b8cf83a3dd40de3442d3cb13f58fed88655",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/prominent_levels.py",
+      "sha256": "84e82f7e44f64245750e6a37cb741fe97b2360287a69c44743e98dd153cbb151",
+      "expected": "84e82f7e44f64245750e6a37cb741fe97b2360287a69c44743e98dd153cbb151",
+      "verified": true
+    },
+    {
+      "path": "collector/standalone_collector/runtime/store_diagnostics.py",
+      "sha256": "e72a339ca4c7e6bd2a9830ebc1703a8856b600d791158b342ba47b5ede07909e",
+      "expected": "e72a339ca4c7e6bd2a9830ebc1703a8856b600d791158b342ba47b5ede07909e",
+      "verified": true
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+ALTER TABLE public.v2_liquidity_ai_runs ALTER COLUMN observed_price DROP NOT NULL;

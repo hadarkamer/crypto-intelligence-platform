@@ -1,0 +1,76 @@
+{
+  "files": [
+    {
+      "path": "app/.github/tests/coinglass-collect-core.test.ts",
+      "sha": "5b5254b14a2f5173e7ad3f07f465777a4ec6c43d",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 32898,
+      "verified": true
+    },
+    {
+      "path": "app/.github/tests/coinglass-models.test.ts",
+      "sha": "d3ea4035589303d17070440d00786ad51ddcbd77",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 10714,
+      "verified": true
+    },
+    {
+      "path": "app/tests/coinglass-batch-lifecycle.test.mjs",
+      "sha": "232bf046e4e44cac5395a38dab7dc07d5f8904eb",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 6761,
+      "verified": true
+    },
+    {
+      "path": "app/tests/collection-coinglass-resume.test.mjs",
+      "sha": "6bd848d1e27462026141be6071c041bd9b570b45",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 30378,
+      "verified": true
+    },
+    {
+      "path": "app/tests/coinglass-collector.test.mjs",
+      "sha": "b8155ca2c16bf1e2c65f5c16f3daff4d0bb64bed",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 7548,
+      "verified": true
+    },
+    {
+      "path": "app/tests/coinglass-hover.test.mjs",
+      "sha": "cd9dd5b773378690a3701f2054ed6d4a188bdbf9",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 13476,
+      "verified": true
+    },
+    {
+      "path": "app/tsconfig.json",
+      "sha": "63749a8c032b10b64fda864bb8f237782a41c3ca",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 823,
+      "verified": true
+    },
+    {
+      "path": "app/src/components/v2/LiquidityAutoFill.tsx",
+      "sha": "7c10cbff81fc28993da3a20558e43038b0d16365",
+      "ref": "74006045c0259f77eda6a641816cdf7bb33f4d19",
+      "repo": "hadarkamer/trade-plan-pad",
+      "role": "current_offline_test_dependency",
+      "bytes": 26972,
+      "verified": true
+    }
+  ]
+}

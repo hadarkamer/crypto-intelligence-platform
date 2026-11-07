@@ -1,0 +1,146 @@
+"""Build app-owned heatmap collection. No source scans during deployment."""
+from pathlib import Path
+import ast
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+from importlib.metadata import version,PackageNotFoundError
+
+HERE=Path(__file__).resolve().parent
+ROOT=HERE.parent
+RUNTIME=HERE/'runtime'
+PINNED={
+    'market_vision/coinglass_heatmap_capture.py':'d1d75f2c99ea3c1fd72c7e1f9cfb1ec29a0890ab',
+    'market_vision/openai_heatmap_scanner.py':'9dd18b993d6d87cf326848720fa08d1d6a554087',
+}
+BROWSER_REQUIREMENTS={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0'}
+
+
+def prepare_browser():
+    needs_install=False
+    for package,expected in BROWSER_REQUIREMENTS.items():
+        try:needs_install=needs_install or version(package)!=expected
+        except PackageNotFoundError:needs_install=True
+    if needs_install:
+        subprocess.run([sys.executable,'-m','pip','install',
+            *[f'{p}=={v}' for p,v in BROWSER_REQUIREMENTS.items()]],check=True,timeout=180)
+    subprocess.run([sys.executable,'-m','playwright','install','chromium'],check=True,timeout=240)
+    for package,expected in BROWSER_REQUIREMENTS.items():
+        if version(package)!=expected:raise RuntimeError('Standalone dependency mismatch')
+    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0',flush=True)
+
+
+def validator_ast(text):
+    node=next(n for n in ast.parse(text).body if isinstance(n,ast.FunctionDef) and n.name=='normalize')
+    return ast.dump(node,include_attributes=False)
+
+
+def prepare():
+    prepare_browser()
+    # Generated Python modules must not reuse bytecode from a previously
+    # installed adapter. Deployment builds may restore this directory from a
+    # cache; regenerate it from reviewed sources on every build.
+    if RUNTIME.is_symlink():raise RuntimeError('Generated runtime cannot be a symlink')
+    if RUNTIME.exists():shutil.rmtree(RUNTIME)
+    (RUNTIME/'market_vision').mkdir(parents=True,exist_ok=True)
+    manifest={}
+    for name,expected in PINNED.items():
+        data=(ROOT/name).read_bytes()
+        actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+        if actual!=expected:raise RuntimeError('Source version changed: '+name)
+        (RUNTIME/name).write_bytes(data);manifest[name]=actual
+    (RUNTIME/'market_vision/__init__.py').write_text('"""App-owned heatmap source copy."""\n')
+    for name in ('collection_bridge.py','collection_model1_task.py'):
+        shutil.copy2(ROOT/name,RUNTIME/name)
+    for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
+                 'model1_execution.py','image_detail.py','price_detail_input.py',
+                 'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
+                 'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
+                 'capture_readiness.py','capture_failure_observer.py','capture_failure_diagnostics.py',
+                 'store_diagnostics.py','heatmap_hover.py'):
+        shutil.copy2(HERE/name,RUNTIME/name)
+    from install_original_flow import install,expand_capture
+    from install_price_detail import install as install_detail,expand_detail_capture
+    from install_price_range import install as install_range
+    from model1_legend import install as install_legend,expand_legend_capture
+    from model1_cache_policy import install as install_cache
+    install(RUNTIME)
+    task_path=RUNTIME/'collection_model1_task.py'
+    point_validator=validator_ast(task_path.read_text())
+    install_detail(RUNTIME)
+    if validator_ast(task_path.read_text())!=point_validator:
+        raise RuntimeError('Image detail changed the point validator')
+    install_range(RUNTIME);install_legend(RUNTIME);install_cache(RUNTIME)
+    original=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_text()
+    actual=(RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text()
+    expected=expand_legend_capture(expand_detail_capture(expand_capture(original)))
+    if actual!=expected:raise RuntimeError('Unexpected capture adaptation')
+    if actual.count('page.screenshot(')!=original.count('page.screenshot('):
+        raise RuntimeError('Range support must not add a source screenshot')
+    # First verify the known Model1 baseline before adding the identity dimension.
+    subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
+        'test_page_flow','test_48h_execution','test_image_detail','test_price_range','test_legend_popup',
+        'test_cache_policy','-q'],cwd=HERE,check=True,timeout=60)
+    from install_heatmap_models import install as install_models
+    install_models(RUNTIME)
+    # A fresh interpreter ensures each child's actual model configuration is tested.
+    subprocess.run([sys.executable,'-m','unittest','test_heatmap_models','-v'],
+        cwd=HERE,check=True,timeout=90)
+    from install_prominent_levels import install as install_prominent
+    install_prominent(RUNTIME)
+    from install_capture_diagnostics import install as install_capture_diagnostics
+    install_capture_diagnostics(RUNTIME)
+    from install_capture_readiness import install as install_capture_readiness
+    install_capture_readiness(RUNTIME)
+    from install_store_diagnostics import install as install_store_diagnostics
+    install_store_diagnostics(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
+        'test_capture_diagnostics','test_source_login_required','test_timeout_retention',
+        'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency',
+        'test_capture_failure_observer','-v'],
+        cwd=HERE,check=True,timeout=90)
+    from install_heatmap_hover import install as install_hover
+    install_hover(RUNTIME)
+    from install_model3_rendering import install as install_rendering
+    install_rendering(RUNTIME)
+    # The rendering suite pins the pre-reload capture AST. Run that unchanged
+    # contract before adding the separately tested common recovery wrapper.
+    subprocess.run([sys.executable,'-m','unittest','test_model3_rendering','-v'],
+        cwd=HERE,check=True,timeout=90)
+    from install_capture_readiness import install_reload
+    install_reload(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
+        'test_response_shape','test_capture_diagnostics','test_capture_readiness',
+        'test_source_login_required','test_timeout_retention','test_source_compatibility',
+        'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
+        'test_capture_failure_observer','test_capture_failure_diagnostics',
+        'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
+        'test_failure_diagnostic_integration','test_source_reload','-v'],
+        cwd=HERE,check=True,timeout=240)
+    (RUNTIME/'provenance.json').write_text(json.dumps({
+        'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
+        'capture_flow':'one requested model/horizon; existing session, PNG, one DOM hover column and same-image crop',
+        'numeric_reader':'displayed-hover.v1',
+        'quantity_scope':'displayed latest column; explicit units only; rounded source values',
+        'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
+        'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
+        'identity':'strict model-specific source, schema, screenshot label and job',
+        'price_reference':'verified tooltip Close for Models 1/2; source-row candle envelope for Model 3; no fake midpoint',
+        'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
+        'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
+        'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
+        'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
+        'capture_diagnostics':'bounded per-operation duration and failure phase',
+        'failure_diagnostics':'capture-failure.v1; bounded original-observation facts and fitted-grid residuals',
+        'timeout_progress':'private stage/operation snapshot before existing outer deadline',
+        'render_gate':'existing source checks; one page reload after a source-readiness failure, then original validation',
+        'source_reload':'one attempt per model/timeframe; no login, request-limit, numeric or AI retry',
+        'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
+        'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
+        'auto_reuse_minutes':15,'saved_review_max_hours':6,
+        'bot_started':False,'automatic_source_checks':False},indent=2))
+    print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
+
+if __name__=='__main__':prepare()
