@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
+import tempfile
 from unittest import mock
 
 import jsonschema
@@ -51,6 +53,20 @@ def validate(directory, schema_path):
     assert "CMD [\"python\", \"standalone_collector/app.py\"]" not in docker
     assert "prepare.py" not in docker
     checks.append("nonroot_inert_entrypoint_no_product_execution_or_ports")
+    assert "COPY --from=postgres_native /usr/share/postgresql/ /usr/share/postgresql/" in docker
+    assert "test -r /usr/share/postgresql/16/postgresql.conf.sample" in docker
+    assert "test -r /usr/share/postgresql/16/postgres.bki" in docker
+    with tempfile.TemporaryDirectory(prefix="sample-copy-test-", dir=directory) as temp:
+        root = Path(temp)
+        source = root / "source"
+        (source / "16").mkdir(parents=True)
+        (source / "postgresql.conf.sample").write_text("# public packaging fixture\n")
+        (source / "16" / "postgresql.conf.sample").symlink_to("../postgresql.conf.sample")
+        shutil.copytree(source / "16", root / "broken" / "16", symlinks=True)
+        assert not (root / "broken" / "16" / "postgresql.conf.sample").exists()
+        shutil.copytree(source, root / "fixed", symlinks=True)
+        assert (root / "fixed" / "16" / "postgresql.conf.sample").read_text() == "# public packaging fixture\n"
+    checks.append("postgres_parent_sample_symlink_regression_without_database_execution")
     bases = json.loads((directory / "base-images.json").read_text())
     for base in bases:
         assert len(base["amd64"]) == 1

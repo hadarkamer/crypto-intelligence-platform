@@ -46,6 +46,27 @@ def check(condition, code):
         raise FixtureFailure(code)
 
 
+def apply_browser_close_check(report):
+    """Keep object-state observations separate from the supervisor's process proof."""
+    if report['browsers_disconnected']:
+        report['browser_close_verification'] = 'playwright_object_disconnected'
+        return
+    # This exact injection occurs before capture's explicit try/finally. Its
+    # sync_playwright manager has already unwound, so the cached Browser flag
+    # is not an authoritative process-liveness observation. Preserve that flag;
+    # only the unchanged parent census can accept cleanup for this case.
+    expected_setup_failure = (
+        report.get('case') == 'failure' and report.get('status') == 'passed'
+        and report.get('reason') == 'injected_setup_failure_observed'
+        and report.get('browser_launches') == 1 and report.get('contexts') == 1
+        and report.get('screenshots') == 0 and report.get('fulfilled_documents') == 0)
+    if expected_setup_failure:
+        report['browser_close_verification'] = 'requires_supervisor_process_census'
+        return
+    report.update(status='failed', reason='browser_close_unverified',
+                  browser_close_verification='unverified')
+
+
 def deny_python_network(event, _args):
     if event in ('socket.connect', 'socket.getaddrinfo', 'socket.bind'):
         raise FixtureFailure('python_network_forbidden')
@@ -316,8 +337,7 @@ def worker(args):
                       browser_version=browsers[0].version if browsers else None,
                       model3_render_observations=render_facts,
                       ai_module_loaded='market_vision.openai_heatmap_scanner' in sys.modules)
-    if not report['browsers_disconnected']:
-        report.update(status='failed', reason='browser_close_unverified')
+    apply_browser_close_check(report)
     check(report['ai_module_loaded'] is False, 'ai_module_loaded')
     return report
 

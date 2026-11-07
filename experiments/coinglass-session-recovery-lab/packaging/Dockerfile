@@ -26,13 +26,16 @@ RUN apt-get update \
       libuuid1 libxml2 libxslt1.1 libzstd1 zlib1g \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=postgres_native /usr/lib/postgresql/16/ /usr/lib/postgresql/16/
-COPY --from=postgres_native /usr/share/postgresql/16/ /usr/share/postgresql/16/
+# Include the parent sample: 16/postgresql.conf.sample points to ../postgresql.conf.sample.
+COPY --from=postgres_native /usr/share/postgresql/ /usr/share/postgresql/
 COPY --from=postgres_native /usr/lib/x86_64-linux-gnu/libpq.so* /usr/local/lib/
 COPY --from=node_dependencies /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_dependencies /opt/bun/node_modules/@oven/bun-linux-x64/bin/bun /usr/local/bin/bun
 COPY --from=node_dependencies /opt/lab-node/ /opt/lab-node/
 COPY packaging/requirements.txt /opt/lab-requirements.txt
 RUN ldconfig \
+ && test -r /usr/share/postgresql/16/postgresql.conf.sample \
+ && test -r /usr/share/postgresql/16/postgres.bki \
  && python -m pip install --no-cache-dir -r /opt/lab-requirements.txt \
  && python -m playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/* \

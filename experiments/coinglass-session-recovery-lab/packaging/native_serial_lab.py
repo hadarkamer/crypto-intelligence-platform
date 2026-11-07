@@ -13,9 +13,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -175,11 +177,21 @@ class NativePostgres:
         self.pid = None
         self.created = None
         self.initialized = False
+        self.last_command = None
 
     def command(self, args: list[str], timeout: int = 90):
+        self.last_command = {"program": Path(args[0]).name, "timeout_seconds": timeout}
         with (self.directory / "bootstrap.log").open("ab") as output:
-            return subprocess.run(args, env=self.env, stdout=output, stderr=subprocess.STDOUT,
-                                  check=True, timeout=timeout)
+            try:
+                completed = subprocess.run(args, env=self.env, stdout=output, stderr=subprocess.STDOUT,
+                                           check=True, timeout=timeout)
+                self.last_command["exit_code"] = completed.returncode
+                return completed
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                self.last_command["error_type"] = type(error).__name__
+                if isinstance(error, subprocess.CalledProcessError):
+                    self.last_command["exit_code"] = error.returncode
+                raise
 
     def start(self) -> None:
         if os.geteuid() == 0:
@@ -238,6 +250,49 @@ class NativePostgres:
 
 def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def sanitized_pg_tail(path: Path, limit: int = 8192) -> dict:
+    """Read only a bounded regular-file tail; never inspect environment values."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {"present": False}
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("Diagnostic source is not a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            stream.seek(max(0, info.st_size - limit))
+            text = stream.read(limit).decode("utf-8", errors="replace")
+        if info.st_size > limit:
+            # Drop a partial leading line so truncation cannot remove a secret
+            # field's label while leaving its value outside pattern redaction.
+            text = text.split("\n", 1)[1] if "\n" in text else ""
+        # Only static patterns are used: no secret values or ambient env are read.
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+        text = "".join(c for c in text if c in "\n\t" or ord(c) >= 32)
+        text = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://\S+", "[URL_REDACTED]", text)
+        credential = re.compile(r"(?i)(?:authorization|cookie|password|passwd|secret|token|api[_ -]?key|connection[_ -]?string|\bdsn\b)\s*[:=]")
+        text = "\n".join("[CREDENTIAL_SHAPED_LINE_REDACTED]" if credential.search(line) else line
+                         for line in text.splitlines())
+        encoded = text.encode("utf-8")
+        if len(encoded) > limit:
+            text = encoded[-limit:].decode("utf-8", errors="ignore")
+        return {"present": True, "source_bytes": info.st_size, "tail_truncated": info.st_size > limit,
+                "retained_bytes": len(text.encode("utf-8")), "sanitized_tail": text}
+    finally:
+        os.close(descriptor)
+
+
+def preserve_pg_diagnostic(directory: Path, evidence: Path, stage: str, last_command) -> None:
+    value = {"format": "native-postgres-diagnostic.v1", "stage": stage,
+             "last_command": last_command, "maximum_log_tail_bytes_each": 8192,
+             "logs": {name: sanitized_pg_tail(directory / name) for name in ("bootstrap.log", "postgres.log")},
+             "environment_values_included": False}
+    target = evidence / "native-postgres-diagnostic.json"
+    write_json(target, value)
+    target.chmod(0o600)
 
 
 def verify_guard_receipts(evidence: Path) -> dict:
@@ -391,7 +446,16 @@ def supervise(lab: Path, evidence: Path, binary: Path, timeout: int) -> int:
             cleanup["final_owned_descendant_census"] = {"verified_empty": False, "fault": True}
         if clean and not fault:
             cleanup["postgres"]["no_owned_process_remains"] = True
-        if cluster_dir is not None and clean and not fault:
+        diagnostic_preserved = cluster_dir is None
+        if cluster_dir is not None:
+            try:
+                preserve_pg_diagnostic(cluster_dir, evidence, result["stage"], pg.last_command if pg is not None else None)
+                diagnostic_preserved = True
+                result["postgres_diagnostic"] = "native-postgres-diagnostic.json"
+            except BaseException as error:
+                cleanup_errors.append("postgres_diagnostic:" + type(error).__name__)
+        cleanup["postgres"]["diagnostic_preserved"] = diagnostic_preserved
+        if cluster_dir is not None and clean and not fault and diagnostic_preserved:
             try:
                 shutil.rmtree(cluster_dir)
             except BaseException as error:

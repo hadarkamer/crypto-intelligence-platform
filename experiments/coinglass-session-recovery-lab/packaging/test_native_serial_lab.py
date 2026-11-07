@@ -97,7 +97,7 @@ class AdapterTests(unittest.TestCase):
     def test_setup_failure_cannot_skip_postgres_or_final_census_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             lab = Path(tmp); evidence = lab/'evidence'/'test'; evidence.mkdir(parents=True)
-            fake_pg = Mock(pid=None)
+            fake_pg = Mock(pid=None,last_command=None)
             fake_pg.start.side_effect = RuntimeError('controlled startup failure')
             fake_pg.cleanup.return_value = {'stopped':True}
             lifecycle = types.SimpleNamespace(establish_subreaper=Mock(), cleanup=Mock(return_value=(True,0,False)))
@@ -138,7 +138,7 @@ assert.equal(g.counts.canary_blocked,1); console.log('node guard canaries passed
             lab=Path(tmp); evidence=lab/'evidence'/'test'; evidence.mkdir(parents=True)
             original=lab/runner.HARNESS/'run.py'; original.parent.mkdir(parents=True)
             original.write_bytes(frozen_source())
-            fake_pg=types.SimpleNamespace(pid=12345,port=55432,start=Mock(),cleanup=Mock(return_value={'stopped':True}))
+            fake_pg=types.SimpleNamespace(pid=12345,port=55432,last_command=None,start=Mock(),cleanup=Mock(return_value={'stopped':True}))
             child=Mock(pid=12346); child.poll.return_value=0
             monitor=Mock(); monitor.start.side_effect=RuntimeError('controlled thread start failure')
             monitor.join.side_effect=RuntimeError('cannot join unstarted thread')
@@ -161,6 +161,31 @@ assert.equal(g.counts.canary_blocked,1); console.log('node guard canaries passed
             self.assertIn('monitor_join:RuntimeError',receipt['errors'])
             self.assertIn('cluster_directory:OSError',receipt['errors'])
             self.assertEqual(json.loads((evidence/'native-result.json').read_text())['status'],'failed')
+
+    def test_initdb_fault_diagnostic_survives_owned_directory_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab=Path(tmp); evidence=lab/'evidence'/'test'; evidence.mkdir(parents=True)
+            def failed_start(pg):
+                (pg.directory/'bootstrap.log').write_text('x'*9000+'\ninitdb: error: could not open configuration file postgresql.conf.sample\npassword=synthetic-private-value\nhttps://user:synthetic-private-value@example.invalid/db\n')
+                pg.last_command={'program':'initdb','exit_code':1,'error_type':'CalledProcessError'}
+                raise subprocess.CalledProcessError(1,['initdb'])
+            lifecycle=types.SimpleNamespace(establish_subreaper=Mock(),cleanup=Mock(return_value=(True,0,False)))
+            with patch.dict(sys.modules,{'collector_matrix':lifecycle}), \
+                 patch.object(runner,'verify_inputs',return_value={}), \
+                 patch.object(runner,'product_fingerprint',return_value={}), \
+                 patch.object(runner,'check_fixed_ports'),patch.object(runner,'reserve_port',return_value=55432), \
+                 patch.object(runner.NativePostgres,'start',failed_start):
+                self.assertEqual(runner.supervise(lab,evidence,Path('/fake/bin'),60),1)
+            receipt=json.loads((evidence/'native-postgres-diagnostic.json').read_text())
+            tail=receipt['logs']['bootstrap.log']
+            self.assertIn('could not open configuration file',tail['sanitized_tail'])
+            self.assertNotIn('synthetic-private-value',json.dumps(receipt))
+            self.assertTrue(tail['tail_truncated']); self.assertLessEqual(tail['retained_bytes'],8192)
+            self.assertEqual(receipt['last_command']['exit_code'],1)
+            self.assertEqual((evidence/'native-postgres-diagnostic.json').stat().st_mode & 0o777,0o600)
+            cleanup=json.loads((evidence/'native-cleanup.json').read_text())
+            self.assertTrue(cleanup['postgres']['diagnostic_preserved'])
+            self.assertTrue(cleanup['owned_cluster_directory_removed'])
 
 
 if __name__ == '__main__':

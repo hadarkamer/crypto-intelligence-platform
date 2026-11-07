@@ -21,9 +21,10 @@ Python audit hooks permit loopback/Unix IPC only. Actual scanner contexts are of
 Evidence is private under the chosen directory:
 
 - `native-result.json`, `native-cleanup.json`, `native-resources.json`, `adapter-receipt.json`, `guards/*.json`.
+- `native-postgres-diagnostic.json`: owned bootstrap/server log tails are retained before deleting the cluster, at most8192bytes each, with control characters and credential-shaped lines/URLs removed. It records the command program and exit code, never environment values. If the diagnostic cannot be saved, the owned directory is retained and the run fails.
 - Original `summary.json`, `queue.json`, `application-evidence.json`, browser screenshots/assertions, source/AI fixture evidence, resources, queue transitions and cleanup.
 - `supervised-harness.log` and the original child logs. Only fixed synthetic fixture credentials are present in child environments; real credentials are never requested or logged.
 
 Pass requires **both** `native-result.json.status == passed` and the original `summary.json.status == passed`. This is offline application integration, not proof of a real CoinGlass session, real provider quality, hosted authentication/RLS or production deployment.
 
-Local validation completed before publication:10 targeted adapter unit tests passed; no local PostgreSQL or Chromium retry was attempted. The tests cover unchanged assertions, fail-closed source pins, remote-DSN rejection, environment stripping, evidence-path containment, PG startup-timeout cleanup, guard receipts/canaries and cleanup continuation after an injected failure. Original170 product/collector offline tests were not repeated for these adapter-only changes. Real native SQL/browser acceptance must run on Render.
+Local validation completed:11 targeted adapter unit tests passed; no local PostgreSQL or Chromium retry was attempted. The tests cover unchanged assertions, fail-closed source pins, remote-DSN rejection, environment stripping, evidence-path containment, PG startup-timeout cleanup, guard receipts/canaries, cleanup continuation after an injected failure and sanitized bootstrap diagnostics surviving cluster deletion. Original170 product/collector offline tests were not repeated for these adapter-only changes. Real native SQL/browser acceptance must run on Render.
