@@ -24,7 +24,7 @@ PACKAGING_REQUIRED = (
     "native_serial_lab.py", "test_native_serial_lab.py", "NATIVE_SERIAL_README.md",
     "native_serial_manifest.json", "session_handoff.py", "test_session_handoff.py",
     "HANDOFF_CONTRACT.md", "collector_browser_fixture.py", "collector_matrix.py",
-    "test_setup_failure_contract.py",
+    "test_setup_failure_contract.py", "test_live_guard_contract.py", "test_live_supervisor_contract.py",
     "COLLECTOR_LAB_RUN.md", "session_handoff_local_test_result.json",
     "serial_fixture_guard/sitecustomize.py", "serial_node_guard.cjs",
 )

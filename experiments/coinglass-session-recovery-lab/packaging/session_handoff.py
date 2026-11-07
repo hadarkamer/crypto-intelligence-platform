@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded no-echo candidate contract; accepts PUBLIC SYNTHETIC fixtures only.
+"""No-echo private input for one explicitly selected live lab trial.
 
-No live mode exists. Neither a flag nor an environment variable enables real
-credentials. This module imports no browser/app and makes no network request.
+Default fixture modes still accept only PUBLIC SYNTHETIC fixtures. Live input
+requires --live-tty and is passed in memory to the fixed one-shot supervisor.
+This module itself imports no browser/app and makes no network request.
 """
 from __future__ import annotations
 import ast
@@ -23,6 +24,7 @@ LOADER_SHA = 'dad80585a13e74de5a3d3d6f936a4b75b2277c1d11aae49edfb09e5864efc3f9'
 MAX_TTY_BYTES = 65536  # Includes editing bytes and the terminating newline.
 MAX_TTY_SECONDS = 20.0
 PROMPT = b'Public synthetic Cookie header: '
+LIVE_PROMPT = b'Private Cookie header value for ONE BTC/M1/12H trial (input hidden): '
 CANCEL_SIGNALS = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
 FIXTURES = {
     'single_obe': 'obe=PUBLIC_SYNTHETIC_SESSION_NOT_A_CREDENTIAL',
@@ -34,11 +36,27 @@ class Rejected(BaseException):
     def __init__(self, code): self.code = code
 
 
-def validate_fixture(raw):
+def validate_header(raw):
+    """Validate transport syntax only; no cookie-name/authentication assumptions.
+
+Empty values, repeated names and additional '=' characters remain compatible
+with the unchanged installed loader. Syntax does not establish completeness,
+identity, entitlement or a valid source session.
+"""
     if not isinstance(raw, str) or not raw: raise Rejected('input_missing')
-    if len(raw.encode('utf8')) >= MAX_TTY_BYTES: raise Rejected('input_too_large')
+    if len(raw) >= MAX_TTY_BYTES: raise Rejected('input_too_large')
     if any(ord(char) < 32 or ord(char) > 126 for char in raw): raise Rejected('input_malformed')
     if raw.lstrip().lower().startswith(('cookie:', 'set-cookie:')): raise Rejected('field_prefix_rejected')
+    for part in raw.split(';'):
+        name, separator, _value = part.strip().partition('=')
+        name = name.strip()
+        if not separator or not name: raise Rejected('input_malformed')
+        if any(not (c.isalnum() or c in "!#$%&'*+-.^_`|~") for c in name):
+            raise Rejected('input_malformed')
+
+
+def validate_fixture(raw):
+    validate_header(raw)
     names = set()
     for part in raw.split(';'):
         name, separator, value = part.strip().partition('=')
@@ -54,7 +72,7 @@ def validate_fixture(raw):
     raise Rejected('synthetic_fixture_required')
 
 
-def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS):
+def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS, live_candidate=False):
     """Read at most max_bytes total bytes, with a monotonic deadline; no fallback.
 
     Noncanonical mode avoids the terminal's own canonical line-size truncation.
@@ -62,6 +80,7 @@ def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS):
     """
     if not 1 <= max_bytes <= MAX_TTY_BYTES or not 0 < timeout <= MAX_TTY_SECONDS:
         raise Rejected('input_limit_invalid')
+    if type(live_candidate) is not bool: raise Rejected('input_limit_invalid')
     fd = None
     prior = None
     handlers = {}
@@ -78,7 +97,7 @@ def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS):
         termios.tcsetattr(fd, termios.TCSAFLUSH, settings)
         def interrupted(_signal, _frame): raise Rejected('input_interrupted')
         handlers = {sig: signal.signal(sig, interrupted) for sig in CANCEL_SIGNALS}
-        os.write(fd, PROMPT)
+        os.write(fd, LIVE_PROMPT if live_candidate else PROMPT)
         deadline = time.monotonic() + timeout
         while consumed < max_bytes:
             remaining = deadline - time.monotonic()
@@ -89,7 +108,7 @@ def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS):
             consumed += 1
             if byte in (b'\n', b'\r'):
                 value = buffer.decode('ascii', errors='strict')
-                validate_fixture(value)
+                (validate_header if live_candidate else validate_fixture)(value)
                 return value
             if byte in (b'\x7f', b'\x08'):
                 if buffer: buffer.pop()
@@ -102,6 +121,7 @@ def read_tty(*, max_bytes=MAX_TTY_BYTES, timeout=MAX_TTY_SECONDS):
     except KeyboardInterrupt: raise Rejected('input_interrupted') from None
     except BaseException: raise Rejected('secure_tty_required') from None
     finally:
+        for index in range(len(buffer)): buffer[index] = 0
         buffer.clear()
         failed = False
         # Catchable cancellation cannot interrupt terminal restoration.
@@ -194,27 +214,75 @@ def run_handoff(raw, runtime):
 
 def arguments(argv):
     runtime, choice, child = DEFAULT_RUNTIME, None, False
+    runtime_explicit = False
     i = 0
     while i < len(argv):
         key = argv[i]
         if key == '--child' and not child: child = True; i += 1; continue
         if key == '--tty' and choice is None: choice = 'tty'; i += 1; continue
-        if key == '--runtime' and i+1 < len(argv): runtime = Path(argv[i+1]); i += 2; continue
+        if key == '--live-tty' and choice is None: choice = 'live-tty'; i += 1; continue
+        if key == '--runtime' and i+1 < len(argv): runtime = Path(argv[i+1]); runtime_explicit = True; i += 2; continue
         if key == '--fixture-id' and choice is None and i+1 < len(argv) and argv[i+1] in FIXTURES:
             choice = argv[i+1]; i += 2; continue
         raise Rejected('invalid_arguments')
     if child and choice is not None: raise Rejected('invalid_arguments')
     if not child and choice is None: raise Rejected('invalid_arguments')
+    if choice == 'live-tty' and runtime_explicit: raise Rejected('invalid_arguments')
     return runtime, choice, child
+
+
+def disable_core_dumps():
+    """Lower the process and inherited-child core limit before private input."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):
+            raise Rejected('core_dump_guard_unavailable')
+    except Rejected:
+        raise
+    except BaseException:
+        raise Rejected('core_dump_guard_unavailable') from None
+
+
+def live_input_trial():
+    # This clock includes private input. No work timer restarts after the paste.
+    started = time.monotonic()
+    raw = None
+    disable_core_dumps()
+    # Fixed reviewed sibling module; -I invocations do not put script-dir on sys.path.
+    sibling = str(Path(__file__).resolve().parent)
+    if sibling not in sys.path: sys.path.insert(0, sibling)
+    from collector_matrix import live_single, sanitize_live_supervisor_report
+    try:
+        raw = read_tty(live_candidate=True)
+        report = sanitize_live_supervisor_report(live_single(raw, started))
+        if (not isinstance(report, dict)
+                or report.get('format') != 'collector-live-supervised.v1'
+                or report.get('status') not in ('passed', 'stopped', 'failed')):
+            raise Rejected('live_output_invalid')
+        return report
+    except Rejected:
+        raise
+    except BaseException:
+        raise Rejected('live_trial_failed') from None
+    finally:
+        # Python immutable strings cannot be securely erased; do not claim that.
+        raw = None
 
 
 def main(argv):
     def no_network(event, _args):
         if event.startswith('socket.'): raise Rejected('network_forbidden')
     sys.addaudithook(no_network)
+    live_requested = False
     try:
         runtime, choice, child = arguments(argv)
-        if child:
+        live_requested = choice == 'live-tty'
+        if choice == 'live-tty':
+            report = live_input_trial()
+            print(json.dumps(report, separators=(',', ':')), flush=True)
+            return 0 if report['status'] == 'passed' else 2
+        elif child:
             signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS)
             report = child_result(runtime)
         else:
@@ -224,7 +292,9 @@ def main(argv):
         return 0
     except Rejected as exc: code = exc.code
     except BaseException: code = 'handoff_failed'
-    print(json.dumps({'status':'blocked','reason':code,'live_enabled':False}, separators=(',', ':')), flush=True)
+    report = {'status':'blocked','reason':code,'live_enabled':live_requested}
+    if live_requested: report['trial_result_available'] = False
+    print(json.dumps(report, separators=(',', ':')), flush=True)
     return 2
 
 

@@ -1,5 +1,7 @@
 """New bounded-TTY and synthetic multi-cookie tests; never starts a browser."""
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ import sys
 import termios
 import time
 import unittest
+import types
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -21,7 +24,7 @@ RUNTIME = h.DEFAULT_RUNTIME
 CANARY = 'PUBLIC_SYNTHETIC_AMBIENT_CANARY'
 
 
-def tty_client(args):
+def tty_client(args, *, live_validation=False):
     runtime, max_bytes, timeout = Path(args[0]), int(args[1]), float(args[2])
     total_read = 0
     original_read = os.read
@@ -33,16 +36,19 @@ def tty_client(args):
     started = time.monotonic()
     try:
         os.read = observed_read
-        try: raw = h.read_tty(max_bytes=max_bytes, timeout=timeout)
+        try: raw = h.read_tty(max_bytes=max_bytes, timeout=timeout, live_candidate=live_validation)
         finally: os.read = original_read
-        report = h.run_handoff(raw, runtime)
+        report = ({'status':'passed','candidate_syntax_valid':True,'live_enabled':False,
+                   'source_requests':0,'browser_launches':0,'ai_calls':0}
+                  if live_validation else h.run_handoff(raw, runtime))
+        raw = None
     except h.Rejected as exc: report = {'status':'blocked','reason':exc.code,'live_enabled':False}
     except BaseException: report = {'status':'blocked','reason':'test_client_failed','live_enabled':False}
     report.update(tty_bytes_read=total_read, elapsed_seconds=round(time.monotonic()-started,3))
     print(json.dumps(report,separators=(',',':')),flush=True)
 
 
-def tty_case(payload, *, limit=h.MAX_TTY_BYTES, timeout=.5, echo=True):
+def tty_case(payload, *, limit=h.MAX_TTY_BYTES, timeout=.5, echo=True, live_validation=False):
     master, slave = pty.openpty()
     initial = termios.tcgetattr(slave)
     if not echo:
@@ -50,7 +56,7 @@ def tty_case(payload, *, limit=h.MAX_TTY_BYTES, timeout=.5, echo=True):
         termios.tcsetattr(slave, termios.TCSANOW, initial)
     initial = termios.tcgetattr(slave)
     command = ['/usr/bin/setsid','--ctty',sys.executable,'-I','-B',str(Path(__file__).resolve()),
-               '--tty-client',str(RUNTIME),str(limit),str(timeout)]
+               '--tty-live-validation-client' if live_validation else '--tty-client',str(RUNTIME),str(limit),str(timeout)]
     proc = subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,close_fds=True)
     output = b''
     sent = False
@@ -62,7 +68,7 @@ def tty_case(payload, *, limit=h.MAX_TTY_BYTES, timeout=.5, echo=True):
             if select.select([master],[],[],.02)[0]:
                 try: output += os.read(master,8192)
                 except OSError: break
-            if not sent and h.PROMPT in output:
+            if not sent and (h.LIVE_PROMPT if live_validation else h.PROMPT) in output:
                 echo_disabled = not bool(termios.tcgetattr(slave)[3] & (termios.ECHO|termios.ECHONL))
                 if payload is not None: os.write(master,payload)
                 sent = True
@@ -190,14 +196,110 @@ class SafeResult(unittest.TextTestResult):
     def _exc_info_to_string(self,err,test): return 'Failure details redacted; inspect the named synthetic test.'
 
 
+class LiveInputTests(unittest.TestCase):
+    """Changed-input boundary only, always PUBLIC fixtures and mocked supervisor."""
+    PUBLIC_HEADER = 'fixture_session=PUBLIC_SYNTHETIC_LIVE_INPUT; fixture_empty=; fixture_equals=a=b; fixture_session=PUBLIC_REPEAT'
+
+    def test_header_syntax_accepts_loader_compatible_pairs_without_obe(self):
+        self.assertIsNone(h.validate_header(self.PUBLIC_HEADER))
+        self.assertIsNone(h.validate_header('fixture_empty='))
+        with self.assertRaises(h.Rejected) as error:
+            h.validate_fixture(self.PUBLIC_HEADER)
+        self.assertIn(error.exception.code, {'input_malformed','duplicate_cookie_name','session_cookie_missing'})
+        self.assertEqual(h.validate_fixture(h.FIXTURES['full_header']), 'full_header')
+
+    def test_header_syntax_rejects_fields_controls_and_malformed_pairs_without_echo(self):
+        for raw in ('', 'Cookie: '+self.PUBLIC_HEADER, 'Set-Cookie: '+self.PUBLIC_HEADER,
+                    'fixture=PUBLIC\r\nother=PUBLIC', 'fixture key=PUBLIC', 'fixture', '=PUBLIC',
+                    'fixture=PUBLIC; ', 'x'*h.MAX_TTY_BYTES):
+            with self.subTest(case_length=len(raw)), self.assertRaises(h.Rejected) as error:
+                h.validate_header(raw)
+            self.assertNotIn('PUBLIC', str(error.exception))
+
+    def test_live_validation_tty_is_noecho_restored_and_never_calls_source(self):
+        report,output,noecho,restored=tty_case(self.PUBLIC_HEADER.encode()+b'\n',live_validation=True)
+        self.assertEqual(report['status'],'passed')
+        self.assertTrue(report['candidate_syntax_valid'])
+        self.assertTrue(noecho and restored)
+        self.assertNotIn(self.PUBLIC_HEADER.encode(),output)
+        self.assertNotIn(b'PUBLIC_SYNTHETIC_LIVE_INPUT',output)
+        self.assertEqual(report['source_requests'],0)
+        self.assertEqual(report['browser_launches'],0)
+
+    def test_live_validation_tty_timeout_still_restores_without_source(self):
+        report,output,noecho,restored=tty_case(None,timeout=.12,live_validation=True)
+        self.assertEqual(report['reason'],'input_timeout')
+        self.assertTrue(noecho and restored)
+        self.assertEqual(report['tty_bytes_read'],0)
+        self.assertNotIn(self.PUBLIC_HEADER.encode(),output)
+
+    def test_live_flag_cannot_accept_cookie_arguments_or_runtime_override(self):
+        self.assertEqual(h.arguments(['--live-tty']), (h.DEFAULT_RUNTIME,'live-tty',False))
+        for argv in (['--live-tty','--runtime','/other'], ['--live-tty','--cookie',self.PUBLIC_HEADER],
+                     ['--live-tty','--child'], ['--live-tty','--fixture-id','full_header'],
+                     ['--live-tty','--live-tty']):
+            with self.assertRaises(h.Rejected): h.arguments(argv)
+
+    def test_live_handoff_starts_deadline_before_input_and_calls_supervisor_once(self):
+        events=[]
+        def read(**kwargs):
+            events.append('tty'); self.assertEqual(kwargs,{'live_candidate':True})
+            return self.PUBLIC_HEADER
+        report={'format':'collector-live-supervised.v1','status':'stopped','reason':'public_fixture_test'}
+        def supervise(raw,started):
+            events.append('supervisor'); self.assertEqual(started,123.5)
+            self.assertEqual(raw,self.PUBLIC_HEADER); self.assertNotEqual(os.environ.get('COINGLASS_COOKIE_HEADER'),raw)
+            return report
+        fake=types.SimpleNamespace(live_single=mock.Mock(side_effect=supervise),
+                                   sanitize_live_supervisor_report=mock.Mock(side_effect=lambda value:value))
+        with mock.patch.dict(sys.modules,{'collector_matrix':fake}), \
+             mock.patch.object(h.time,'monotonic',side_effect=lambda:events.append('clock') or 123.5), \
+             mock.patch.object(h,'disable_core_dumps',side_effect=lambda:events.append('core_guard')), \
+             mock.patch.object(h,'read_tty',side_effect=read):
+            self.assertEqual(h.live_input_trial(),report)
+        self.assertEqual(events,['clock','core_guard','tty','supervisor'])
+        fake.live_single.assert_called_once(); fake.sanitize_live_supervisor_report.assert_called_once()
+
+    def test_core_guard_lowers_soft_and_hard_and_failure_prevents_input(self):
+        import resource
+        with mock.patch.object(resource,'setrlimit') as set_limit, \
+             mock.patch.object(resource,'getrlimit',return_value=(0,0)):
+            h.disable_core_dumps()
+        set_limit.assert_called_once_with(resource.RLIMIT_CORE,(0,0))
+        with mock.patch.object(h,'disable_core_dumps',side_effect=h.Rejected('core_dump_guard_unavailable')), \
+             mock.patch.object(h,'read_tty') as read:
+            with self.assertRaises(h.Rejected): h.live_input_trial()
+        read.assert_not_called()
+
+    def test_supervisor_failure_and_schema_rejection_never_print_candidate(self):
+        for failure in (RuntimeError(self.PUBLIC_HEADER), h.Rejected('live_output_invalid')):
+            fake=types.SimpleNamespace(live_single=mock.Mock(return_value={'raw':self.PUBLIC_HEADER}),
+                                       sanitize_live_supervisor_report=mock.Mock(side_effect=failure))
+            output=io.StringIO()
+            with mock.patch.dict(sys.modules,{'collector_matrix':fake}), \
+                 mock.patch.object(h,'disable_core_dumps'),mock.patch.object(h,'read_tty',return_value=self.PUBLIC_HEADER), \
+                 mock.patch.object(h.sys,'addaudithook'), contextlib.redirect_stdout(output):
+                self.assertEqual(h.main(['--live-tty']),2)
+            self.assertNotIn('PUBLIC',output.getvalue())
+            report=json.loads(output.getvalue())
+            self.assertFalse(report['trial_result_available'])
+            fake.live_single.assert_called_once()
+
+
 if __name__=='__main__':
     if len(sys.argv)>1 and sys.argv[1]=='--tty-client':
         tty_client(sys.argv[2:]); raise SystemExit(0)
+    if len(sys.argv)>1 and sys.argv[1]=='--tty-live-validation-client':
+        tty_client(sys.argv[2:],live_validation=True); raise SystemExit(0)
+    selected = HandoffTests
+    if sys.argv[1:] == ['--live-input-tests']:
+        selected = LiveInputTests
+        sys.argv = sys.argv[:1]
     if len(sys.argv)==3 and sys.argv[1]=='--runtime': RUNTIME=Path(sys.argv[2]).resolve()
     elif len(sys.argv)!=1: raise SystemExit('invalid_test_arguments')
     result=unittest.TextTestRunner(verbosity=1,resultclass=SafeResult).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(HandoffTests))
-    print(json.dumps({'suite':'session_handoff','tests':result.testsRun,'failures':len(result.failures),
+        unittest.defaultTestLoader.loadTestsFromTestCase(selected))
+    print(json.dumps({'suite':'session_handoff_live_input' if selected is LiveInputTests else 'session_handoff','tests':result.testsRun,'failures':len(result.failures),
                       'errors':len(result.errors),'passed':result.wasSuccessful(),'dummy_only':True,
                       'source_requests':0,'browser_launches':0,'ai_calls':0},separators=(',',':')))
     raise SystemExit(0 if result.wasSuccessful() else 1)

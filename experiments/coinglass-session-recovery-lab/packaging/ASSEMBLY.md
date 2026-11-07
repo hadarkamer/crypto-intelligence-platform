@@ -1,5 +1,33 @@
 # Temporary isolated CoinGlass fixture worker
 
+## Current single-source-trial authorization (2026-11-07)
+
+The prior worker was deleted after successful isolated acceptance. Reuse this
+same package for one explicitly approved BTC / Model 1 / 12H source attempt,
+without AI or production access. Current limits supersede the historical
+fixture-work limits below: one 1c-2g worker, USD 1 before tax including build and
+traffic, and deletion within one hour of resource creation. Recheck account
+quotas and pricing before creation. Do not rerun completed acceptance suites.
+
+Only the temporary input and execution wrappers may change. Product sources,
+readiness/source protections and native hover validation remain pinned. The
+single trial has a 60-second total deadline, including private input and process
+cleanup. An ordinary source-page visit can create multiple automatic HTTP
+requests; this authorization is one capture attempt, not a single HTTP request.
+
+The user supplies a new authorized full Cookie-header value directly to the
+private no-echo terminal prompt. Never use shell arguments, shell environment
+assignments, persistent Render variables, credential files or chat for the value.
+Do not reuse the production Session. Retain only allowlisted nonsecret receipts;
+delete transient source screenshots after validation. If a condition fails or the
+deadline expires, stop without retry. A timeout does not establish denial of
+source permission. Remove the worker and its Blueprint after evidence export;
+an idle/stopped process is not proof that billing has stopped.
+
+The previous native isolated integration passed with real PostgreSQL/Chromium,
+two fixture cycles and a focused failed-map recovery. This is not proof of live
+CoinGlass authorization, live AI or hosted production integration.
+
 This package is a reviewable test artifact, not a product change. It is intended only for the approved temporary Render worker: **one instance, 1 CPU / 2 GB, no more than 24 hours and within the separately controlled USD 6 total budget**. Creating a worker does not authorize live CoinGlass, live AI, a new Session, production configuration changes, or product deployment.
 
 ## Repository and context

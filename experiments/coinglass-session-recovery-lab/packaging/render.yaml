@@ -1,5 +1,5 @@
 # Proposed temporary test worker only. Apply solely to the approved test branch.
-# Billing deadline/deletion is an external operator responsibility: 24h maximum.
+# One approved live trial: operator must delete within 1h; total budget USD 1.
 services:
   - type: worker
     name: coinglass-session-recovery-lab
