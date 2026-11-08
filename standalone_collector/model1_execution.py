@@ -1,8 +1,8 @@
 """Safe execution diagnostics and small-worker resource control.
 
 Never logs raw browser/API errors, response bodies, cookies or profiles.
-Only unrelated advertising/analytics hosts are excluded; CoinGlass, its assets,
-authentication and challenge providers are not intercepted or bypassed.
+Only unrelated advertising/analytics hosts are excluded. The existing account
+request may receive its missing credential; source guards are never bypassed.
 """
 from __future__ import annotations
 from contextlib import contextmanager
@@ -110,6 +110,8 @@ class StageFailure(RuntimeError):
 def prepare_context(context):
     # A narrow host filter, never a wildcard block of source or authentication.
     context.route(AD_HOSTS,lambda route: route.abort())
+    from source_account_diagnostic import prepare_account_auth
+    prepare_account_auth(context)
 
 def control(function,page,*args):
     phase={'_select_model_one':'model_selection','_select_symbol_mode':'symbol_selection',

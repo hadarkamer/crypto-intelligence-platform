@@ -1,9 +1,11 @@
-"""Opt-in, read-only CoinGlass account response diagnostic.
+"""Existing CoinGlass account credential decoding and account request handling.
 
 One fixed-origin GET uses the existing session's obe value, as the public
 frontend does. Only HTTP status and the outer success boolean are retained.
 Encrypted data is left untouched; acceptance does not prove heatmap access.
-No browser, model, database, credential files or raw response logging.
+The standalone diagnostic opens no browser and writes no product data. The
+browser adapter below authenticates only the page's existing account request;
+it does not request maps, inspect account bodies, or change source guards.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import json
 import os
 import re
 import time
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 USER_INFO_URL='https://capi.coinglass.com/coin-community/api/userapi/info'
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
@@ -21,6 +23,8 @@ MAX_RESPONSE_BYTES=32*1024
 MAX_STORAGE_STATE_BYTES=64*1024
 COOKIE_DOMAINS=frozenset({'coinglass.com','.coinglass.com','www.coinglass.com'})
 SOURCE_PAGE_PATH='/pro/futures/LiquidationHeatMap'
+USER_INFO_ROUTE=re.compile(r'^https://capi\.coinglass\.com(?::443)?/coin-community/api/userapi/info(?:\?[^#]*)?$')
+SOURCE_ORIGIN='https://www.coinglass.com'
 
 
 def _safe_session_value(value):
@@ -68,6 +72,62 @@ def _session_value(environment):
         if path!='/' and not (SOURCE_PAGE_PATH==path or SOURCE_PAGE_PATH.startswith(path.rstrip('/')+'/')):continue
         value=_safe_session_value(cookie.get('value'))
     return value
+
+
+def prepare_account_auth(context, *, env=None):
+    """Supply a missing account header, without broad browser header injection.
+
+    Do not override frontend credentials or attach this header to map requests.
+    A redirect must never carry the supplied credential to another URL.
+    """
+    value=_session_value(os.environ if env is None else env)
+    if value is None:return
+
+    def handle(route):
+        response=None
+        try:
+            request=route.request
+            if (not USER_INFO_ROUTE.fullmatch(request.url) or request.method!='GET'
+                    or request.resource_type not in ('xhr','fetch')):
+                route.fallback();return
+            frame=urlsplit(request.frame.url)
+            if (frame.scheme!='https' or frame.hostname!='www.coinglass.com'
+                    or frame.port not in (None,443) or frame.username is not None
+                    or frame.password is not None
+                    or request.header_value('origin')!=SOURCE_ORIGIN
+                    or request.header_value('obe') is not None):
+                route.fallback();return
+            headers=request.all_headers()
+            if any(name.lower()=='obe' for name in headers):
+                route.fallback();return
+            headers['obe']=value
+            # continue_(headers=...) propagates headers across redirects.
+            # Fetch this intercepted request once instead; never follow/retry.
+            response=route.fetch(headers=headers,max_redirects=0,max_retries=0,
+                                 timeout=12000)
+            if 300<=response.status<400:
+                route.abort();return
+            # fulfill() can otherwise add permissive CORS headers of its own.
+            # Preserve the server's permission and the browser's credential mode.
+            allowed_origin=response.headers.get('access-control-allow-origin')
+            if allowed_origin not in (SOURCE_ORIGIN,'*'):
+                route.abort();return
+            route.fulfill(response=response)
+        except Exception:
+            # Raw request/response exceptions can contain credentials or URLs.
+            # Do not retry, fabricate success, or release an altered request.
+            try:route.abort()
+            except Exception:pass
+        finally:
+            if response is not None:
+                try:response.dispose()
+                except Exception:pass
+
+    try:context.route(USER_INFO_ROUTE,handle)
+    except Exception:
+        # Setup is before the capture cleanup scope. Keep the original request
+        # and guards if this narrow adapter cannot be registered.
+        return
 
 
 def check_account_response(*,env=None,http_get=None):
