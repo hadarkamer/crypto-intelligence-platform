@@ -56,9 +56,12 @@ python research_dom_capture_archive_selftest.py
 python research_max_pain_archive_selftest.py
 ```
 
-Optional real-DB pipeline validation accepts only TEST_DATABASE_URL with an
-absolute Unix socket host, targeting an explicitly disposable local test DB.
-Never point it to production. pgserver was used only as a local test dependency;
+Optional real-DB pipeline validation accepts only TEST_DATABASE_URL with a local
+Unix socket or an allowlisted local/CI host and an explicitly test-named database.
+It creates and removes a unique disposable child database. The script entry point
+runs the integration class so the existing GitHub Actions self-test loop includes
+it. No workflow or infrastructure change is required. Never point it to production.
+pgserver was used only as a local test dependency;
 requirements.txt is unchanged.
 
 ## Resource observation and rollout boundary

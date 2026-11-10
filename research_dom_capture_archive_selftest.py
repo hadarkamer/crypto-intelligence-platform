@@ -10,6 +10,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import socket
 import unittest
+from uuid import uuid4
 from unittest.mock import AsyncMock, Mock
 
 import coinglass_dom_reader as reader
@@ -218,15 +219,34 @@ def run():
 
 
 class FailedPollPipelineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.dsn = None
+        source = os.environ.get('TEST_DATABASE_URL')
+        if not source:
+            return
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+        info = conninfo_to_dict(source)
+        host, name = info.get('host', ''), info.get('dbname', '')
+        if not (host.startswith('/') or host in {'localhost', '127.0.0.1', '::1', 'postgres'}) or not (name.startswith('test_') or name.endswith('_test')):
+            raise ValueError('Explicit disposable local/CI test database required')
+        database = 'test_failed_dom_' + uuid4().hex
+        with psycopg.connect(source, autocommit=True) as conn:
+            conn.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database)))
+        self.dsn = make_conninfo(source, dbname=database)
+        def cleanup():
+            with psycopg.connect(source, autocommit=True) as conn:
+                conn.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(database)))
+        self.addCleanup(cleanup)
+
     async def test_collection_archive_failure_recovery_and_idempotency(self):
-        # Only an explicitly supplied Unix socket DSN is accepted. No production
-        # environment discovery or exchange/Telegram connection is permitted.
+        # The existing CI service or a local Unix socket test database only.
+        # No production environment discovery or exchange/Telegram connection.
         import main
-        dsn = os.environ.get('TEST_DATABASE_URL')
+        dsn = self.dsn
         if dsn:
             import psycopg
-            from psycopg.conninfo import conninfo_to_dict
-            self.assertTrue(conninfo_to_dict(dsn).get('host', '').startswith('/'))
             with psycopg.connect(dsn) as conn:
                 conn.execute((Path(__file__).parent / 'migrations/007_max_pain_watch_archive_v1.sql').read_text())
         original_persist = archive.persist_snapshot_payload
@@ -365,4 +385,6 @@ class FailedPollPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(replay['snapshot_set_id'], persisted['snapshot_set_id'])
 
 
-if __name__ == "__main__": run()
+if __name__ == "__main__":
+    run()
+    unittest.main()
