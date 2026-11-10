@@ -46,12 +46,12 @@ def _capture_unavailable(timeframe, reason, *, outcome='FAILED', metadata=None):
                 'payload': payload, 'payload_sha256': hashlib.sha256(encoded.encode('utf-8')).hexdigest()}
 
 
-def _accepted_capture(tables, timeframe, rows, metadata):
+def _poll_capture(tables, timeframe, rows, metadata, *, failed=False):
     try:
         return dom_capture.capture_poll(tables, timeframe, rows, metadata=metadata,
-                                        parse_number=_parse_number, is_symbol=_is_symbol_token)
+                                        parse_number=_parse_number, is_symbol=_is_symbol_token, failed=failed)
     except Exception:
-        return _capture_unavailable(timeframe, 'ACCEPTED_POLL_CAPTURE_FAILED', metadata=metadata)
+        return _capture_unavailable(timeframe, 'FAILED_POLL_CAPTURE_FAILED' if failed else 'ACCEPTED_POLL_CAPTURE_FAILED', metadata=metadata)
 
 
 def _attempt_capture(result, timeframe, history, attempt):
@@ -64,6 +64,9 @@ def _attempt_capture(result, timeframe, history, attempt):
                         'parsed_count': debug.get('parsed_count'), 'capture_payload_sha256': capture['payload_sha256'],
                         'reason_code': capture['payload'].get('unavailable_reason'),
                         'capture_completed_at_utc': capture['payload'].get('metadata', {}).get('capture_completed_at_utc')})
+        if 'failure_summary' in capture['payload']:
+            history[-1]['failure_summary'] = capture['payload']['failure_summary']
+            history[-1]['table_read_completed_at_utc'] = capture['payload'].get('metadata', {}).get('table_read_completed_at_utc')
         result['dom_capture'] = dom_capture.with_attempt_history(capture, history, attempt=attempt)
     except Exception:
         result['dom_capture'] = _capture_unavailable(timeframe, 'ATTEMPT_HISTORY_CAPTURE_FAILED')
@@ -264,8 +267,10 @@ async def read_timeframe(
         await page.wait_for_timeout(750)
         try:
             # Keep the same single extraction and the unchanged operational
-            # parser. Retain this exact poll only after its existing gate passes.
+            # parser. Accepted polls retain raw evidence; only the final failed
+            # poll contributes bounded diagnostic counts after retries expire.
             tables = await _extract_tables(page)
+            table_read_completed_at_utc = datetime.now(timezone.utc).isoformat()
             rows = _parse_maxpain_table_rows(tables, timeframe)
         except ValueError as exc:
             return {"timeframe": timeframe, "verified": False, "rows": [],
@@ -298,7 +303,7 @@ async def read_timeframe(
                 and unique_symbols and row_count_ok and not duplicate_of):
             return {"timeframe": timeframe, "clicked": clicked, "verified": True,
                     "rows": rows, "fingerprint": fingerprint, "debug": last_debug,
-                    "dom_capture": _accepted_capture(tables, timeframe, rows,
+                    "dom_capture": _poll_capture(tables, timeframe, rows,
                         {**last_debug, 'baseline_label': baseline_label, 'fingerprint': fingerprint,
                          'baseline_fingerprint': baseline_fp, 'previous_fingerprint': previous_fingerprint,
                          'parsed_at_utc': rows[0]['collected_at_utc'] if rows else None})}
@@ -307,7 +312,8 @@ async def read_timeframe(
         "fingerprint": None,
         "error": "timeframe failed active-tab/content/stability/uniqueness verification",
         "debug": last_debug,
-        "dom_capture": _capture_unavailable(timeframe, 'TIMEFRAME_VERIFICATION_FAILED', metadata=last_debug),
+        "dom_capture": _poll_capture(tables, timeframe, rows,
+            {**last_debug, 'table_read_completed_at_utc': table_read_completed_at_utc}, failed=True),
     }
 
 

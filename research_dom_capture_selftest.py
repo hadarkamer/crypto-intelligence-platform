@@ -143,6 +143,96 @@ class CaptureTests(unittest.TestCase):
 
 
 class ReadCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_poll_distinguishes_source_missing_from_parse_failure(self):
+        data = table(50)
+        for row in data['rows'][:22]:
+            row[4] = {'text': '—', 'primary': '—', 'amount': ''}
+        data['rows'][22][4]['primary'] = 'changed-format'
+        original = deepcopy(data)
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+        with patch.object(reader, '_extract_tables', AsyncMock(return_value=[data])) as extract, \
+             patch.object(reader, '_click_timeframe_verified', AsyncMock(return_value=True)), \
+             patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='24h')):
+            result = await reader.read_timeframe(page, '24h')
+        self.assertFalse(result['verified'])
+        self.assertEqual(result['rows'], [])
+        self.assertEqual(extract.await_count, 25)
+        self.assertEqual(page.wait_for_timeout.await_count, 24)
+        self.assertEqual(data, original)
+        diagnostic = result['dom_capture']
+        self.assertTrue(capture.validate_capture(diagnostic, snapshot=False))
+        payload = diagnostic['payload']
+        summary = payload['failure_summary']
+        self.assertEqual((summary['raw_rows'], summary['parsed_accepted_rows'], summary['classified_rejected_rows']), (50, 27, 23))
+        self.assertEqual(summary['rejection_reason_counts']['LONG_TARGET_SOURCE_MISSING'], 22)
+        self.assertEqual(summary['rejection_reason_counts']['LONG_TARGET_UNPARSEABLE'], 1)
+        self.assertIsNone(payload['selected_table'])
+        self.assertEqual(payload['row_decisions'], [])
+        self.assertIn('table_read_completed_at_utc', payload['metadata'])
+        self.assertNotIn('changed-format', capture.canonical(diagnostic))
+
+    async def test_failed_capture_fault_preserves_rejection_and_retry_decision(self):
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+        with patch.object(reader, '_extract_tables', AsyncMock(return_value=[table(28)])), \
+             patch.object(reader, '_click_timeframe_verified', AsyncMock(return_value=True)), \
+             patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='24h')), \
+             patch.object(capture, 'capture_poll', side_effect=RuntimeError('private details')):
+            result = await reader.read_timeframe(page, '24h')
+        self.assertFalse(result['verified'])
+        self.assertEqual(result['debug']['parsed_count'], 28)
+        self.assertEqual(result['dom_capture']['payload']['unavailable_reason'], 'FAILED_POLL_CAPTURE_FAILED')
+        self.assertNotIn('private details', capture.canonical(result))
+
+    async def test_failed_attempt_summary_survives_successful_retry(self):
+        pages = [SimpleNamespace(close=AsyncMock(), wait_for_timeout=AsyncMock(), number=n) for n in range(2)]
+        async def extract(page):
+            return [table(28 if page.number == 0 else 30)]
+        with patch.object(reader, '_new_ready_page', AsyncMock(side_effect=pages)), \
+             patch.object(reader, '_extract_tables', AsyncMock(side_effect=extract)), \
+             patch.object(reader, '_click_timeframe_verified', AsyncMock(return_value=True)), \
+             patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='24h')), \
+             patch.object(reader.asyncio, 'sleep', AsyncMock()) as sleep:
+            result = await reader._retry_timeframe_on_fresh_page(None, 'fixture://', '24h', None, 3)
+        self.assertTrue(result['verified'])
+        history = result['dom_capture']['payload']['attempt_history']
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]['failure_summary']['raw_rows'], 28)
+        self.assertEqual(history[0]['failure_summary']['classified_rejected_rows'], 0)
+        self.assertEqual(history[0]['outcome'], 'FAILED')
+        self.assertEqual(history[1]['outcome'], 'ACCEPTED')
+        sleep.assert_awaited_once()
+        for page in pages:
+            page.close.assert_awaited_once()
+
+    async def test_wrong_window_does_not_claim_missing_rows(self):
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+        with patch.object(reader, '_extract_tables', AsyncMock(return_value=[table(50)])), \
+             patch.object(reader, '_click_timeframe_verified', AsyncMock(return_value=True)), \
+             patch.object(reader, '_active_timeframe_label', AsyncMock(return_value='12h')):
+            result = await reader.read_timeframe(page, '24h')
+        p = result['dom_capture']['payload']
+        self.assertFalse(p['metadata']['active_ok'])
+        self.assertEqual(p['failure_summary']['classified_rejected_rows'], 0)
+        self.assertEqual(p['failure_summary']['rejection_reason_counts'], {})
+
+    async def test_cancellation_still_closes_retry_page(self):
+        page = SimpleNamespace(close=AsyncMock(), wait_for_timeout=AsyncMock())
+        with patch.object(reader, '_new_ready_page', AsyncMock(return_value=page)), \
+             patch.object(reader, '_extract_tables', AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await reader._retry_timeframe_on_fresh_page(None, 'fixture://', '24h', None, 3)
+        page.close.assert_awaited_once()
+
+    async def test_failure_summary_is_bounded_and_marks_unclassified_rows(self):
+        data = table(600)
+        data['rows'][0][4]['primary'] = 'x' * 100000
+        rows = reader._parse_maxpain_table_rows([data], '24h')
+        result = capture.capture_poll([data], '24h', rows, metadata={},
+            parse_number=reader._parse_number, is_symbol=reader._is_symbol_token, failed=True)
+        self.assertEqual(result['payload']['failure_summary']['unclassified_rows'], 88)
+        self.assertEqual(result['payload']['truncation'], ['ROW_LIMIT'])
+        self.assertLess(len(capture.canonical(result).encode()), 3000)
+
     async def test_atomic_snapshot_has_seven_receipts_and_capture_failure_preserves_operational_rows(self):
         for diagnostic_failure in (False, True):
             with self.subTest(diagnostic_failure=diagnostic_failure):

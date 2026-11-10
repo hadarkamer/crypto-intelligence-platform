@@ -163,8 +163,8 @@ def _presence(decisions, truncated):
     return result
 
 
-def capture_poll(tables, timeframe, parsed_rows, *, metadata, parse_number, is_symbol):
-    """Retain one accepted poll's selected table; no new DOM read is performed."""
+def capture_poll(tables, timeframe, parsed_rows, *, metadata, parse_number, is_symbol, failed=False):
+    """Retain accepted evidence or bounded failed-poll counts; never reread DOM."""
     truncation = set()
     matches = []
     for index, table in enumerate(tables):
@@ -175,6 +175,39 @@ def capture_poll(tables, timeframe, parsed_rows, *, metadata, parse_number, is_s
         return unavailable(timeframe, 'SELECTED_TABLE_NOT_UNIQUE', metadata=metadata)
     table_index, selected, columns = matches[0]
     header_count, raw_count = len(selected['headers']), len(selected['rows'])
+    if failed:
+        # Raw failed tables are deliberately not retained. UNAVAILABLE still
+        # describes the raw capture; these counts explain the final poll only.
+        result = unavailable(timeframe, 'TIMEFRAME_VERIFICATION_FAILED', metadata=metadata)
+        reasons, accepted, rejected = {}, 0, 0
+        for index, cells in enumerate(selected['rows'][:MAX_ROWS]):
+            decision = _decision(cells, columns, header_count, index, parse_number, is_symbol)
+            accepted += decision['status'] == 'ACCEPTED'
+            rejected += decision['status'] == 'REJECTED'
+            for reason in decision['reason_codes']:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            if len(cells) == header_count:
+                for column, field, name in (
+                    ('Price · 24h', 'primary', 'PRICE'),
+                    ('Long pain below', 'primary', 'LONG_TARGET'),
+                    ('Short pain above', 'primary', 'SHORT_TARGET'),
+                    ('Long pain below', 'amount', 'LONG_AMOUNT'),
+                    ('Short pain above', 'amount', 'SHORT_AMOUNT'),
+                ):
+                    value = cells[columns[column]].get(field, '')
+                    if parse_number(value) is None:
+                        kind = 'SOURCE_MISSING' if value is None or str(value).strip() in {'', '-', '—', 'N/A', 'nan', 'None', '💥'} else 'UNPARSEABLE'
+                        reason = f'{name}_{kind}'
+                        reasons[reason] = reasons.get(reason, 0) + 1
+        result['payload']['failure_summary'] = {
+            'raw_rows': raw_count, 'parsed_accepted_rows': len(parsed_rows),
+            'classified_accepted_rows': accepted, 'classified_rejected_rows': rejected,
+            'unclassified_rows': max(0, raw_count - MAX_ROWS),
+            'rejection_reason_counts': reasons,
+        }
+        if raw_count > MAX_ROWS:
+            result['payload']['truncation'] = ['ROW_LIMIT']
+        return _bound_timeframe(result['payload'], result['status'])
     stats = {'processed_text_fields_truncated': 0, 'processed_text_utf8_bytes_omitted': 0}
     if header_count > MAX_CELLS:
         truncation.add('HEADER_CELL_LIMIT')

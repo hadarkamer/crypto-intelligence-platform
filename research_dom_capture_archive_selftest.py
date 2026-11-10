@@ -5,6 +5,15 @@ import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
+import asyncio
+from contextlib import ExitStack
+from pathlib import Path
+import socket
+import unittest
+from unittest.mock import AsyncMock, Mock
+
+import coinglass_dom_reader as reader
+from coinglass_dom_reader_selftest import table
 
 import research_dom_capture as capture
 import research_max_pain_archive as archive
@@ -91,7 +100,7 @@ def _assert_jsonb_survival(payload):
     assert attachment["cycle_binding"]["cycle_time_utc"] == payload["set"]["cycle_time_utc"]
 
 
-def _mock_persist(payload):
+def _mock_persist(payload, persist_function=None):
     saved = {}
     class Result:
         def __init__(self, row): self.row = row
@@ -111,12 +120,12 @@ def _mock_persist(payload):
             saved["inserted_rows"] = saved.get("inserted_rows", 0) + len(values)
         def commit(self): saved["committed"] = True
     with patch.object(archive, "psycopg", SimpleNamespace(connect=lambda *args, **kwargs: Connection())), patch.dict(os.environ, {"MAX_PAIN_ARCHIVE_ENABLED": "1"}):
-        result = archive.persist_snapshot_payload(payload, database_url="selftest://no-network")
+        result = (persist_function or archive.persist_snapshot_payload)(payload, database_url="selftest://no-network")
     assert result["persisted"] is True and saved["committed"] is True
     stored = saved["set_parameters"][archive._SET_COLUMNS.index("source_metadata")]
     stored = getattr(stored, "obj", stored)
     assert stored == payload["set"]["source_metadata"]
-    assert saved["inserted_rows"] == len(payload["symbols"]) + len(payload["rows"])
+    assert saved.get("inserted_rows", 0) == len(payload["symbols"]) + len(payload["rows"])
 
 
 def _postgres_roundtrip(payload):
@@ -206,6 +215,154 @@ def run():
         _assert_hash(marker)
     _postgres_roundtrip(complete)
     print("DOM capture archive offline self-test: PASS")
+
+
+class FailedPollPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collection_archive_failure_recovery_and_idempotency(self):
+        # Only an explicitly supplied Unix socket DSN is accepted. No production
+        # environment discovery or exchange/Telegram connection is permitted.
+        import main
+        dsn = os.environ.get('TEST_DATABASE_URL')
+        if dsn:
+            import psycopg
+            from psycopg.conninfo import conninfo_to_dict
+            self.assertTrue(conninfo_to_dict(dsn).get('host', '').startswith('/'))
+            with psycopg.connect(dsn) as conn:
+                conn.execute((Path(__file__).parent / 'migrations/007_max_pain_watch_archive_v1.sql').read_text())
+        original_persist = archive.persist_snapshot_payload
+        saved = []
+        def persist(payload):
+            if dsn:
+                result = original_persist(payload, database_url=dsn)
+            else:
+                # Actual persist_snapshot_payload SQL/commit code, with the
+                # existing offline connection double; no real DB claim.
+                _mock_persist(payload, original_persist)
+                result = {'persisted': True, 'snapshot_set_id': len(saved) + 1}
+            saved.append((deepcopy(payload), result))
+            return result
+        def enrich(rows, *args, **kwargs):
+            return {'rows': deepcopy(rows), 'skipped_symbols': []}
+        for scenario in ('failure', 'recovery', 'diagnostic_failure', 'archive_failure', 'watch_failure', 'watch_recovery'):
+            failed = scenario in ('failure', 'diagnostic_failure', 'watch_failure')
+            pages = []
+            context = SimpleNamespace(close=AsyncMock())
+            browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+            manager = AsyncMock()
+            manager.__aenter__.return_value = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
+            async def new_page(*args):
+                page = SimpleNamespace(label='24h', close=AsyncMock(), wait_for_timeout=AsyncMock())
+                pages.append(page)
+                return page
+            async def click(page, timeframe):
+                page.label = timeframe
+                return True
+            async def label(page):
+                return page.label
+            async def extract(page):
+                data = table(50, short=str(82000 + reader.DEFAULT_TIMEFRAMES.index(page.label) * 100))
+                if failed and page.label in ('12h', '24h'):
+                    for row in data['rows'][:25 if page.label == '12h' else 22]:
+                        row[4] = {'text': '—', 'primary': '—', 'amount': ''}
+                return [data]
+            prepare = AsyncMock()
+            archive_context = {'cycle_id': 'isolated-failed-poll:' + scenario,
+                'cycle_time_utc': fixtures.BASE, 'source': 'WATCH_SHARED'}
+            before = len(saved)
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {'MAX_PAIN_ARCHIVE_ENABLED': '1'}))
+                for target, name, value in (
+                    (reader, 'async_playwright', Mock(return_value=manager)),
+                    (reader, '_new_ready_page', new_page),
+                    (reader, '_click_timeframe_verified', click),
+                    (reader, '_active_timeframe_label', label),
+                    (reader, '_extract_tables', extract),
+                    (reader.asyncio, 'sleep', AsyncMock()),
+                    (archive, 'persist_snapshot_payload', persist if scenario != 'archive_failure' else Mock(side_effect=RuntimeError('isolated database failure'))),
+                    (main.live_price_provider, 'enrich_snapshot_rows', enrich),
+                    (main.live_price_provider, 'enrich_research_snapshot_rows', enrich),
+                    (socket.socket, 'connect', Mock(side_effect=AssertionError('external network forbidden'))),
+                ):
+                    stack.enter_context(patch.object(target, name, value))
+                if scenario == 'diagnostic_failure':
+                    stack.enter_context(patch.object(capture, 'capture_poll', side_effect=RuntimeError('isolated capture failure')))
+                if scenario.startswith('watch_'):
+                    from research_watch_score_capture_selftest import derivatives
+                    bot = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+                    manual = AsyncMock(return_value=0)
+                    score = Mock(wraps=main.research_watch_score_capture.prepare)
+                    stack.enter_context(patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}))
+                    for target, name, value in (
+                        (main, 'WATCH_RUNTIME', {'chat_id': 1}),
+                        (main, 'WATCH_GENERAL_ENABLED', True),
+                        (main, '_get_scrape_lock', lambda: asyncio.Lock()),
+                        (main, '_ensure_watch_derivatives_ready', AsyncMock(return_value={})),
+                        (main.market_confidence_engine, 'capture_snapshot', derivatives),
+                        (main.research_watch_score_capture, 'prepare', score),
+                        (main.research_consumed_inputs, 'submit', Mock(return_value={})),
+                        (main.research_watch_runtime, 'begin', Mock(return_value=None)),
+                        (main.research_watch_runtime, 'stage', Mock()),
+                        (main.research_watch_runtime, 'finish', Mock()),
+                        (main.research_watch_runtime, 'cleanup_tail', Mock()),
+                        (main.research_alert_decision_watch, 'begin', Mock(return_value=None)),
+                        (main.research_alert_decision_watch, 'finish', Mock()),
+                        (main.experimental_reference_price, 'prepare_reference_prices', AsyncMock(return_value={})),
+                        (main.manual_formula_alert_delivery, 'run_watch', manual),
+                        (main.sol_proximity_experimental_worker.WORKER, 'observe', AsyncMock()),
+                        (main.doge_partial_experimental_worker.WORKER, 'observe', AsyncMock()),
+                    ):
+                        stack.enter_context(patch.object(target, name, value))
+                    for worker in main.sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values():
+                        stack.enter_context(patch.object(worker, 'observe', AsyncMock()))
+                    result = await main.run_watch_cycle(bot, 1, top8_only=True, general_enabled=True)
+                    self.assertEqual(result['ok'], not failed, result)
+                    self.assertFalse(main.WATCH_RUNTIME['scan_in_progress'])
+                    self.assertEqual(main.WATCH_RUNTIME['last_cycle_status'], 'failed' if failed else 'completed')
+                    self.assertEqual(score.call_count, 0 if failed else 1)
+                    self.assertEqual(manual.await_count, 0 if failed else 2)
+                    bot.bot.send_message.assert_not_awaited()
+                elif failed:
+                    with self.assertRaisesRegex(RuntimeError, 'scan incomplete'):
+                        await main.collect_live_rows_for_watch(archive_context=archive_context, prepare_watch=prepare)
+                    prepare.assert_not_awaited()
+                else:
+                    rows, result = await main.collect_live_rows_for_watch(archive_context=archive_context, prepare_watch=prepare)
+                    self.assertEqual(len(rows), 350)
+                    prepare.assert_awaited_once()
+                    self.assertTrue(result['timeframe_integrity']['ok'])
+            self.assertEqual(len(pages), 11 if failed else 7)
+            for page in pages:
+                page.close.assert_awaited_once()
+            context.close.assert_awaited_once()
+            browser.close.assert_awaited_once()
+            if scenario == 'archive_failure':
+                self.assertEqual(len(saved), before)
+                continue
+            self.assertEqual(len(saved), before + 1)
+            payload, persisted = saved[-1]
+            self.assertTrue(persisted['persisted'])
+            if dsn:
+                with psycopg.connect(dsn) as conn:
+                    record = conn.execute('SELECT source_metadata, row_count, collection_status FROM research_max_pain_snapshot_sets WHERE snapshot_set_id=%s', (persisted['snapshot_set_id'],)).fetchone()
+            else:
+                record = json.loads(json.dumps([payload['set']['source_metadata'], payload['set']['row_count'], payload['set']['collection_status']]))
+            self.assertEqual(record[0], payload['set']['source_metadata'])
+            self.assertEqual(record[1], 0 if failed else 350)
+            self.assertEqual(record[2], 'FAILED' if failed else 'COMPLETE')
+            if scenario == 'failure':
+                frames = record[0]['capture_metadata']['dom_row_capture']['capture']['payload']['timeframes']
+                for tf, expected in (('24h', 22), ('12h', 25)):
+                    p = frames[tf]['payload']
+                    self.assertEqual(p['failure_summary']['classified_rejected_rows'], expected)
+                    self.assertEqual(p['failure_summary']['rejection_reason_counts']['LONG_TARGET_SOURCE_MISSING'], expected)
+                    self.assertEqual(len(p['attempt_history']), 3)
+                    self.assertTrue(all(h['failure_summary']['classified_rejected_rows'] == expected for h in p['attempt_history']))
+                    self.assertIsNone(p['selected_table'])
+            if dsn:
+                with patch.dict(os.environ, {'MAX_PAIN_ARCHIVE_ENABLED': '1'}):
+                    replay = original_persist(payload, database_url=dsn)
+                self.assertTrue(replay['idempotent_existing'])
+                self.assertEqual(replay['snapshot_set_id'], persisted['snapshot_set_id'])
 
 
 if __name__ == "__main__": run()
