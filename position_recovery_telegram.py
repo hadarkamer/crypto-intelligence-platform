@@ -15,7 +15,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
-from telegram.error import BadRequest, RetryAfter, Forbidden
+from telegram.error import BadRequest, RetryAfter, Forbidden, TelegramError
 
 PATH = '/internal/position-recovery/v1'
 _BINDING = None
@@ -57,6 +57,20 @@ def record(command, env=None):
     value = json.loads(raw)
     if not isinstance(value,dict): raise ValueError('RECOVERY_RECORD_INVALID')
     return value
+
+
+def webhook_secret(env=None):
+    cfg = configuration(os.environ if env is None else env)
+    if cfg is None: return None
+    # Domain-separated Telegram token; never expose the receiver signing key.
+    return hmac.new(cfg['secret'].encode(), b'position-recovery-telegram-webhook-v1',
+                    hashlib.sha256).hexdigest()
+
+
+def authenticated_webhook(headers):
+    expected = webhook_secret()
+    supplied = headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+    return bool(expected and hmac.compare_digest(expected, supplied))
 
 
 def view(notice):
@@ -131,21 +145,28 @@ async def callback(update, context):
     user,chat,q=update.effective_user,update.effective_chat,update.callback_query
     if (cfg is None or not user or not chat or chat.type!='private'
             or chat.id!=user.id or str(user.id) not in cfg['users']):
-        await q.answer('הפעולה אינה מורשית.',show_alert=True);return
+        await q.answer('הפעולה אינה מורשית.',show_alert=True);return True
     match=re.fullmatch(r'pr:([a-f0-9]{24}):([1-9][0-9]{0,5}):(auto|manual)',q.data or '')
     if not match:
-        await q.answer('הבחירה אינה תקפה.',show_alert=True);return
+        await q.answer('הבחירה אינה תקפה.',show_alert=True);return True
     try:
         answer=await asyncio.to_thread(record,dict(op='choose',event=match[1],round=int(match[2]),
             choice=match[3],actor=str(user.id),chat=str(chat.id)))
     except Exception:
-        await q.answer('לא התקבל אישור שמירה. אפשר לנסות שוב; לא תיווצר בקשה כפולה.',show_alert=True);return
+        await q.answer('לא התקבל אישור שמירה. אפשר לנסות שוב; לא תיווצר בקשה כפולה.',show_alert=True);return False
     messages={'RECORDED':'הבחירה נשמרה.', 'REVIEW_REQUIRED':'נדרשת בדיקה לפני ניסיון נוסף.',
               'STALE_OR_ALREADY_APPLIED':'הבחירה כבר טופלה או שהסבב הסתיים.',
               'POSITION_NOT_ACTIVE':'הפוזיציה אינה פעילה.'}
-    await q.answer(messages.get(answer['status'],'הבחירה לא התקבלה.'),show_alert=True)
-    if answer['status'] in ('RECORDED','STALE_OR_ALREADY_APPLIED','POSITION_NOT_ACTIVE'):
-        await q.edit_message_reply_markup(reply_markup=None)
+    if answer.get('status') not in messages: return False
+    try:
+        await q.answer(messages[answer['status']],show_alert=True)
+        if answer['status'] in ('RECORDED','STALE_OR_ALREADY_APPLIED','POSITION_NOT_ACTIVE'):
+            await q.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        # The choice is durable; its saved notice remains the delivery owner.
+        # An expired callback popup must not cause endless webhook redelivery.
+        pass
+    return True
 
 
 def bind(app, loop):

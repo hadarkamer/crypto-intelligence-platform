@@ -5937,11 +5937,26 @@ async def health(request):
     })
 
 async def telegram_webhook(request):
-    """Acknowledge Telegram immediately and process each update once."""
+    """Persist recovery choices before acknowledgement; keep other updates async."""
     bot_app = request.app["bot_app"]
 
     try:
         payload = await request.json()
+        query = payload.get('callback_query') or {}
+        data = query.get('data') if isinstance(query, dict) else None
+        if isinstance(data, str) and data.startswith('pr:'):
+            # Do not place record-only choices in the volatile update cache or
+            # acknowledge a background task before its durable result exists.
+            # Receiver-side event/round checks make Telegram redelivery safe.
+            import position_recovery_telegram
+            try:
+                if not position_recovery_telegram.authenticated_webhook(request.headers):
+                    return web.json_response({'ok': False}, status=403)
+                saved = await position_recovery_telegram.callback(
+                    Update.de_json(payload, bot_app.bot), None)
+            except Exception:
+                saved = False
+            return web.json_response({'ok': bool(saved)}, status=200 if saved else 503)
         update_id = payload.get("update_id")
 
         if update_id is not None and update_id in PROCESSED_UPDATE_IDS:
@@ -7199,10 +7214,13 @@ async def main():
         print("[startup] Price+OI and CVD collectors disabled: COINGLASS_API_KEY missing", flush=True)
 
     webhook_url = f"{PUBLIC_URL}/telegram"
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    recovery_enabled = os.environ.get('POSITION_RECOVERY_ENABLED') == 'true'
+    if not recovery_enabled:
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
     await bot_app.bot.set_webhook(
         url=webhook_url,
-        drop_pending_updates=True,
+        drop_pending_updates=not recovery_enabled,
+        **({'secret_token': position_recovery_telegram.webhook_secret()} if recovery_enabled else {}),
     )
     print(f"[bot] webhook set to {webhook_url}", flush=True)
 
@@ -7301,7 +7319,9 @@ async def main():
         await research_outcome_worker.WORKER.stop()
         await research_event_store.WRITER.stop()
 
-        await bot_app.bot.delete_webhook(drop_pending_updates=False)
+        # A retiring instance must not unregister its successor's webhook.
+        if not recovery_enabled:
+            await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()
         await bot_app.shutdown()
 
