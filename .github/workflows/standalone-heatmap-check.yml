@@ -14,7 +14,6 @@ on:
   push:
     branches:
       - app/model1-standalone-20260915
-      - test/coinglass-account-cdp-20261112
     paths:
       - standalone_collector/**
       - collection_bridge.py
@@ -83,10 +82,9 @@ jobs:
 
   account_cdp_dummy:
     if: >-
-      github.event_name == 'push' && github.run_attempt == 1 &&
+      github.event_name == 'workflow_dispatch' && github.run_attempt == 1 &&
       github.ref == 'refs/heads/test/coinglass-account-cdp-20261112' &&
-      github.event.before == '99a0f3822680ede810f12bd2cce32d51f3d97d11' &&
-      github.event.deleted == false && github.event.forced == false
+      inputs.account_cdp_check && !inputs.hover_source_check
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
