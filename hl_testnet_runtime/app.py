@@ -51,6 +51,10 @@ def start_read_only_check():
 def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', '')
     path = environ.get('PATH_INFO', '')
+    if path == '/internal/position-recovery/v1':
+        if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_mainnet_v1':
+            from .experimental_live_startup import application as recovery_inbox
+            return recovery_inbox(environ, start_response)
     if path == '/internal/testnet-experimental-plans/v1':
         if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_mainnet_v1':
             from .experimental_live_startup import application as connected_intake

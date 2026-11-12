@@ -20,6 +20,8 @@ from . import experimental_live_release as releases
 from . import formula_accounting as accounting
 import approved_alert_contract as contract
 
+from . import position_recovery as recovery
+
 VERSION = 'experimental-mainnet-worker-v1'
 MODE = 'explicit_approved_mainnet_worker_v1'
 
@@ -335,7 +337,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                      for oid,o in t['orders'].items()
                      if o['status']=='OPEN' and t['order_legs'][oid]=='STOP'),0)<_remaining(t)),
                 t['cid'])):
-            if trade['phase'] in FINAL: continue
+            if trade['phase'] in FINAL or recovery.paused(state, trade['cid']): continue
             own={**state,'trades':{trade['cid']:trade}}
             view=self._deadline_view(state,trade,context,now) if _remaining(trade)>0 else None
             trigger=emergency_close.trigger(view,now_ms=now) if view else None
@@ -377,7 +379,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if self._rejection_key(proposal) in trade.get('rejection_circuit',{}):
                 trade['rejected_action_requires_material_change']=True
                 continue
-            return proposal
+            if recovery.permit_proposal(state, proposal, now):
+                return proposal
         return None
 
     def _cycle_proposal(self, state, context, now, *, entries_enabled):
@@ -419,7 +422,6 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 self._snapshot(candidate, snapshot, now)
             except (ValueError, KeyError, TypeError):
                 blocked[lane] = 'MARKET_OWNERSHIP_RECONCILIATION_REQUIRED'
-                scoped.setdefault('account_entry_blocked', {})[snapshot['account']] = blocked[lane]
                 continue
             state.clear(); state.update(candidate); observed.add(lane)
         for trade in state['trades'].values():
@@ -433,6 +435,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     occurrence_id=trade['cid'], reason='ORIGINAL_SOURCE_NO_LONGER_ACTIVE'))
         state['blocked_lanes'] = deepcopy(blocked)
         self._rejections(state, scoped, now)
+        recovery.advance(state, scoped, now)
         for cid, condition in state.get('formula_states', {}).items():
             from . import sol_g65_conditional_stop
             try:
@@ -450,9 +453,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         proposal = self._maintain_live(safe, scoped, now)
         accounting.retain_fees(state, context)
         accounting.settle(state, now)
-        unavailable = {r['proposal']['account'] for r in state['requests'].values()
+        unavailable = {_lane(r['proposal']['account'], r['proposal']['symbol']) for r in state['requests'].values()
             if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
-        emergency_accounts = {t['account'] for t in state['trades'].values()
+        emergency_lanes = {_lane(t['account'], t['symbol']) for t in state['trades'].values()
             if t['phase'] not in FINAL and t.get('emergency_reason')
             and not external.managed(state,t['account'],t['symbol'])}
         if proposal is None and entries_enabled:
@@ -462,9 +465,10 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     continue
                 role = 'long_account' if source['source']['side'] == 'LONG' else 'short_account'
                 account = state['routes'][role]
-                if account in unavailable or account in emergency_accounts:
+                source_lane = _lane(account, source['source']['symbol'])
+                if source_lane in unavailable or source_lane in emergency_lanes:
                     _entry_decision(state, cid, scoped, now,
-                        'ACCOUNT_OUTCOME_UNKNOWN' if account in unavailable else 'ACCOUNT_PROTECTION_PENDING', scope='account')
+                        'MARKET_OUTCOME_UNKNOWN' if source_lane in unavailable else 'MARKET_PROTECTION_PENDING', scope='market')
                     continue
                 proposal = self._admit(state, cid, scoped, now)
                 if proposal is not None: break
@@ -490,6 +494,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             nonce=nonce, attempt_at_ms=now, prepared_at_ms=now, attempts=1,
             phase='OUTCOME_UNKNOWN', reply=None, observed_oid=None)
         state['requests'][rid] = request
+        recovery.attempted(state, request)
         if proposal['operation'] == 'ENTRY':
             state['trades'][proposal['card_id']]['entry_request'] = rid
         state['events'].append(dict(at_ms=now, kind='ATTEMPT_COMMITTED',
@@ -667,10 +672,18 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         stream_errors = self._ingest_pending_fills()
         history_ok=self._compact_history()
         before = self.store.load()
+        grants = {}
+        if recovery.inherited_incidents(before,self.venue.now()):
+            self.store.mutate(lambda current: recovery.adopt_incidents(current,self.venue.now()))
+            before = self.store.load()
+        if any(r['phase'] == 'RECOVERING' for r in before.get('position_recovery', {}).values()):
+            grants = self.store.mutate(lambda current: recovery.reserve_reads(current, self.venue.now()))
+            before = self.store.load()
         admission_release = self._release(before, self.venue.now())
         collect_entries = (entries_enabled is True and history_ok
             and releases.entry_enabled(admission_release,self.venue.now()))
         collection_state = deepcopy(before)
+        collection_state['_recovery_grants'] = grants
         if stream_errors:
             # Collection-only diagnostics: the provider closes affected entry
             # gates before staging its receipt, while REST can still recover.
@@ -745,16 +758,21 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                         raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
                     self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason,
                         retry_after_ms=getattr(certificate, 'retry_after_ms', None))
+                    recovery.failed_attempt(state,current,self.venue.now())
                 self.store.mutate(abort_unsent)
                 return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
             except Exception:
                 # Includes pre-wire errors without an explicit durable unsent
                 # certificate. Conservatively reconcile; never repeat the request.
+                self.store.mutate(lambda state: recovery.failed_attempt(state,
+                    state['requests'][request['request_id']], self.venue.now()))
                 return dict(status='OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED', **readiness())
             def receipt(state):
                 current = state['requests'][request['request_id']]
                 if current['phase'] == 'OUTCOME_UNKNOWN':
                     current['reply'] = deepcopy(reply)
+                    if reply.get('state') == 'REJECTED':
+                        recovery.failed_attempt(state,current,self.venue.now())
             self.store.mutate(receipt)
             return dict(status='TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION',
                 operation=request['proposal']['operation'], **readiness())

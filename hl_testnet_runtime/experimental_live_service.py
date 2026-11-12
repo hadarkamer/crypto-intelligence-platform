@@ -101,6 +101,11 @@ class ConnectionService:
         return self._receive(message)
 
     def application(self, environ, start_response):
+        from . import position_recovery_http
+        if environ.get('PATH_INFO') == position_recovery_http.PATH:
+            import os
+            return position_recovery_http.application(environ, start_response,
+                store=self.runtime.store, clock=self.runtime.venue.now, env=os.environ, wake=self._wake)
         status, value = '404 Not Found', dict(status='NOT_FOUND')
         if environ.get('PATH_INFO') == intake.PATH:
             try:

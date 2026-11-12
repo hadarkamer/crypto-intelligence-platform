@@ -279,7 +279,8 @@ class RuntimeContract:
         self.assertEqual(result['status'],'DEFINITELY_NOT_SUBMITTED_REOBSERVE')
         self.assertEqual(len(self.venue.requests),1)
         self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'],'OPEN')
-        self.protect()
+        for _ in range(3):
+            self.venue.t += 1001; self.cycle(False)
         self.assertEqual(len(self.venue.requests),3)
         self.assertEqual({o['leg'] for o in self.venue.orders.values()},{'ENTRY','STOP','TAKE_PROFIT'})
 
@@ -308,15 +309,16 @@ class RuntimeContract:
         self.assertEqual(len(value['requests']),1);self.assertFalse(self.venue.requests)
         self.assertEqual(next(iter(value['requests'].values()))['terminal_state'],'REJECTED_NO_ORDER')
 
-    def test_rejected_initial_exit_reconciles_then_can_restore_protection(self):
+    def test_rejected_initial_exit_reconciles_and_waits_for_review(self):
         msg,_=self.start()
         def reject(request,*,admission=None):
             self.store.claim_transport(request,'c'*32)
             return dict(state='REJECTED',code='OTHER_REJECTION',oid=None)
         with patch.object(self.port,'send',side_effect=reject):self.cycle(False)
         self.rejection_context();self.protect()
-        self.assertEqual(len(self.venue.requests),3)
-        self.assertEqual({o['leg'] for o in self.venue.orders.values()},{'ENTRY','STOP','TAKE_PROFIT'})
+        self.assertEqual(len(self.venue.requests),1)
+        row=self.store.load()['position_recovery'][msg['occurrence_id']]
+        self.assertEqual(row['phase'],'WAITING');self.assertFalse(row['retryable'])
         rejected=[r for r in self.store.load()['requests'].values() if r.get('terminal_state')=='REJECTED_NO_ORDER']
         self.assertEqual(len(rejected),1)
 
@@ -390,8 +392,10 @@ class RuntimeContract:
         self.assertEqual(self.venue.orders[old]['view']['wire_order']['p'],'2.3115')
         take=self.venue.oid('TAKE_PROFIT');qty=Decimal(self.venue.orders[take]['view']['wire_order']['s'])
         self.venue.fill(take,str((qty/2).quantize(Decimal('0.01'),rounding='ROUND_DOWN')))
-        self.assertEqual(self.cycle(False)['operation'],'AMEND_EXIT')
-        self.assertEqual(self.venue.orders[self.venue.oid('STOP')]['view']['wire_order']['p'],'2.2943')
+        self.cycle(False)
+        self.assertEqual(len(self.reservations),before)
+        self.assertEqual(self.store.load()['position_recovery'][msg['occurrence_id']]['phase'],'WAITING')
+        self.assertEqual(self.venue.orders[old]['view']['wire_order']['p'],'2.3115')
 
     def test_rejected_cancel_does_not_storm_or_invent_finality(self):
         msg,_=self.start();self.protect();trade=self.store.load()['trades'][msg['occurrence_id']]

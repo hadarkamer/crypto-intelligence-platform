@@ -81,7 +81,7 @@ class BlockerAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.store.load(), prior)
         self.assertFalse(self.venue.requests)
 
-    def test_unknown_short_attempt_fences_short_but_allows_fresh_long_sol(self):
+    def test_unknown_short_attempt_allows_independent_sol_in_both_accounts(self):
         short = alert(symbol='HYPE', side='SHORT', approved_ms=BASE + 60_000,
                       cycle='unknown-short')
         self.receive(short)
@@ -94,15 +94,16 @@ class BlockerAcceptanceTests(unittest.TestCase):
         self.restart()
         result = self.cycle()
         self.assertEqual(result['operation'], 'ENTRY')
-        self.assertEqual([(r['proposal']['role'], r['proposal']['symbol']) for r in self.entries()],
-                         [('long_account', 'SOL')])
-        self.assertNotIn(peer_short['occurrence_id'], self.store.load()['trades'])
+        for _ in range(4): self.cycle()
+        self.assertEqual({(r['proposal']['role'], r['proposal']['symbol']) for r in self.entries()},
+                         {('short_account', 'SOL'),('long_account', 'SOL')})
+        self.assertIn(peer_short['occurrence_id'], self.store.load()['trades'])
         unknown = [r for r in self.store.load()['requests'].values()
                    if r['proposal']['card_id'] == short['occurrence_id']]
         self.assertEqual(len(unknown), 1)
         self.assertEqual(unknown[0]['phase'], 'OUTCOME_UNKNOWN')
 
-    def test_unknown_same_account_attempt_prevents_another_symbol_entry(self):
+    def test_unknown_same_account_attempt_allows_another_symbol_entry(self):
         first = alert(symbol='HYPE', approved_ms=BASE + 60_000, cycle='unknown-long')
         self.receive(first)
         with patch.object(self.port, 'send', side_effect=TimeoutError('MAY_HAVE_SENT')):
@@ -110,8 +111,8 @@ class BlockerAcceptanceTests(unittest.TestCase):
         self.receive(alert(symbol='SOL', approved_ms=BASE + 60_000, cycle='same-account'))
         self.restart()
         self.cycle()
-        self.assertFalse(self.entries())
-        self.assertEqual(len(self.store.load()['requests']), 1)
+        self.assertEqual([r['proposal']['symbol'] for r in self.entries()],['SOL'])
+        self.assertEqual(len(self.store.load()['requests']), 2)
 
     def test_certified_transient_unsent_retries_once_after_restart_with_new_identity(self):
         msg = alert(symbol='SOL', approved_ms=BASE + 60_000, cycle='retry-sol')

@@ -167,6 +167,9 @@ class TestnetExecutionState(HistoryMixin):
             current = value['requests'].get(request['request_id'])
             if current != request or 'transport_claim' in current:
                 raise StateError('EXACT_UNCLAIMED_DURABLE_ATTEMPT_REQUIRED')
+            from .position_recovery import paused
+            if paused(value, current['proposal']['card_id']):
+                raise StateError('POSITION_MANAGEMENT_PAUSED')
             current['transport_claim'] = claim_token
             return current
         return self.mutate(transition)

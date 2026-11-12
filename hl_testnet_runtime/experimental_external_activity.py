@@ -629,7 +629,12 @@ def review_inventory(account, buckets, orders, positions, *, role, observation=N
     known_symbols = set(current['bot_symbols'])
     external = {r['symbol'] for r in current['orders'] if r['origin']=='EXTERNAL'}
     external |= {s for s,q in current['positions'].items() if Decimal(q)!=0 and s not in known_symbols}
-    excluded = human | (external-known_symbols)
+    isolated = set(observation.get('isolated_markets', {}).get(account, []))
+    if not isolated <= known_symbols:
+        raise ExternalActivityError('ISOLATION_REQUIRES_KNOWN_BOT_MARKET')
+    if target_symbol in isolated:
+        raise ExternalActivityError('MARKET_OWNERSHIP_RECONCILIATION_REQUIRED')
+    excluded = human | (external-known_symbols) | isolated
     if target_symbol in excluded or target_symbol in external:
         raise ExternalActivityError(HUMAN if target_symbol in human else OCCUPIED)
     # The certificate is the exact current account inventory, not an arbitrary
@@ -641,7 +646,7 @@ def review_inventory(account, buckets, orders, positions, *, role, observation=N
     actual = [{k:v for k,v in r.items() if k!='origin'} for r in current['orders']]
     if normalized != actual or current['positions'] != {r['position']['coin']:r['position']['szi'] for r in positions['assetPositions']}:
         raise ExternalActivityError('EXTERNAL_INVENTORY_CERTIFICATE_CHANGED')
-    if any(s['pending'] is not None for s in buckets):
+    if any(s['pending'] is not None and s['symbol'] not in excluded for s in buckets):
         raise ExternalActivityError('UNRESOLVED_ACCOUNT_REQUEST_NO_NEW_ENTRY')
     return _validate_account_inventory(account, [b for b in buckets if b['symbol'] not in excluded],
         [o for o in orders if o['coin'] not in excluded],

@@ -22,6 +22,16 @@ from .long_stream_runtime import _validate_account_inventory
 from .experimental_market_context import MarketSnapshot
 from .request_budget import BudgetError, fresh_entry_retry_ms, request_weight
 from . import experimental_external_activity as external
+from . import position_recovery as recovery
+
+
+def _isolated_markets(state, context):
+    """Known bot uncertainty is local; raw account inventory stays complete."""
+    unresolved={r['proposal']['card_id'] for r in state['requests'].values()
+                if r['phase'] not in recovery.DONE}
+    return {a: sorted({t['symbol'] for t in state['trades'].values() if t['account']==a
+        and (runtime._lane(a,t['symbol']) in context['blocked_lanes'] or t['cid'] in unresolved)})
+        for a in context['external_observation']['accounts']}
 
 
 class ProviderError(ValueError):
@@ -280,7 +290,7 @@ class LiveEvidenceProvider:
             positions=dict(assetPositions=deepcopy(sorted(positions['assetPositions'],key=lambda x:x['position']['coin']))),
             account_state=deepcopy(positions),at_ms=at_ms)
 
-    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None):
+    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None, meter=None):
         lookups={};ids={};seen=set()
         changing={str(row.get('o',row.get('oid'))) for r in state['requests'].values()
             if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
@@ -328,6 +338,7 @@ class LiveEvidenceProvider:
                         reader=observation_cache.pass_reader(0) if observation_cache is not None else self.public
                         raw=reader.read('orderStatus',account,oid=oid)
             else:
+                if meter is not None: meter.debit('orderStatus')
                 raw=self._lookup(account,cloid)
             if raw is not None:lookups[cloid]=raw
             if raw=={'status':'unknownOid'}:
@@ -358,8 +369,24 @@ class LiveEvidenceProvider:
 
     def _lane(self, state, account, symbol, legacy, inventory, *, observation_cache=None, observation_end_ms=None, historical=None):
         lane=runtime._lane(account,symbol)
+        reader=self.public;meter=None
+        affected=[t for t in state['trades'].values() if t['account']==account and t['symbol']==symbol
+                  and t['cid'] in state.get('position_recovery',{})]
+        for trade in affected:
+            row=state['position_recovery'][trade['cid']]
+            if row['phase']=='RESOLVED':continue
+            grant=state.get('_recovery_grants',{}).get(trade['cid'])
+            if recovery.paused(state,trade['cid']) or grant is None:
+                raise ProviderError('POSITION_RECOVERY_WAITING_FOR_DECISION_OR_BUDGET')
+            if meter is not None:raise ProviderError('SHARED_RECOVERY_LANE_REQUIRES_REVIEW')
+            meter=recovery.InquiryMeter(grant,self.now)
+            reader=recovery.InquiryReader(reader,meter)
+            if observation_cache is not None:
+                scoped_cache=sync.ObservationReadCache(reader)
+                scoped_cache.samples=observation_cache.samples
+                observation_cache=scoped_cache
         exp,lookups=self._experimental_bindings(state,account,symbol,
-            observation_cache=observation_cache,inventory=inventory)
+            observation_cache=observation_cache,inventory=inventory,meter=meter)
         old=next((s for s in legacy if s['symbol']==symbol),None)
         old_bindings=[] if old is None else old['bindings']
         bindings=old_bindings+exp
@@ -375,14 +402,16 @@ class LiveEvidenceProvider:
         if (previous['account']!=account or previous['symbol']!=symbol
                 or previous['at_ms']>self.now()):
             raise ProviderError('COLLECTOR_CHECKPOINT_SCOPE_CHANGED')
+        if meter is not None and self.now()-previous['at_ms'] > recovery.WINDOW_MS:
+            raise ProviderError('RECOVERY_HISTORY_GAP_REQUIRES_REVIEW')
         if bindings:
             receipt=(self.safety._receipt(state)
                 if callable(getattr(type(self.safety),'_receipt',None)) else None)
             unchanged=(receipt is not None and self.safety._continuous(receipt,account)
-                and not any(r['proposal']['account']==account
+                and not any(r['proposal']['account']==account and r['proposal']['symbol']==symbol
                     and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
                     for r in state['requests'].values()))
-            observed=sync.collect(dict(bindings=bindings,snapshot=previous),self.public,
+            observed=sync.collect(dict(bindings=bindings,snapshot=previous),reader,
                 clock=self.now,reuse_verified_terminals=True,verification_passes=1,
                 observation_cache=observation_cache,observation_end_ms=observation_end_ms,
                 reuse_unchanged_fills=unchanged)['snapshot']
@@ -585,9 +614,9 @@ class LiveEvidenceProvider:
                   if decision.get('reason') in ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY',
                       'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED','TESTNET_OBSERVATION_BATCH_EXPIRED')
                   and type(decision.get('retry_after_ms')) is int and decision['retry_after_ms']>now}
-        unresolved_accounts={r['proposal']['account'] for r in state['requests'].values()
+        unresolved_lanes={runtime._lane(r['proposal']['account'], r['proposal']['symbol']) for r in state['requests'].values()
                              if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
-        protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)
+        protection_lanes={runtime._lane(t['account'], t['symbol']) for t in state['trades'].values() if _original_stop_needed(state,t)
                              and not external.managed(state,t['account'],t['symbol'])}
         # Reject locally impossible admissions before reading their market or
         # order allowance. These are the same unchanged gates as _admit.
@@ -598,7 +627,7 @@ class LiveEvidenceProvider:
             if (not entries_enabled or cid in retired or cid in deferred
                     or cid in state['trades'] and not entry_retry_ready(state,cid,now)
                     or not runtime._source_active(source,now)
-                    or account in unresolved_accounts|protection_accounts):
+                    or runtime._lane(account,msg['symbol']) in unresolved_lanes|protection_lanes):
                 continue
             peers=[t for k,t in state['trades'].items() if k!=cid
                    and t['account']==account and t['phase'] not in runtime.FINAL]
@@ -708,11 +737,14 @@ class LiveEvidenceProvider:
                         result['snapshots'].append(normalized)
                 except (ValueError,KeyError,TypeError) as exc:
                     result['blocked_lanes'][lane]=_error(exc)
-                    result['account_entry_blocked'].setdefault(account,_error(exc))
+                    # Unknown legacy ownership cannot be certified as an isolated bot trade.
+                    if not any(t['account']==account and t['symbol']==symbol for t in working['trades'].values()):
+                        result['account_entry_blocked'][account]=_error(exc)
                     remember_retry(exc,[account])
                     continue
             current_legacy=self._legacy(state)
             result['external_observation']=self._observe_external(state,legacy,inventories,cache,now)
+            result['external_observation']['isolated_markets'] = _isolated_markets(working,result)
             human=result['external_observation']['human_managed']
             # External activity is not an account inventory error. On an owned
             # market it means explicit human management, without a new send or
@@ -782,21 +814,21 @@ class LiveEvidenceProvider:
             # never persists state, advances a source cursor or proposes an action.
             price_state=deepcopy(state)
             reconciler=object.__new__(runtime.IsolatedExecutionRuntime)
-            source_io_allowed={a:True for a in state['routes'].values()}
+            source_io_blocked=set()
             for snapshot in result['snapshots']:
                 if runtime._lane(snapshot['account'],snapshot['symbol']) in human:continue
                 candidate_state=deepcopy(price_state)
                 try:
                     reconciler._snapshot(candidate_state,snapshot,self.now())
                 except (ValueError,KeyError,TypeError):
-                    source_io_allowed[snapshot['account']]=False
+                    source_io_blocked.add(runtime._lane(snapshot['account'],snapshot['symbol']))
                     continue
                 price_state=candidate_state
             for trade in price_state['trades'].values():
                 if (_original_stop_needed(price_state,trade)
                         and runtime._lane(trade['account'],trade['symbol']) not in human):
-                    source_io_allowed[trade['account']]=False
-            unresolved={r['proposal']['account'] for r in state['requests'].values()
+                    source_io_blocked.add(runtime._lane(trade['account'],trade['symbol']))
+            unresolved={runtime._lane(r['proposal']['account'],r['proposal']['symbol']) for r in state['requests'].values()
                         if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
             # Stable fixed-exit trades consume no live mark: use the CURRENT
             # reconciled fill/order facts, so newly missing or undersized exits
@@ -816,7 +848,7 @@ class LiveEvidenceProvider:
                     # exit by ID; a price quote cannot change that decision.
                     cancellation_lanes.add((trade['account'],trade['symbol']))
                     continue
-                stable=(trade['account'] not in unresolved
+                stable=(runtime._lane(trade['account'],trade['symbol']) not in unresolved
                     and _fixed_exits_stable(trade,self.now()))
                 if not stable:market_lanes.add((trade['account'],trade['symbol']))
             # A failed observation cannot consume a mark. Filter before the
@@ -870,7 +902,7 @@ class LiveEvidenceProvider:
                         or trade['phase'] in runtime.FINAL or msg['family'] not in ('r2732','sol_g65')
                         or (runtime._lane(account,trade['symbol']) in result['blocked_lanes']
                             and cid not in state.get('formula_states',{}))
-                        or not source_io_allowed[account] or cid in result['bars']):
+                        or runtime._lane(account,trade['symbol']) in source_io_blocked or cid in result['bars']):
                     continue
                 try:
                     cursor=trade.get('condition') or state.get('formula_states',{}).get(cid) or {}
@@ -909,7 +941,7 @@ class LiveEvidenceProvider:
                 result['entry_blocked'][cid]=state['entry_decisions'][cid]['reason']
                 result['entry_retry_after_ms'][cid]=deferred[cid]
                 candidate=False
-            if candidate and (account in unresolved or not source_io_allowed[account]):
+            if candidate and (lane in unresolved or lane in source_io_blocked):
                 result['entry_blocked'][cid]='ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION'
                 candidate=False
             candidate=candidate and cid in candidates
@@ -924,7 +956,7 @@ class LiveEvidenceProvider:
             if (msg['family'] in ('r2732','sol_g65') and candidate
                     and (cid in state.get('formula_states',{})
                         or account not in result['account_entry_blocked'] and lane not in result['blocked_lanes'])
-                    and source_io_allowed[account] and cid not in result['bars']):
+                    and lane not in source_io_blocked and cid not in result['bars']):
                 try:
                     cursor=(trade or {}).get('condition') or state.get('formula_states',{}).get(cid) or {}
                     since=getattr(self.prices,'closed_bars_since',None)
@@ -1022,13 +1054,13 @@ class LiveEvidenceProvider:
                 and any(runtime._lane(s['account'],s['symbol'])==lane for s in result['snapshots']))
             if not reconciled or account in result['external_observation']['errors']:
                 reason='STREAM_FILL_RECONCILIATION_REQUIRED'
-                result['account_entry_blocked'].setdefault(account,reason)
                 result['blocked_lanes'][lane]=reason
                 result['snapshots']=[s for s in result['snapshots']
                     if runtime._lane(s['account'],s['symbol'])!=lane]
                 result['collector_checkpoints'].pop(lane,None)
         for account,error in state.get('_pending_stream_fill_errors',{}).items():
-            result['account_entry_blocked'][account]=error['reason']
+            if not error['symbols']:
+                result['account_entry_blocked'][account]=error['reason']
             for symbol in error['symbols']:
                 lane=runtime._lane(account,symbol)
                 result['blocked_lanes'][lane]=error['reason']
@@ -1052,6 +1084,7 @@ class LiveEvidenceProvider:
                     result['collector_checkpoints'].pop(lane)
                 for a,symbol in lanes:
                     if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]='ACCOUNT_COLLECTION_EXPIRED'
+        result['external_observation']['isolated_markets'] = _isolated_markets(working,result)
         result['account_inventory_at_ms']={a:result['account_inventory_at_ms'][a] for a in inventories}
         result.update(inventory_complete=True,inventory_accounts=sorted(inventories),inventory_at_ms=now)
         stage=getattr(self.safety,'stage_observation',None)
@@ -1104,12 +1137,16 @@ class LiveEvidenceProvider:
                 and pp['operation'] in ('CREATE_EXIT','AMEND_EXIT')
                 and pp['action']['type'] in ('order','batchModify')
                 and wire.requested_order(pp['action'])['r'] is True)
-            if entry and pp['account']==p['account'] or same_market and not emergency_exit_uncertainty:
+            if same_market and not emergency_exit_uncertainty:
                 raise ProviderError('UNRESOLVED_EXPERIMENTAL_PEER_REQUIRES_RECONCILIATION')
         current_legacy=self._legacy(state)
         if self._revision({p['account']:current_legacy[p['account']]})!=cached['legacy_account_revisions'][p['account']]:
             raise ProviderError('LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST')
         ctx=cached['context'];trade=state['trades'][cid];account=p['account'];lane=runtime._lane(account,p['symbol'])
+        if recovery.paused(state,cid):
+            raise ProviderError('POSITION_MANAGEMENT_PAUSED')
+        if not recovery.transport_allowed(state,request,self.now()):
+            raise ProviderError('RECOVERY_ROUND_DEADLINE')
         if external.managed(state,account,p['symbol']):
             raise ProviderError(external.HUMAN)
         feed=getattr(self.safety,'feed',None)
