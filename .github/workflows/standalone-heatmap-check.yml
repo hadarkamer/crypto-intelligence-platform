@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - app/model1-standalone-20260915
+      - test/coinglass-account-cdp-20261112
     paths:
       - standalone_collector/**
       - collection_bridge.py
@@ -82,9 +83,10 @@ jobs:
 
   account_cdp_dummy:
     if: >-
-      github.event_name == 'workflow_dispatch' && github.run_attempt == 1 &&
+      github.event_name == 'push' && github.run_attempt == 1 &&
       github.ref == 'refs/heads/test/coinglass-account-cdp-20261112' &&
-      inputs.account_cdp_check && !inputs.hover_source_check
+      github.event.before == '53625f106f61542196e88046c8ac88b2ddb29de6' &&
+      github.event.deleted == false && github.event.forced == false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
@@ -115,7 +117,7 @@ jobs:
         timeout-minutes: 9
         run: |
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/account-cdp-browsers"
-          python -m pip install 'playwright==1.49.1'
+          python -m pip install 'playwright==1.55.0'
           python -m playwright install --with-deps chromium
       - name: Isolated account CDP dummy checks (no external network)
         timeout-minutes: 3

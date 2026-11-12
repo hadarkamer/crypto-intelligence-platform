@@ -9,11 +9,15 @@ preflight handling). A dropped ExtraInfo event is explicitly a simulation.
 from __future__ import annotations
 
 import argparse
+import errno
 import importlib.metadata
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import socket
+import subprocess
 import sys
 import threading
 import tempfile
@@ -148,27 +152,101 @@ def descendants(snapshot):
 def browser_process_evidence():
     snapshot = process_snapshot()
     profiles = set()
-    forbidden = False
-    renderer_sandboxed = False
+    security_disabled = False
+    sandbox_disabled = False
     browser_pids = set()
     for pid in descendants(snapshot):
-        _, args, status = snapshot[pid]
+        _, args, _ = snapshot[pid]
         if not args:
             continue
         name = Path(os.fsdecode(args[0])).name
         if name not in ('chrome', 'headless_shell', 'chrome-headless-shell', 'chromium'):
             continue
         browser_pids.add(pid)
-        forbidden |= any(arg in (b'--no-sandbox', b'--disable-setuid-sandbox', b'--disable-web-security') for arg in args)
+        sandbox_disabled |= b'--no-sandbox' in args
+        security_disabled |= any(arg in (b'--disable-web-security',
+            b'--disable-site-isolation-trials', b'--allow-file-access-from-files') for arg in args)
         for arg in args:
             if arg.startswith(b'--user-data-dir='):
                 profiles.add(Path(os.fsdecode(arg.partition(b'=')[2])))
-        if b'--type=renderer' in args:
-            renderer_sandboxed |= (status.get('NoNewPrivs', '').strip() == '1'
-                                   and status.get('Seccomp', '').strip() == '2')
     return {'browser_processes_seen': bool(browser_pids),
-            'no_security_disable_flags': not forbidden,
-            'renderer_sandbox_observed': renderer_sandboxed}, profiles, browser_pids
+            'web_security_not_disabled': not security_disabled,
+            'internal_sandbox_disabled_observed': sandbox_disabled}, profiles, browser_pids
+
+
+def prelaunch_safety(report):
+    # env -i in the existing runner wrapper is the boundary; fail if it changes.
+    allowed = {'PATH', 'HOME', 'TMPDIR', 'PLAYWRIGHT_BROWSERS_PATH', 'PYTHONUTF8',
+               'PYTHONDONTWRITEBYTECODE', 'COLLECTION_BRIDGE_ENABLED', 'LC_CTYPE'}
+    unexpected = sorted(set(os.environ) - allowed)
+    report['prelaunch'] = {'unexpected_environment_names': unexpected,
+        'internal_sandbox_enabled': False, 'dummy_only_exception': True,
+        'external_isolation_is_not_internal_sandbox': True}
+    safety = report['prelaunch']
+    check(not unexpected, 'unexpected_environment')
+    status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines()
+                  if ':' in line)
+    safety['unprivileged_uid'] = os.geteuid() != 0
+    safety['effective_capabilities_empty'] = int(status['CapEff'].strip(), 16) == 0
+    check(safety['unprivileged_uid'] and safety['effective_capabilities_empty'], 'privileged_test_process')
+    check(os.environ.get('COLLECTION_BRIDGE_ENABLED') == 'false', 'worker_not_disabled')
+    links = json.loads(subprocess.run(['ip', '-json', 'link', 'show'], check=True,
+        capture_output=True, text=True, timeout=3).stdout)
+    safety['loopback_only'] = len(links) == 1 and links[0].get('ifname') == 'lo'
+    check(safety['loopback_only'], 'network_interface_not_loopback_only')
+    routes = []
+    for family in ('-4', '-6'):
+        routes.extend(json.loads(subprocess.run(['ip', family, '-json', 'route', 'show', 'table', 'all'],
+            check=True, capture_output=True, text=True, timeout=3).stdout))
+    safety['no_external_routes'] = all(row.get('dev') == 'lo' and row.get('dst') != 'default'
+                                      for row in routes)
+    check(safety['no_external_routes'], 'external_route_present')
+    # TEST-NET is never contacted: with no external interface/route, require the
+    # kernel's ENETUNREACH specifically, rather than accepting any socket error.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.25)
+        try:
+            probe.connect(('192.0.2.1', 443))
+            blocked = False
+        except OSError as error:
+            blocked = error.errno == errno.ENETUNREACH
+    safety['external_probe_network_unreachable'] = blocked
+    check(blocked, 'network_block_not_proven')
+    temporary_root = Path(os.environ['TMPDIR'])
+    safety['fresh_owned_temporary_directory'] = (temporary_root.is_dir()
+        and temporary_root.stat().st_uid == os.geteuid()
+        and not any(temporary_root.iterdir()))
+    check(safety['fresh_owned_temporary_directory'], 'temporary_directory_not_fresh')
+    safety['dummy_credentials_only'] = True
+
+
+def launch_failure_evidence(error):
+    # Reduce only the launch exception. Never persist argv, paths, URLs, headers,
+    # raw stderr, or arbitrary exception text; retain exact allowlisted phrases.
+    message = str(error)
+    lowered = message.lower()
+    phrases = ('Operation not permitted', 'Permission denied', 'No usable sandbox',
+        'Failed to move to new namespace', 'No such file or directory',
+        'error while loading shared libraries', 'Exec format error',
+        'Connection refused', 'Trace/breakpoint trap', 'Segmentation fault',
+        'Target page, context or browser has been closed')
+    matched = [phrase for phrase in phrases if phrase.lower() in lowered]
+    exit_codes = [int(value) for value in re.findall(r'exitCode=(-?\d+)', message)]
+    signals = re.findall(r'signal=(SIG[A-Z0-9]+)', message)
+    pids = [int(value) for value in re.findall(r'(?:launched> pid=|\[pid=)(\d+)', message)]
+    libraries = re.findall(r'error while loading shared libraries: ([A-Za-z0-9_.+-]{1,100}\.so(?:\.\d+)*)', message)
+    source_locations = re.findall(
+        r'\b(?:ERROR|FATAL|WARNING):(?:[A-Za-z0-9_.+-]+/)*([A-Za-z0-9_.+-]{1,100}\.(?:cc|cpp|c|h):\d{1,6})\]', message)
+    reason = ('browser_executable_missing' if "executable doesn't exist" in lowered
+        else 'shared_library_load_failed' if libraries
+        else 'explicit_namespace_setup_failure' if 'failed to move to new namespace' in lowered
+        else 'explicit_no_usable_sandbox' if 'no usable sandbox' in lowered
+        else 'browser_startup_cause_unknown')
+    return {'reason': reason, 'technical_phrases': matched,
+        'exit_codes': exit_codes[:4], 'signals': sorted(set(signals))[:4],
+        'process_ids': sorted(set(pids))[:8], 'missing_libraries': libraries[:4],
+        'source_locations': sorted(set(source_locations))[:8],
+        'raw_exception_retained': False}
 
 
 def install_routes(context, page_url, ports, state):
@@ -242,7 +320,9 @@ def run(output):
         check(not any(os.environ.get(key) for key in ('COINGLASS_COOKIE_HEADER',
               'COINGLASS_STORAGE_STATE_JSON', 'DATABASE_URL', 'OPENAI_API_KEY')),
               'unexpected_credentials')
-        check(importlib.metadata.version('playwright') == '1.49.1', 'playwright_version')
+        prelaunch_safety(report)
+        report['target_playwright_from_build'] = '1.55.0'
+        check(importlib.metadata.version('playwright') == '1.55.0', 'playwright_version')
         report['playwright_version'] = importlib.metadata.version('playwright')
         for role in ('page', 'account', 'sink'):
             server = Server(('127.0.0.1', 0), Handler)
@@ -261,9 +341,14 @@ def run(output):
         declared = json.loads(manifest.read_text())
         expected = next(item['browserVersion'] for item in declared['browsers'] if item['name'] == 'chromium')
         report['declared_chromium_version'] = expected
-        stage = 'sandbox_startup'
+        report['prelaunch']['fixture_origins_loopback_only'] = all(
+            urlsplit(state[role + '_origin']).hostname == '127.0.0.1'
+            and urlsplit(state[role + '_origin']).scheme == 'http'
+            for role in ('page', 'account', 'sink'))
+        check(report['prelaunch']['fixture_origins_loopback_only'], 'fixture_origin_not_local')
+        stage = 'browser_startup'
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=True, chromium_sandbox=True, timeout=15000)
+        browser = playwright.chromium.launch(headless=True, chromium_sandbox=False, timeout=15000)
         report['chromium_version'] = browser.version
         check(browser.version == expected, 'chromium_version')
         context = browser.new_context(service_workers='block')
@@ -274,7 +359,7 @@ def run(output):
         profiles |= paths
         observed_pids |= pids
         report['startup'] = {**proc, 'local_page_loaded': True}
-        check(all(proc.values()), 'sandbox_not_proven')
+        check(all(proc.values()), 'browser_launch_policy_not_proven')
         context.close()
         contexts.remove(context)
 
@@ -369,21 +454,15 @@ def run(output):
         report['status'] = 'passed'
     except BaseException as error:
         report['status'] = 'failed'
-        # Never stringify a browser exception (may include URLs or headers).
+        # Never retain a raw browser exception (may include URLs or headers).
         report['error_class'] = type(error).__name__ if type(error).__name__ in {
             'CheckFailed', 'Error', 'TimeoutError', 'TargetClosedError', 'ValueError',
             'FileNotFoundError', 'PermissionError', 'RuntimeError', 'ImportError',
             'ModuleNotFoundError'} else 'Other'
         report['failure'] = str(error) if isinstance(error, CheckFailed) else 'stage_failed'
-        if stage == 'sandbox_startup' and not isinstance(error, CheckFailed):
-            # Reduce locally; never retain the raw Playwright exception or argv.
-            message = str(error).lower()
-            report['failure'] = ('browser_executable_missing' if "executable doesn't exist" in message
-                else 'sandbox_user_namespace_denied' if ('no usable sandbox' in message
-                    or 'failed to move to new namespace' in message
-                    or 'operation not permitted' in message)
-                else 'browser_startup_failed')
-            del message
+        if stage == 'browser_startup' and not isinstance(error, CheckFailed):
+            report['launch_failure'] = launch_failure_evidence(error)
+            report['failure'] = report['launch_failure']['reason']
         report['failed_stage'] = stage
         report['failure_evidence'] = {'server': received(state),
                                       'mock_handler_failed': state['handler_errors'] != 0}
