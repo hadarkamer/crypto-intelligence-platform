@@ -8,7 +8,10 @@ cookies, storage state, map readers, access guards, queues or configuration.
 
 - 14 simulated CDP contract tests passed. Python compilation, workflow YAML
   parsing and shell syntax checks passed. These are not browser evidence.
-- No Chromium execution or GitHub Actions run was performed for this revision.
+- No Chromium execution or Actions runner job has occurred. Saving the preparation
+  branch produced a workflow-validation failure (#81, zero jobs): `runner.temp`
+  was unavailable in job-level `env`. The preparation was corrected to set the
+  path inside each shell step from `RUNNER_TEMP`; no test or retry was started.
 - The existing `standalone-heatmap-check.yml` is absent from the repository's
   default branch (`main`); the Actions page has no **Run workflow** control.
   GitHub documents the default-branch prerequisite for `workflow_dispatch`.

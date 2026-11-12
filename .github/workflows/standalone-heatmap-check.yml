@@ -98,7 +98,6 @@ jobs:
       COLLECTION_BRIDGE_ENABLED: "false"
       PYTHONUTF8: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/account-cdp-browsers
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,6 +114,7 @@ jobs:
       - name: Install only pinned experiment browser
         timeout-minutes: 9
         run: |
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/account-cdp-browsers"
           python -m pip install 'playwright==1.49.1'
           python -m playwright install --with-deps chromium
       - name: Isolated account CDP dummy checks (no external network)
@@ -122,6 +122,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/account-cdp-browsers"
           work="$RUNNER_TEMP/account-cdp-work"
           mkdir -m 700 "$work"
           command -v unshare
@@ -154,6 +155,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/account-cdp-browsers"
           work="$RUNNER_TEMP/account-cdp-work"
           python - "$work" "$PLAYWRIGHT_BROWSERS_PATH" <<'PY'
           import json, pathlib, shutil, sys
