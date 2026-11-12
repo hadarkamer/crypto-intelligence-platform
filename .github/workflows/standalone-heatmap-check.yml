@@ -23,6 +23,10 @@ on:
       - .github/workflows/standalone-heatmap-check.yml
   workflow_dispatch:
     inputs:
+      account_cdp_check:
+        description: Dummy-only account header CDP experiment (isolated branch)
+        type: boolean
+        default: false
       hover_source_check:
         description: Run one source-only pass of all nine maps (no AI or app writes)
         type: boolean
@@ -33,6 +37,7 @@ permissions:
 
 jobs:
   validate:
+    if: github.ref != 'refs/heads/test/coinglass-account-cdp-20261112' && !inputs.account_cdp_check
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -74,4 +79,106 @@ jobs:
           name: hover-source-evidence
           path: hover-source-evidence
           retention-days: 7
+
+  account_cdp_dummy:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.run_attempt == 1 &&
+      github.ref == 'refs/heads/test/coinglass-account-cdp-20261112' &&
+      inputs.account_cdp_check && !inputs.hover_source_check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: account-cdp-dummy-20261112
+      cancel-in-progress: false
+    env:
+      COINGLASS_COOKIE_HEADER: ""
+      COINGLASS_STORAGE_STATE_JSON: ""
+      DATABASE_URL: ""
+      OPENAI_API_KEY: ""
+      COLLECTION_BRIDGE_ENABLED: "false"
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/account-cdp-browsers
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /experiments/account-cdp-20261112/
+            /standalone_collector/source_account_diagnostic.py
+            /standalone_collector/model1_execution.py
+            /standalone_collector/capture_readiness.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install only pinned experiment browser
+        timeout-minutes: 9
+        run: |
+          python -m pip install 'playwright==1.49.1'
+          python -m playwright install --with-deps chromium
+      - name: Isolated account CDP dummy checks (no external network)
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/account-cdp-work"
+          mkdir -m 700 "$work"
+          command -v unshare
+          command -v runuser
+          command -v ip
+          python -m unittest discover -s experiments/account-cdp-20261112 -p test_account_cdp.py -v
+          # This namespace has only loopback. The Actions agent stays outside.
+          # PID namespace exit kills all remaining fixture descendants.
+          timeout --signal=TERM --kill-after=10s 150s sudo unshare \
+            --net --pid --fork --kill-child=SIGKILL --mount-proc \
+            bash -c '
+              set -euo pipefail
+              ip link set lo up
+              test "$(ip -o link show | wc -l)" -eq 1
+              ip link show lo >/dev/null
+              test -z "$(ip route show)"
+              test -z "$(ip -6 route show default)"
+              echo "CDP_ISOLATION loopback_only=true external_routes=false"
+              exec runuser -u "$1" -- env -i \
+                PATH="$2" HOME="$3" TMPDIR="$4" \
+                PLAYWRIGHT_BROWSERS_PATH="$5" PYTHONUTF8=1 \
+                PYTHONDONTWRITEBYTECODE=1 COLLECTION_BRIDGE_ENABLED=false \
+                "$6" "$7" --output "$4/result.json"
+            ' cdp-dummy "$(id -un)" "$PATH" "$HOME" "$work" \
+              "$PLAYWRIGHT_BROWSERS_PATH" "$(command -v python)" \
+              "$GITHUB_WORKSPACE/experiments/account-cdp-20261112/test_chromium.py"
+      - name: Preserve sanitized result and remove temporary data
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/account-cdp-work"
+          python - "$work" "$PLAYWRIGHT_BROWSERS_PATH" <<'PY'
+          import json, pathlib, shutil, sys
+          work, browsers = map(pathlib.Path, sys.argv[1:])
+          result = work / 'result.json'
+          clean = True
+          try:
+              if result.is_file() and not result.is_symlink() and result.stat().st_size <= 131072:
+                  report = json.loads(result.read_text())
+                  print('CDP_DUMMY_RESULT ' + json.dumps(report, sort_keys=True))
+              else:
+                  print('CDP_DUMMY_RESULT {"status":"incomplete","evidence_missing":true}')
+          except Exception:
+              clean = False
+              print('CDP_DUMMY_RESULT {"status":"incomplete","evidence_unreadable":true}')
+          finally:
+              for path in (work, browsers):
+                  try:
+                      if path.exists(): shutil.rmtree(path)
+                  except Exception:
+                      clean = False
+              clean = clean and not work.exists() and not browsers.exists()
+              print('CDP_WORKSPACE_CLEANUP ' + json.dumps({
+                  'work_removed': not work.exists(), 'browser_files_removed': not browsers.exists(),
+                  'cleanup_ok': clean}))
+          if not clean: raise SystemExit(1)
+          PY
 
