@@ -1,93 +1,134 @@
-# Position recovery and isolation — partial implementation, not releasable
+# טיפול בפוזיציות ובידוד תקלות — דוח מועמד, 12.11.2026
 
-## Authority and baseline
+המנגנון והבדיקות המבודדות מומשו. **אין עדיין קבלה אינטראקטיבית בטלגרם, והקומיטים טרם הועלו ל־GitHub. אין אישור או מוכנות לפריסה.**
 
-The attached team instruction authorizes isolated implementation and testing,
-not merge, deployment, production configuration, or live trading. It explicitly
-requires approval before establishing a new test environment. No production
-state, settings, exchange orders, or Telegram messages were changed in this work.
+## זוג הגרסאות שנבדק
 
-Render's latest live deployment was read on 2026-11-12: receiver
-`srv-dakptbh594qs7395460g`, deployment `dep-dbje9l7lot8c7385ibf0`, commit
-`debc658b2b26405999b0029658bce2f4492c67f8`. The isolated branch starts at that
-exact commit: `fix/position-recovery-isolation-20261112`.
+| רכיב | ענף מבודד | קומיט קוד שנבדק | בסיס |
+|---|---|---|---|
+| מנהל העסקאות | `fix/position-recovery-isolation-20261112` | `1bfffdbae2f95a175b39ff95734ee1518b3494f3` | הגרסה הפעילה `debc658b2b26405999b0029658bce2f4492c67f8`, ואחריה התיקון `1090d953fe428bd8120d2df750982cd15601ad4f` |
+| טלגרם / מקור | `fix/position-recovery-telegram-20261112` | `ddc781c73c249cf54334a7d5c3b818720d7cef55` | `a81f4e4e1b8f03615ba7f37ba6703086a9f286ed` |
 
-## Active-path map
+עצי הקוד: מנהל `57020721866324e948ec770f73a4b8fe9bb1a85b`; מקור `29571102a3ee520d33e038e9c4b63cfc074e7fd8`.
+הדוח וקובצי מדידת העומס נשמרים בקומיט תיעוד נוסף; הוא אינו משנה את זוג גרסאות הקוד.
+לא מוזגו ענפים. לא שונו ייצור, חיבור הטלגרם הפעיל, אסטרטגיות, סיכון, מינוף או מכסות. לא נפתחו אותות ישנים. CoinGlass ו־PR #132 לא שונו.
 
-| Responsibility | Existing location | Finding / required follow-up |
-| --- | --- | --- |
-| Source intake and single running loop | `hl_testnet_runtime/experimental_live_service.py`, `experimental_live_startup.py` | Authenticated intake persists before waking the existing worker. Reuse this execution owner. |
-| Durable order attempts / dispatch | `experimental_live_runtime.py`, `experimental_live_state.py`, `experimental_live_dispatch.py` | Unknown outcomes remain durable; explicit unsent certificates are separate. Do not retry an unknown send. |
-| Native exit placement | `experimental_execution_runtime.py::_maintain_candidate`, `_maintain_doge`; `experimental_live_runtime.py::_maintain_live` | Existing SL/TP creation, amendments, split DOGE exits and approved emergency paths must share the future position-level decision. Do not add another sender. |
-| Collection and entry isolation | `experimental_live_provider.py::collect`, `experimental_live_runtime.py::_cycle_proposal`, `experimental_external_activity.py::review_inventory` | Unresolved requests suppress candidates at account scope in more than one layer. Lane collection failures can escalate to account blockers; inventory and final dispatch checks also need coordinated changes. Not corrected in this partial patch. |
-| Filled-order mismatch | `card_sync_evidence.py::observe` | Full-fill validation remains unchanged. Original quantity, observed fills and current exposure must not be made artificially equal. |
-| Accounting | `experimental_live_runtime.py::_accounting_maintenance`, `formula_accounting.py::funding_task`, `_closed`, `record_funding`, `settle` | Global early returns prevented independent final trades from collecting funding. This is the one implemented correction. |
-| Manual ownership | `experimental_external_activity.py::managed`, `apply`, `closure_verified` | Existing durable handoff records and position observations must remain authoritative, including HYPE's operator decision. This patch does not install a live handoff or infer one from silence. |
-| Telegram | Source service's `trade_telegram.py` on its separate main branch; receiver `trade_report_store.py` | Existing private allowlist, report commands and callbacks are read-only. The approved recovery outcomes and choices still need implementation and connection to saved position state. |
-| Existing tests | `test_experimental_live_service.py`, `test_experimental_live_runtime.py`, `test_formula_accounting.py`; source `trade_telegram_selftest.py` | Simulated exchange and durable test ports exist. Telegram tests use mocked calls; they are not an interactive UI acceptance environment. |
+## מה מומש
 
-## Implemented correction
+- נשמר תיקון ההתחשבנות: עסקה סגורה ועצמאית יכולה להשלים מימון והתחשבנות למרות בקשה לא־פתורה בעסקה אחרת. בדיקות העסקה עצמה נשארו.
+- בודדו חסימות לפי חשבון ומטבע במסנני המועמדים, איסוף הראיות, קריאות המקור, תכנון הביצוע, בדיקת המלאי ובדיקת הבעלות האחרונה לפני השליחה. פער בהיסטוריית HYPE נשאר פער; הכמות המקורית, הביצועים והחשיפה בפועל לא שוכתבו כדי לעבור בדיקה.
+- מלאי חשבון חסר או פגום, שינוי ברישום בעלות משותף, בעלות ישנה שאינה ניתנת לייחוס ומגבלות הון/תקציב עדיין חוסמים בתחום הרלוונטי. בידוד מטבע אינו מסיר את החשיפה מהמלאי הגולמי או מנתוני החשבון המשמשים למדיניות ההון הקיימת.
+- `position_recovery.py` שומר אירוע, סבב, מונים, מועדים, תוצאה, בחירה ומצב מסירת הודעה ביומן הקיים. אין שולח בורסה נוסף, עובד התאוששות נוסף או טבלת מסחר חדשה.
+- הצבה רגילה → סבב מוגבל → שמירת תוצאה → הצלחה או המתנה לבחירה. אין כפתורים בזמן הסבב. הצלחה חלקית אינה מוצגת כהצלחה מלאה; אי־ודאות אינה מוצגת כהיעדר SL מוכח.
+- עד **שתי שליחות נוספות לכל יציאה חסרה**, מעבר להצבה הרגילה, בחלון **60 שניות**. SL קודם; SL תקין אינו נשלח מחדש בשביל TP. דחייה שאינה מצדיקה ניסיון חוזר מובילה לבדיקה, בלי כפתור אוטומטי חסר תועלת.
+- תקרת בירור נוספת לסבב: **24 קריאות ומשקל שמור 720**, בשלוש הקצאות של עד 8 קריאות/240 משקל. ההקצאות נשמרות לפני האיסוף; קריסה יכולה לבזבז הקצאה, אך אינה מאפסת אותה. הנתונים והמטמון שומרים את זמן המדידה המקורי. קריאות המלאי המשותפות הקיימות אינן משוכפלות לכל אירוע.
+- כל הפעולות כפופות גם לתקציב הבקשות הקיים. חלון הסבב נבדק מחדש בהקשר השליחה הסופי. אין משיכה חוזרת של היסטוריה ישנה במסגרת סבב: פער גדול בחלון ההיסטוריה מסתיים בדרישת בדיקה.
+- מצב פתוח ולא־פתור שכבר קיים ביומן נכנס למסגרת המוגבלת לפני איסוף ראשון של העובד המשודרג. ניהול ידני קיים אינו מוחזר לאוטומטי.
+- לחיצה על אוטומטי שומרת `RESUME_REQUESTED` בלבד. המנהל הקיים מבצע את הסבב. בחירה ידנית משתמשת ברישום הניהול הידני הקיים ומכובדת גם בבדיקת התביעה הסופית לשליחה.
+- בקשה עם תוצאה לא־ידועה אינה נמחקת או נשלחת שוב בעקבות בחירה, הפעלה מחדש או תקלה בטלגרם.
 
-Removed two global early-return conditions from `_accounting_maintenance`:
-an unresolved request anywhere, and a missing original stop on any active trade.
-The existing cycle still attempts actionable protection before background
-accounting. `funding_task` still requires the selected trade to be closed,
-independently reconciled, attributable, and supplied with actual fee facts.
-Its own unresolved requests still prevent the funding read. Funding remains
-subject to the unchanged shared background request budget, page bounds, retry
-delay and trade-digest check at commit.
+## החיבור לטלגרם והרשאותיו
 
-No replacement handler, scheduler, endpoint, table, capital policy or strategy
-was added. The two new regression tests are in `test_formula_accounting.py`.
+נוספה כניסה נפרדת, מוגבלת לרישום בלבד: `POST /internal/position-recovery/v1`.
+היא תומכת בבחירה, תביעת הודעת תוצאה ואישור מסירה. אימות HMAC עם סוד נפרד, חלון חתימה של 30 שניות, גודל קלט מוגבל, רשימת משתמשים מורשים וצ׳אט פרטי. הבחירה נבדקת מול הפוזיציה, האירוע והסבב השמורים. כפילות ולחיצה ישנה הן פעולה ללא השפעה נוספת.
 
-## Verification performed
+רכיב טלגרם אינו מייבא שולח בורסה או מפתח חתימה. הוא משתמש במחזור הקיים של `experimental_execution_forwarder` וב־event loop הקיים של אפליקציית טלגרם. קריאה איטית לטלגרם אינה מעכבת את מחזור המקור. התכונה כבויה כברירת מחדל.
 
-1. Before changes: the existing accounting, cross-blocker acceptance and stop
-   recovery suites ran 59 tests: 49 passed, 10 PostgreSQL tests skipped because
-   `HL_JOURNAL_CI_URL` was not configured.
-2. Added an independent closed-DOGE / unresolved-HYPE regression and a negative
-   test for the closed trade's own unresolved request. The independent test
-   failed against the original implementation, reproducing the global stall.
-3. After the correction, the same suites plus the regressions ran 61 tests:
-   51 passed, the same 10 PostgreSQL tests skipped.
+מסירת הודעות מופרדת ממצב הפעולה: תביעה נשמרת לפני השליחה, מספר ההודעה נשמר רק לאחר אישור. דחייה מוכחת מוגבלת לשלושה ניסיונות עם המתנה. תשובה שאבדה נשמרת כ־`UNKNOWN` ואינה גוררת שליחה כפולה. תביעה שנקטעה נשארת חסומה לשליחה נוספת; אישור מאוחר מדויק יכול להשלים אותה. שינוי בתוצאה בזמן שליחה ממתין לאישור ועורך את אותה הודעה כשמספרה ידוע.
 
-Command:
+מגבלה מפורשת: בלי אישור טלגרם ובלי מספר הודעה אין דרך להבטיח גם מסירה וגם היעדר כפילות. המימוש שומר אי־ודאות ואינו מציג הודעה כ״נמסרה״. כפתורים ישנים נדחים במסד גם אם עריכת הממשק נכשלה.
+
+## מה נבדק בפועל
+
+**430 בדיקות מנהל/חיבור/מסד עברו, ללא דילוגים. בנוסף עברו 17 בדיקות של רכיב המקור/טלגרם.**
+
+PostgreSQL זמני 17.11 הופעל ב־loopback בלבד, במסד `hl_journal_ci`, ללא נתוני ייצור. עשר בדיקות המסד שהיו חסרות בדוח הקודם עברו כעת. נבדקו גם עסקאות וגלגול לאחור, שמירת מונים ובחירות, מקביליות ולחיצות כפולות, הפעלה מחדש, בקשה לא־ידועה, חתימה עם מפתח סינתטי ותקציב הבקשות המשותף האמיתי במסד.
+
+התרחישים כוללים הצלחה רגילה ללא אירוע, הצלחה בניסיון נוסף, מיצוי התקרה והמתנה, סבב נוסף אחד לאחר בחירה, ידני ומשתמש לא מורשה, SL תקין עם TP חסר, שינוי כמות בביצוע חלקי, סגירה בזמן טיפול, תשובת בורסה שאבדה, כשל שמירה, כשל מסירת הודעה ומרוץ בין שליחה לעדכון תוצאה.
+
+הבדיקה המשולבת של זוג הגרסאות עברה דרך לקוח HTTP אמיתי ב־loopback, HMAC, endpoint הקבלה, PostgreSQL, callback המקור, המנהל היחיד והצגת התוצאה דרך מתאם טלגרם מדומה. נבדקה גם פתיחת SOL באותו חשבון שבו HYPE נשארת עם `FILLED_ORDER_HISTORY_INCOMPLETE`; החשיפה והבקשה הלא־פתורה נשארו מתועדות. בדיקות התחשבנות DOGE העצמאית נשמרו ועברו.
+
+**זה אינו אישור קבלה אינטראקטיבית בטלגרם.** לא נשלחו הודעות לצ׳אט מסחר פעיל או לבוט בדיקות בפועל.
+
+שחזור בדיקות המנהל, עם מסד PostgreSQL זמני שכבר הופעל ושתי ספריות הקוד המתאימות:
 
 ```sh
+export HL_JOURNAL_CI_URL=postgresql://postgres@127.0.0.1:55440/hl_journal_ci
+export RECOVERY_TELEGRAM_SOURCE=/path/to/telegram-checkout
 python -m unittest -q \
-  hl_testnet_runtime.test_formula_accounting \
-  hl_testnet_runtime.test_experimental_blocker_acceptance \
-  hl_testnet_runtime.test_stop_completion_recovery
+ hl_testnet_runtime.test_position_recovery \
+ hl_testnet_runtime.test_position_recovery_connection \
+ hl_testnet_runtime.test_position_recovery_bridge \
+ hl_testnet_runtime.test_formula_accounting \
+ hl_testnet_runtime.test_experimental_live_runtime \
+ hl_testnet_runtime.test_experimental_live_state \
+ hl_testnet_runtime.test_experimental_live_provider \
+ hl_testnet_runtime.test_experimental_live_service \
+ hl_testnet_runtime.test_experimental_live_dispatch \
+ hl_testnet_runtime.test_experimental_blocker_acceptance \
+ hl_testnet_runtime.test_experimental_external_activity \
+ hl_testnet_runtime.test_experimental_external_activity_review \
+ hl_testnet_runtime.test_stop_completion_recovery \
+ hl_testnet_runtime.test_history_gap_stream \
+ hl_testnet_runtime.test_experimental_live_safety \
+ hl_testnet_runtime.test_request_budget
 ```
 
-In the new isolated regression the pending independent settlement changes
-from zero funding calls (stalled) to one call (settled); the next maintenance
-cycle adds zero calls. The unrelated HYPE request is byte-for-byte unchanged.
-This is a mock-call assertion, not a measured exchange weight comparison of
-the complete requested feature. No complete performance claim is made.
+בספריית המקור, עם ספריית המנהל ב־PYTHONPATH:
 
-## Outstanding — do not merge or deploy
+```sh
+python -m unittest -q position_recovery_telegram_selftest trade_telegram_selftest experimental_execution_forwarder_selftest
+```
 
-- Position-scoped admission isolation across collection, planning, inventory
-  and final transport validation.
-- The saved recovery round, per-exit two-extra-send / 60-second limits, bounded
-  inquiry count and weight, and restart-safe enforcement.
-- Automatic/manual choices, authorization, stale/duplicate callback rejection,
-  notification delivery state and outcome messages.
-- Full partial-fill / lost-reply / restart / persistence-failure matrix.
-- Complete before/after request and weight comparison.
-- Real PostgreSQL verification and interactive UI acceptance.
+## עומס לפני ואחרי
 
-The existing repository tests do not supply a Telegram test bot/chat and
-interactive isolated application path. Before establishing that environment,
-the user must identify an existing suitable test environment or approve a
-separate test bot/chat connected only to the simulated exchange and test state.
-The active trading chat must not receive test messages. Directly calling a
-callback with mocks will not be reported as UI acceptance.
+הושוו אותם שני מחזורי הכנה ועוד 12 מחזורים, אותם אותות ונתונים סינתטיים, מול הבסיס הפעיל `debc658`. כל קריאות ה־info והשליחות של המתאמים נספרו. המשקל בטבלה מחושב לפי פונקציית התקציב הקיימת וגודל התשובות הסינתטיות, כולל החזר משקל של דפי היסטוריה; זו אינה מדידה מבורסה חיה.
 
-The full instruction is therefore NOT implemented or accepted. This branch
-is a reviewable partial fix only. No deployment or rollback procedure for the
-full feature is approved; preparing one depends on the completed, tested state
-and notification changes. Any later rollout must preserve manual management,
-request identities, counters and original signal expiry, and must not replay
-missed signals or erase unknown outcomes.
+| תרחיש | קריאות מידע לפני → אחרי | שליחות לפני → אחרי | משקל כולל מותאם לתשובות לפני → אחרי |
+|---|---:|---:|---:|
+| הצלחה רגילה | 49 → 49 | 3 → 3 | 730 → 730 |
+| תוצאת SL לא־ידועה מתמשכת | 60 → 39 | 3 → 2 | 752 → 502 |
+| פער HYPE עם אות SOL עצמאי | 57 → 51 | 1 → 2 | 708 → 733 |
+
+בתרחיש המקביל, העלייה של 25 במשקל נלווית לפתיחת SOL שהייתה חסומה קודם. בתרחיש הכשל, ארבעת המחזורים האחרונים אחרי התיקון מכילים רק שתי קריאות מלאי משותף למחזור ואפס שליחות חדשות; אין עוד בירור orderStatus/CLOID של האירוע. עצירת הסבב מכובדת גם במסלולי ניהול קיימים. לא נוספה הרשאת סגירת חירום.
+
+המשקלים המקסימליים שנשמרים מראש, לפני החזרים, והפירוט לפי סוג קריאה נמצאים ב־`position-recovery-20261112/load-before.json` וב־`load-after.json`. ההשוואה משתמשת במתאם תקציב סינתטי כדי למדוד ביקוש ללא שינוי בין ההרצות; אכיפת המכסה במסד נבדקה בנפרד בחבילת PostgreSQL. אין להסיק שסכום ההקצאות לפני החזרים הוא צריכה חיה בחלון אחד.
+
+`tools/measure_position_recovery.py --receiver-path /path/to/checkout` משחזר את המדידה. מסלולי POST/קריאה שנבדקו אינם מכילים לולאת ניסיון חוזר סמויה. תיקון ההתחשבנות עדיין נמדד בנפרד: קריאת מימון נחוצה אחת, ואפס קריאות נוספות במחזור הבא.
+
+## הכנת קבלה אינטראקטיבית ומה עדיין חסר
+
+`tools/position_recovery_acceptance.py` הוכן ונבדק ב־`--dry-run` עם PostgreSQL אמיתי. הוא מפעיל את המנהל והלולאה הקיימים מול `SoftwareExchange`, את endpoint הרישום ב־loopback ואת רכיב המקור מהספרייה הנפרדת. אין שירות ענן חדש. כלי הבדיקה מאתחל מחדש את סכמת הבדיקות; יש להשתמש אך ורק במסד הבדיקות הזמני.
+
+נבדקו רשימת שירותי Render (כולל previews), מסלולי ההפעלה וההגדרות המקומיות הייעודיות. השירות הפעיל ששמו כולל testnet הוא mainnet. שירותי האימות הוותיקים שנמצאו הם בדיקות offline/static, ואינם מוכיחים קיום בוט טלגרם וצ׳אט פרטיים ייעודיים. לא נמצאו פרטי סביבה מקומית כאלה; לא נלקח סוד מבוט פעיל כתחליף.
+
+הפעולה החיצונית הדרושה:
+
+1. ליצור ב־BotFather בוט בדיקות נפרד באמצעות `/newbot`, ולשלוח `/start` בצ׳אט פרטי איתו.
+2. להגדיר את שם הבוט המדויק ואת מזהה המשתמש/הצ׳אט הפרטי המורשה. מפתח הבוט יוזן רק בשדה הסיסמה המוסתר של כלי ההרצה המקומי (`getpass`), ולא בשיחה, בפקודה, בקוד או בלוג.
+3. להפעיל את הכלי מול PostgreSQL זמני בלבד. לדוגמה:
+
+```sh
+python tools/position_recovery_acceptance.py \
+ --telegram-source /path/to/telegram-checkout \
+ --expected-test-bot ExactSeparateTestBot \
+ --private-user-id AUTHORIZED_PRIVATE_USER_ID
+```
+
+תסריט קבלה קצר: לקבל הודעת סיום סבב; ללחוץ אוטומטי פעם אחת ושוב על אותה בחירה; לוודא שנשמר סבב אחד בלבד ושהודעת הצלחה מגיעה לאחר הביצוע המדומה; לשלוח `/restart` בבוט הבדיקות ולוודא מצב שמור. להריץ שוב עם `--repeat-failure`, לבחור אוטומטי, לוודא סיום סבב נוסף והמתנה, ואז לבחור ידני ולבדוק לאחר `/restart` שאין שליחות חדשות. בדיקות המשתמש הלא־מורשה, כפתור ישן, אובדן תשובה וכשל מסירה עברו בשכבה המבודדת; יש לתעד גם את תוצאות הממשק בפועל, בלי לכנות dry-run או callback מדומה ״קבלה אינטראקטיבית״.
+
+## GitHub — חסם טכני שעדיין קיים
+
+נבדקו 11 workflows בענף המנהל ו־2 בענף המקור: מסנני push אינם כוללים את שני ענפי התיקון. שירותי Render שנבדקו אינם קשורים לענפים האלה, ויצירת previews כבויה. לא נפתחה בקשת מיזוג. לא בוצע שינוי ב־main או בענף פריסה.
+
+לאחר האישור המפורש, ניסיון Git push עדיין נכשל:
+
+```text
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+זוהי היעדר הזדהות HTTPS של Git בסביבה, ולא בקשה לאישור עסקי נוסף. לא נעשה שימוש בכלי או נתיב חלופי כדי לעקוף את החסם. דרוש חיבור Git מאומת עם הרשאת כתיבה למאגר, בערוץ הזדהות מוגן. האישור שניתן להמשך העבודה בענפים נשאר בתוקף.
+
+מכיוון שההעלאה לא הצליחה, **לא ניתן לדווח שהקוד המרוחק זהה לקוד שנבדק**. לאחר השלמת ההזדהות יש לרענן את בדיקת הטריגרים, לבדוק גם integrations/webhooks חיצוניים שאינם גלויים ברשימת workflows/Render, להעלות רק את הענפים המורשים בלי force-push, ולאמת את SHA המרוחק מול המקומי. `1090d95` נשמר כאב של קומיט המנהל, ולא הוחלף או שוכתב.
+
+השלמות שנותרו: העלאה ואימות מרחוק; קבלה אינטראקטיבית בטלגרם עם בוט וצ׳אט בדיקות מאומתים. אין בדיקות PostgreSQL מדולגות שנותרו בחבילה שנבדקה. אין פריסה או שינוי ייצור במסגרת העבודה הזאת.

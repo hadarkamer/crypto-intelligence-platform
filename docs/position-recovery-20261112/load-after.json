@@ -1,0 +1,134 @@
+{
+  "normal": {
+    "info_calls": 49,
+    "info_reserved_weight": 2014,
+    "wire_calls": 3,
+    "wire_weight": 3,
+    "total_reserved_weight": 2017,
+    "total_response_adjusted_weight": 730,
+    "kinds": {
+      "frontendOpenOrders": 14,
+      "clearinghouseState": 14,
+      "metaAndAssetCtxs": 3,
+      "userRole": 1,
+      "userRateLimit": 1,
+      "lookup": 3,
+      "userFillsByTime": 13
+    },
+    "last_four": [
+      [
+        3,
+        0
+      ],
+      [
+        4,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        3,
+        0
+      ]
+    ],
+    "entries": [
+      "XRP"
+    ],
+    "rounds": []
+  },
+  "unknown": {
+    "info_calls": 39,
+    "info_reserved_weight": 896,
+    "wire_calls": 2,
+    "wire_weight": 2,
+    "total_reserved_weight": 898,
+    "total_response_adjusted_weight": 502,
+    "kinds": {
+      "frontendOpenOrders": 14,
+      "clearinghouseState": 14,
+      "metaAndAssetCtxs": 1,
+      "userRole": 1,
+      "userRateLimit": 1,
+      "lookup": 4,
+      "userFillsByTime": 4
+    },
+    "last_four": [
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        0
+      ]
+    ],
+    "entries": [
+      "XRP"
+    ],
+    "rounds": [
+      {
+        "phase": "WAITING",
+        "read_calls": 24,
+        "read_weight": 720,
+        "round": 1
+      }
+    ]
+  },
+  "parallel": {
+    "info_calls": 51,
+    "info_reserved_weight": 2018,
+    "wire_calls": 2,
+    "wire_weight": 2,
+    "total_reserved_weight": 2020,
+    "total_response_adjusted_weight": 733,
+    "kinds": {
+      "frontendOpenOrders": 14,
+      "clearinghouseState": 14,
+      "metaAndAssetCtxs": 3,
+      "userRole": 1,
+      "userRateLimit": 1,
+      "lookup": 5,
+      "userFillsByTime": 13
+    },
+    "last_four": [
+      [
+        4,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        3,
+        0
+      ]
+    ],
+    "entries": [
+      "HYPE",
+      "SOL"
+    ],
+    "rounds": [
+      {
+        "phase": "WAITING",
+        "read_calls": 24,
+        "read_weight": 720,
+        "round": 1
+      }
+    ]
+  }
+}
