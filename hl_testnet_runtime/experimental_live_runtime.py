@@ -641,11 +641,10 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         """
         # This is the pure projection just committed by the cycle. Reuse it;
         # record_funding checks the trade again under lock after the read.
-        if any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values()):
-            return
-        from .experimental_live_provider import _original_stop_needed
-        if any(_original_stop_needed(state, t) for t in state['trades'].values() if t['phase'] not in FINAL):
-            return
+        # funding_task validates the chosen trade's own final requests, fills,
+        # fees and ownership. An unrelated unresolved order is not evidence
+        # against that settlement. Protection already had the first action in
+        # this cycle; the existing background budget still bounds this read.
         task = accounting.funding_task(state, self.venue.now())
         if task is None:
             return

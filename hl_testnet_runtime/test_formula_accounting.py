@@ -113,6 +113,41 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(Decimal(short['entry_risk']['planned_usd']),Decimal('2.475'))
         self.assertEqual(len(self.state['formula_accounting']['portfolios']),1)
 
+    def test_independent_closed_doge_settles_despite_unknown_hype_request(self):
+        """Reproduce the cross-formula stall without touching live accounts."""
+        state = self.state
+        doge = completed(state, formula='DOGE', side='SHORT')
+        doge['symbol'] = 'DOGE'
+        pending = dict(phase='OUTCOME_UNKNOWN', proposal=dict(
+            card_id='b'*64, account=doge['account'], symbol='HYPE'))
+        state['requests']['pending-hype'] = deepcopy(pending)
+        worker = object.__new__(live.TestnetExecutionRuntime)
+        worker.store = Mock()
+        worker.store.mutate.side_effect = lambda fn: fn(state)
+        worker.venue = Mock()
+        worker.venue.now.return_value = BASE+5000
+        worker.venue.collect_funding.return_value = []
+        worker._accounting_maintenance(state)
+        self.assertIn('settlement', doge)
+        self.assertEqual(state['requests']['pending-hype'], pending)
+        self.assertEqual(worker.venue.collect_funding.call_count, 1)
+        worker._accounting_maintenance(deepcopy(state))
+        self.assertEqual(worker.venue.collect_funding.call_count, 1)
+
+    def test_closed_trade_own_unknown_request_still_prevents_settlement_read(self):
+        state = self.state
+        doge = completed(state, formula='DOGE', side='SHORT')
+        state['requests']['own-unknown'] = dict(phase='OUTCOME_UNKNOWN',
+            proposal=dict(card_id=doge['cid'], account=doge['account'], symbol='DOGE'))
+        worker = object.__new__(live.TestnetExecutionRuntime)
+        worker.store = Mock()
+        worker.venue = Mock()
+        worker.venue.now.return_value = BASE+5000
+        worker._accounting_maintenance(state)
+        worker.venue.collect_funding.assert_not_called()
+        worker.store.mutate.assert_not_called()
+        self.assertNotIn('settlement', doge)
+
     def test_zero_or_negative_balance_never_resets_to_40(self):
         for loss in ('-40','-45'):
             state=initial(LIVE_ROUTES,BASE-60000);completed(state,gross=loss,fees='0');fund(state,'')
