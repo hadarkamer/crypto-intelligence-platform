@@ -62,8 +62,17 @@ def record(command, env=None):
 def view(notice):
     result = notice['result']; facts = result['facts']
     account = 'לונג' if notice['role']=='long_account' else 'שורט'
-    lines = [f"{notice['symbol']} · חשבון {account} · סבב {result['round']}"]
-    if result['phase'] in ('MANUAL','RESUME_REQUESTED'):
+    title="אות חדש" if result["phase"]=="ENTRY_REFUSED" else "סבב "+str(result["round"])
+    lines = [f"{notice['symbol']} · חשבון {account} · {title}"]
+    if result['phase']=='ENTRY_REFUSED':
+        lines.append('האות החדש לא נפתח. קיימת כבר פוזיציה או בקשה באותו חשבון ומטבע.')
+        reasons={'MARKET_OUTCOME_UNKNOWN':'תוצאת הוראה קודמת עדיין אינה ידועה.',
+            'MARKET_PROTECTION_PENDING':'הטיפול בהגנות של הפוזיציה הקיימת טרם הושלם.',
+            'SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED':'לא ניתן להבטיח ניהול יציאות עצמאי לשתי פוזיציות באותו מטבע.',
+            'FILLED_ORDER_HISTORY_INCOMPLETE':'היסטוריית הביצועים של הפוזיציה הקיימת טרם הושלמה.',
+            'HUMAN_MANAGED_EXTERNAL_INTERVENTION':'הפוזיציה הקיימת מנוהלת ידנית.'}
+        lines.append(reasons.get(result['reason'],'נדרש אימות נוסף של נתוני העסקה או הבעלות על ההוראות הקיימות.'))
+    elif result['phase'] in ('MANUAL','RESUME_REQUESTED'):
         lines.append('נשמרה בחירה בניהול ידני. הבוט לא ייזום פעולות נוספות לפוזיציה.' if result['phase']=='MANUAL' else
                      'נשמרה בקשת סבב נוסף. מנהל העסקאות יבדוק את המצב העדכני.')
     elif result['phase']=='RESOLVED':
@@ -79,7 +88,8 @@ def view(notice):
             lines.append('נדרשת בדיקה של הנתונים או התנאים לפני ניסיון נוסף.')
     from datetime import datetime, timezone
     stamp=facts.get('observed_at_ms')
-    lines.append('זמן התצפית (UTC): '+(datetime.fromtimestamp(stamp/1000,timezone.utc).strftime('%d/%m %H:%M:%S') if stamp else 'לא זמין'))
+    label='מועד ההחלטה (UTC): ' if result['phase']=='ENTRY_REFUSED' else 'זמן התצפית (UTC): '
+    lines.append(label+(datetime.fromtimestamp(stamp/1000,timezone.utc).strftime('%d/%m %H:%M:%S') if stamp else 'לא זמין'))
     buttons=[]
     if result['phase']=='WAITING' and notice['current_phase']=='WAITING':
         prefix=f"pr:{notice['event']}:{result['round']}:"

@@ -53,6 +53,13 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
   n=notice();n['result']['retryable']=False
   self.assertEqual(len(t.view(n)[1].inline_keyboard[0]),1)
 
+ def test_entry_refusal_has_reason_and_no_action_buttons(self):
+  n=notice('ENTRY_REFUSED');n['result']['reason']='MARKET_OUTCOME_UNKNOWN'
+  n['result']['facts']={'observed_at_ms':1000000}
+  text,buttons=t.view(n)
+  self.assertIn('האות החדש לא נפתח',text);self.assertIn('תוצאת הוראה קודמת עדיין אינה ידועה',text)
+  self.assertIsNone(buttons)
+
  def test_default_off_and_untrusted_endpoint_fail_closed(self):
   self.assertIsNone(t.configuration({}))
   for url in ('https://evil.example'+t.PATH,'https://hl-testnet-check-yoyo.onrender.com/else',
