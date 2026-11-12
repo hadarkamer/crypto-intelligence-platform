@@ -97,6 +97,23 @@ def _start(state, trade, now, previous=None):
     return row
 
 
+def refused_source(state, cid, decision):
+    """One saved notice for a new signal blocked by an occupied bot market."""
+    from .experimental_execution_runtime import FINAL
+    if cid in state['trades']: return
+    source=state['sources'][cid]['source'];role=decision['account_role'];account=state['routes'][role]
+    if not any(t['account']==account and t['symbol']==source['symbol'] and t['phase'] not in FINAL
+               for t in state['trades'].values()): return
+    notices=state.setdefault('position_recovery_entry_notices',{})
+    if cid in notices: return
+    identity=life.digest(['RECOVERY_ENTRY_REFUSAL',cid])[:24]
+    result=dict(phase='ENTRY_REFUSED',reason=decision['reason'],round=1,retryable=False,
+        facts=dict(observed_at_ms=decision['at_ms']))
+    notices[cid]=dict(cid=cid,event_id=identity,symbol=source['symbol'],role=role,phase='ENTRY_REFUSED',
+        notices=[dict(id=identity,revision=1,result=result,delivery='PENDING',attempts=0,
+                      message_id=None,retry_at_ms=decision['at_ms'])])
+
+
 def inherited_incidents(state, now):
     """Fence already-known open uncertainty before an upgraded worker collects.
 

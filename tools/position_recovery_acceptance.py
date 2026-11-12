@@ -113,7 +113,9 @@ def main():
         await update.message.reply_text('מנהל הבדיקה נטען מחדש מהמסד. מצב: '+current['phase']+
                                        ' · סבב: '+str(current['round']))
     async def shutdown(app):
-        stop.set();service._wake.set();server.shutdown();server.server_close()
+        stop.set();service._wake.set()
+        if threads:server.shutdown()
+        server.server_close()
         for thread in threads:thread.join(timeout=5)
     async def error(update,context):print('TEST_UI_ERROR: inspect state; no secret or raw exception is logged.')
     logging.getLogger('httpx').setLevel(logging.CRITICAL)
@@ -136,4 +138,10 @@ def main():
          patch('hyperliquid_testnet_executor._signed_body',side_effect=AssertionError('NO_SIGNER')):
         app.run_polling(drop_pending_updates=True)
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except KeyboardInterrupt:pass
+    except Exception:
+        # Third-party exceptions may include a bot token or request URL.
+        print('ACCEPTANCE_SETUP_OR_RUNTIME_FAILED: no credentials are logged.',file=sys.stderr)
+        raise SystemExit(1) from None

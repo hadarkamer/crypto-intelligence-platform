@@ -94,6 +94,7 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
     if previous is None or any(previous.get(key) != decision[key] for key in fields):
         state['events'].append(dict(kind='ENTRY_DEFERRED', **deepcopy(decision)))
     state['entry_decisions'][cid] = decision
+    recovery.refused_source(state,cid,decision)
 
 
 def readiness():

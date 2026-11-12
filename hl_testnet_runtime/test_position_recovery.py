@@ -47,6 +47,19 @@ class RecoveryContract:
             round_number=row['round'] if round_number is None else round_number,
             choice=choice,actor=actor,allowed_users={'7'},now=self.venue.now()))
 
+    def test_new_same_market_signal_has_one_refusal_notice_no_choices(self):
+        from .test_approved_alert_lifecycle import alert
+        self.start(alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='first'))
+        peer=alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='peer')
+        self.worker.receive([peer]);self.cycle();self.restart();self.cycle()
+        value=self.store.load();rows=value['position_recovery_entry_notices']
+        self.assertEqual(list(rows),[peer['occurrence_id']])
+        self.assertEqual(len(rows[peer['occurrence_id']]['notices']),1)
+        self.assertNotIn(peer['occurrence_id'],value['trades'])
+        result=self.store.mutate(lambda s:api.operate(s,{'op':'claim'},users={'7'},chat='7',now=self.venue.now()))
+        self.assertEqual(result['result']['phase'],'ENTRY_REFUSED')
+        self.assertFalse(result['result']['retryable'])
+
     def test_normal_success_has_no_incident_or_extra_dispatch(self):
         msg,_=self.start();self.protect()
         self.assertFalse(self.store.load().get('position_recovery'))

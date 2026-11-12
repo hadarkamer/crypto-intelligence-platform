@@ -31,8 +31,13 @@ def settings(env):
     return secret, users, chat
 
 
+def _rows(state):
+    yield from state.get('position_recovery', {}).values()
+    yield from state.get('position_recovery_entry_notices', {}).values()
+
+
 def _find(state, identity):
-    for row in state.get('position_recovery', {}).values():
+    for row in _rows(state):
         for notice in row['notices']:
             if notice['id'] == identity: return row, notice
     raise ValueError('RECOVERY_NOTICE_NOT_FOUND')
@@ -49,7 +54,7 @@ def operate(state, command, *, users, chat, now):
         return recovery.choose(state, token=command['event'], round_number=command['round'],
             choice=command['choice'], actor=command['actor'], allowed_users=users, now=now)
     if op == 'claim' and set(command) == {'op'}:
-        for row in state.get('position_recovery', {}).values():
+        for row in _rows(state):
             for notice in row['notices']:
                 if notice['delivery']=='SENDING' and now-notice['claimed_at_ms'] >= 60000:
                     notice['delivery']='UNKNOWN'
