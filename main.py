@@ -7074,6 +7074,8 @@ async def main():
     bot_app.add_handler(CommandHandler("oi_regime", oi_state_cmd))
     ai_telegram.register_ai_handlers(bot_app)
     trade_telegram.register(bot_app)
+    import position_recovery_telegram
+    position_recovery_telegram.bind(bot_app, asyncio.get_running_loop())
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()

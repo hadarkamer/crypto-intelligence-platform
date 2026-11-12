@@ -104,6 +104,12 @@ class Forwarder:
                 report = dict(status='FORWARD_CYCLE_UNAVAILABLE', attempted=None,
                               source_records_changed=0, exchange_requests_sent=0)
             emit(report)
+            # Result delivery shares this cadence; it never waits for Telegram.
+            try:
+                import position_recovery_telegram
+                position_recovery_telegram.tick()
+            except Exception:
+                pass
             if report['status'] == 'DISABLED':
                 return
             if self.config and self.config.transport.mode == transport.APPROVED_MODE:
