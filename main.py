@@ -2834,6 +2834,7 @@ async def _send_alert_with_confirmation(
     special_transitions_precomputed: bool = False,
 ) -> None:
     import alert_delivery_policy
+    from telegram.error import BadRequest, Forbidden
     if not alert_delivery_policy.ordinary_alerts_enabled():
         return
     # Freeze the Research Event decision timestamp BEFORE Telegram network latency.
@@ -2843,13 +2844,14 @@ async def _send_alert_with_confirmation(
     attempted_at = datetime.now(timezone.utc)
     try:
         await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
-    except Exception:
+    except Exception as delivery_exc:
         try:
             research_event_runtime.capture_sent_maxpain(
                 item,
                 event_time=decision_time,
                 persist=True,
-                delivery_status="DELIVERY_FAILED",
+                delivery_status=("DELIVERY_FAILED"
+                                 if isinstance(delivery_exc, (BadRequest, Forbidden)) else "UNKNOWN"),
                 delivery_attempted_at_utc=attempted_at,
             )
         except Exception as exc:
@@ -2876,14 +2878,17 @@ async def _send_alert_with_confirmation(
             if not alert_delivery_policy.ordinary_alerts_enabled():
                 return
             await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
-    except Exception:
+    except Exception as delivery_exc:
         if not special_transitions_precomputed:
             try:
                 research_event_runtime.capture_special_transitions(
                     [item],
                     event_time=decision_time,
                     persist=True,
-                    delivery_status="DELIVERY_FAILED",
+                    # This hook represents all special messages for the item.
+                    # An early abort leaves a multi-message batch unresolved.
+                    delivery_status=("DELIVERY_FAILED" if len(separate_messages) == 1
+                                     and isinstance(delivery_exc, (BadRequest, Forbidden)) else "UNKNOWN"),
                     delivery_attempted_at_utc=special_attempted_at,
                 )
             except Exception as exc:
@@ -4309,49 +4314,80 @@ async def run_watch_cycle(
 
         WATCH_RUNTIME["cycle_stage"] = "sending_general"
         ordinary_sent = general_enabled and may_deliver_ordinary()
+        sent_items = []
+        combined_sent = 0
+
+        def record_delivery_error(stage, exc, symbol=None):
+            from telegram.error import BadRequest, Forbidden
+            error = {
+                "stage": stage,
+                "symbol": str(symbol or stage),
+                "error_type": type(exc).__name__,
+                "cause_type": type(exc.__cause__).__name__,
+                "delivery_status": ("DELIVERY_FAILED"
+                                    if isinstance(exc, (BadRequest, Forbidden)) else "UNKNOWN"),
+            }
+            WATCH_RUNTIME.setdefault("last_delivery_errors", []).append(error)
+            print(f"[watch-delivery] {json.dumps(error, sort_keys=True)}", flush=True)
+            return error["delivery_status"]
+
         if ordinary_sent:
-            await bot_app.bot.send_message(chat_id=chat_id, text=header)
-            for index, item in enumerate(result_items, start=1):
-                await _send_alert_with_confirmation(
-                    bot_app.bot,
-                    chat_id,
-                    _alert_card(index, item, all_items, rows),
-                    item,
-                    special_transitions_precomputed=True,
-                )
-            if result_items:
-                await bot_app.bot.send_message(
-                    chat_id=chat_id,
-                    text=alert_summary.format_alert_count_summary(result_items),
-                )
-            special_attempted_at = datetime.now(timezone.utc)
             try:
-                for special_message in special_messages:
+                await bot_app.bot.send_message(chat_id=chat_id, text=header)
+            except Exception as exc:
+                record_delivery_error("ordinary_header", exc)
+            for index, item in enumerate(result_items, start=1):
+                try:
+                    await _send_alert_with_confirmation(
+                        bot_app.bot,
+                        chat_id,
+                        _alert_card(index, item, all_items, rows),
+                        item,
+                        special_transitions_precomputed=True,
+                    )
+                except Exception as exc:
+                    record_delivery_error("ordinary_card", exc, item.get("symbol"))
+                    continue
+                sent_items.append(item)
+            if sent_items:
+                try:
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=alert_summary.format_alert_count_summary(sent_items),
+                    )
+                except Exception as exc:
+                    record_delivery_error("ordinary_summary", exc)
+            special_attempted_at = datetime.now(timezone.utc)
+            special_delivery_status = "DELIVERED"
+            special_delivered = 0
+            for special_message in special_messages:
+                try:
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
                         text=special_message,
                         parse_mode="HTML",
                     )
-            except Exception:
-                try:
-                    research_event_runtime.capture_special_transitions(
-                        displayable_items, include_score65=False,
-                        event_time=research_decision_time,
-                        persist=True,
-                        delivery_status="DELIVERY_FAILED",
-                        delivery_attempted_at_utc=special_attempted_at,
-                    )
                 except Exception as exc:
-                    print(f"[research] failed special hook: {exc!r}", flush=True)
-                raise
+                    status = record_delivery_error("ordinary_special", exc)
+                    # The capture API represents this batch, not individual
+                    # messages. Never mark a partial batch as delivered.
+                    if special_delivery_status != "UNKNOWN":
+                        special_delivery_status = status
+                else:
+                    special_delivered += 1
+            if special_delivered and special_delivery_status != "DELIVERED":
+                # A batch with mixed outcomes cannot attribute success or
+                # rejection to each captured event with this existing API.
+                special_delivery_status = "UNKNOWN"
             try:
                 research_event_runtime.capture_special_transitions(
                     displayable_items, include_score65=False,
                     event_time=research_decision_time,
                     persist=True,
-                    delivery_status="DELIVERED",
+                    delivery_status=special_delivery_status,
                     delivery_attempted_at_utc=special_attempted_at,
-                    delivered_at_utc=datetime.now(timezone.utc),
+                    delivered_at_utc=(datetime.now(timezone.utc)
+                                      if special_delivery_status == "DELIVERED" else None),
                 )
             except Exception as exc:
                 print(f"[research] special transition hook failed: {exc!r}", flush=True)
@@ -4368,18 +4404,20 @@ async def run_watch_cycle(
                         text=combined_delivery["text"],
                         parse_mode="HTML",
                     )
-                except Exception:
+                except Exception as delivery_exc:
+                    delivery_status = record_delivery_error("ordinary_combined", delivery_exc)
                     try:
                         research_event_runtime.capture_combined_confirmation(
                             combined_delivery["candidate"],
                             event_time=combined_delivery["decision_time"],
                             persist=True,
-                            delivery_status="DELIVERY_FAILED",
+                            delivery_status=delivery_status,
                             delivery_attempted_at_utc=attempted_at,
                         )
                     except Exception as exc:
                         print(f"[research] failed Combined hook: {exc!r}", flush=True)
-                    raise
+                    continue
+                combined_sent += 1
                 try:
                     research_event_runtime.capture_combined_confirmation(
                         combined_delivery["candidate"],
@@ -4410,7 +4448,7 @@ async def run_watch_cycle(
         )
         WATCH_RUNTIME["last_found"] = len(displayable_items)
         WATCH_RUNTIME["last_candidates"] = len(candidates)
-        WATCH_RUNTIME["last_sent"] = len(result_items) if ordinary_sent else 0
+        WATCH_RUNTIME["last_sent"] = len(sent_items)
         WATCH_RUNTIME["top_score"] = (
             top_item.get("score", top_item.get("priority"))
             if top_item else None
@@ -4433,14 +4471,21 @@ async def run_watch_cycle(
         WATCH_RUNTIME["last_cycle_result"] = WATCH_RUNTIME["last_cycle_status"]
         WATCH_RUNTIME["last_completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         if delivery_errors and alert_delivery_policy.ordinary_alerts_enabled():
-            failed_symbols = ", ".join(error["symbol"] for error in delivery_errors)
-            WATCH_RUNTIME["last_error"] = f"Magnet delivery incomplete: {failed_symbols}"
+            delivery_labels = {
+                "ordinary_header": "כותרת המחזור",
+                "ordinary_summary": "סיכום ההתראות",
+                "ordinary_special": "התראה מיוחדת",
+                "ordinary_combined": "התראה משולבת",
+            }
+            failed_symbols = ", ".join(delivery_labels.get(error["symbol"], error["symbol"])
+                                       for error in delivery_errors)
+            WATCH_RUNTIME["last_error"] = f"Watch delivery incomplete: {failed_symbols}"
             try:
                 await bot_app.bot.send_message(
                     chat_id=chat_id,
                     text=(f"⚠️ מחזור Watch משותף #{cycle_number}: נתוני הסריקה נאספו.\n"
-                          f"שליחת דוחות {failed_symbols} לא הושלמה בוודאות. "
-                          "המשכתי ליתר המטבעות; לא בוצעה שליחה חוזרת של הדוח שנכשל."),
+                          f"שליחת הודעות {failed_symbols} לא הושלמה בוודאות. "
+                          "המשכתי ליתר ההודעות; לא בוצעה שליחה חוזרת של ההודעה שנכשלה."),
                 )
             except Exception as exc:
                 print(f"[watch-delivery] summary error={type(exc).__name__}", flush=True)
@@ -4450,8 +4495,8 @@ async def run_watch_cycle(
             "ok": True,
             "found": len(all_items),
             "candidates": len(candidates),
-            "sent": len(result_items) if ordinary_sent else 0,
-            "combined_sent": len(combined_deliveries) if ordinary_sent else 0,
+            "sent": len(sent_items),
+            "combined_sent": combined_sent,
             "magnet_sent": magnet_sent,
             "delivery_errors": delivery_errors,
             "transition_result": transition_result,

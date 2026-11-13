@@ -138,5 +138,181 @@ class SelectedWatchTests(unittest.IsolatedAsyncioTestCase):
         manual_capture.assert_called_once()
 
 
+class OrdinaryWatchFailureIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """A local send failure must not discard the rest of a prepared Watch."""
+
+    async def exercise(self, stage=None, *, failure=None, empty=False, slow=False, magnet_failure=False):
+        from telegram.error import TimedOut
+        original_load = shared_fixture.load_main
+        attempts, heartbeats = [], []
+        observed = {}
+        failure = failure or TimedOut()
+
+        def load(names, scope, **kwargs):
+            result = original_load(names, scope, **kwargs)
+            if names == {'run_watch_cycle'}:
+                scope['research_event_runtime'].capture_sent_maxpain = Mock()
+                original_load({'_send_alert_with_confirmation'}, scope)
+                scope['_collect_special_transition_messages'] = lambda *args, **kwargs: ['special 1', 'special 2']
+                summary = Mock(return_value='count')
+                scope['alert_summary'].format_alert_count_summary = summary
+                observed['summary'] = summary
+                if magnet_failure:
+                    async def magnet(*args, **kwargs):
+                        scope['WATCH_RUNTIME']['last_delivery_errors'].append({
+                            'symbol': 'SOL', 'error_type': 'TimedOut', 'delivery_status': 'UNKNOWN'})
+                        return 2
+                    scope['_send_magnet_watch_reports'] = AsyncMock(side_effect=magnet)
+                native = scope['run_watch_cycle']
+
+                async def invoke(bot, *args, **kwargs):
+                    async def send(**payload):
+                        text = payload['text']
+                        kind = ('header' if not attempts else
+                                'card' if text == 'ordinary card' else
+                                'summary' if text == 'count' else
+                                text if text.startswith('special ') else
+                                'failure_summary' if text.startswith('⚠️') else
+                                'header' if text.startswith('✅') else 'combined')
+                        attempts.append(kind)
+                        if kind == stage:
+                            raise failure
+                        if slow and kind == 'header':
+                            task = asyncio.create_task(asyncio.sleep(0))
+                            await asyncio.sleep(.02)
+                            heartbeats.append(task.done())
+                            await task
+                        return SimpleNamespace(message_id=len(attempts))
+                    bot.bot.send_message.side_effect = send
+                    return await native(bot, *args, **kwargs)
+                scope['run_watch_cycle'] = invoke
+            return result
+
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}), \
+             patch.object(shared_fixture, 'load_main', load):
+            result = await shared_fixture.SharedWatchCaptureTests().run_cycle(empty=empty)
+        return result, attempts, observed, heartbeats
+
+    async def test_each_failed_message_keeps_independent_deliveries_and_precise_counts(self):
+        for stage in ('header', 'card', 'summary', 'special 1', 'combined'):
+            with self.subTest(stage=stage):
+                (scope, result, order, archives, captures, bot, bundle), attempts, observed, _ = await self.exercise(stage)
+                self.assertTrue(result['ok'], result)
+                self.assertEqual(scope['WATCH_RUNTIME']['last_cycle_status'], 'completed_with_delivery_errors')
+                self.assertEqual(len(result['delivery_errors']), 1)
+                self.assertEqual(result['delivery_errors'][0]['delivery_status'], 'UNKNOWN')
+                self.assertEqual(attempts.count(stage), 1)
+                self.assertIn('special 2', attempts)
+                self.assertIn('combined', attempts)
+                scope['_send_magnet_watch_reports'].assert_awaited_once()
+                scope['watch_transition_delivery'].drain.assert_awaited_once()
+                self.assertEqual(len(archives), 1)
+                self.assertEqual(result['sent'], int(stage != 'card'))
+                self.assertEqual(scope['WATCH_RUNTIME']['last_sent'], result['sent'])
+                self.assertEqual(result['combined_sent'], int(stage != 'combined'))
+                if stage == 'card':
+                    observed['summary'].assert_not_called()
+                    self.assertEqual(scope['research_event_runtime'].capture_sent_maxpain.call_args.kwargs['delivery_status'], 'UNKNOWN')
+                if stage == 'special 1':
+                    capture = scope['research_event_runtime'].capture_special_transitions.call_args.kwargs
+                    self.assertEqual(capture['delivery_status'], 'UNKNOWN')
+                    self.assertIsNone(capture['delivered_at_utc'])
+                if stage == 'combined':
+                    capture = scope['research_event_runtime'].capture_combined_confirmation.call_args.kwargs
+                    self.assertEqual(capture['delivery_status'], 'UNKNOWN')
+                    self.assertNotIn('delivered_at_utc', capture)
+
+    async def test_definite_rejection_keeps_failed_status_without_retry(self):
+        from telegram.error import BadRequest
+        (scope, result, *_), attempts, _, _ = await self.exercise('card', failure=BadRequest('controlled rejection'))
+        self.assertTrue(result['ok'])
+        self.assertEqual(attempts.count('card'), 1)
+        self.assertEqual(result['delivery_errors'][0]['delivery_status'], 'DELIVERY_FAILED')
+        self.assertEqual(scope['research_event_runtime'].capture_sent_maxpain.call_args.kwargs['delivery_status'], 'DELIVERY_FAILED')
+
+    async def test_lost_connection_response_remains_unknown_at_every_capture(self):
+        from telegram.error import NetworkError
+        for stage, capture_name in (
+            ('card', 'capture_sent_maxpain'),
+            ('special 1', 'capture_special_transitions'),
+            ('combined', 'capture_combined_confirmation'),
+        ):
+            with self.subTest(stage=stage):
+                (scope, result, *_), attempts, _, _ = await self.exercise(
+                    stage, failure=NetworkError('controlled lost response'))
+                self.assertTrue(result['ok'])
+                self.assertEqual(attempts.count(stage), 1)
+                self.assertEqual(result['delivery_errors'][0]['delivery_status'], 'UNKNOWN')
+                capture = getattr(scope['research_event_runtime'], capture_name).call_args.kwargs
+                self.assertEqual(capture['delivery_status'], 'UNKNOWN')
+                self.assertIsNone(capture.get('delivered_at_utc'))
+
+    async def test_mixed_special_batch_does_not_mislabel_individual_events(self):
+        from telegram.error import BadRequest
+        (scope, result, *_), attempts, _, _ = await self.exercise(
+            'special 1', failure=BadRequest('controlled rejection'))
+        self.assertTrue(result['ok'])
+        self.assertIn('special 2', attempts)
+        self.assertEqual(result['delivery_errors'][0]['delivery_status'], 'DELIVERY_FAILED')
+        capture = scope['research_event_runtime'].capture_special_transitions.call_args.kwargs
+        self.assertEqual(capture['delivery_status'], 'UNKNOWN')
+        self.assertIsNone(capture['delivered_at_utc'])
+
+    async def test_legacy_special_abort_preserves_partial_batch_uncertainty(self):
+        from telegram.error import BadRequest
+        for messages, failed, expected in (
+            (['special 1'], 'special 1', 'DELIVERY_FAILED'),
+            (['special 1', 'special 2'], 'special 1', 'UNKNOWN'),
+            (['special 1', 'special 2'], 'special 2', 'UNKNOWN'),
+        ):
+            with self.subTest(messages=messages, failed=failed), \
+                 patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+                scope, capture = watch_fixture.CardPathTests().card_scope()
+                scope['_special_transition_messages'] = lambda item: messages
+                async def send(**payload):
+                    if payload['text'] == failed:
+                        raise BadRequest('controlled rejection')
+                    return SimpleNamespace(message_id=1)
+                bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+                with self.assertRaises(BadRequest):
+                    await scope['_send_alert_with_confirmation'](bot, 1, 'card', {})
+                self.assertEqual(capture.capture_sent_maxpain.call_args.kwargs['delivery_status'], 'DELIVERED')
+                self.assertEqual(capture.capture_special_transitions.call_args.kwargs['delivery_status'], expected)
+                self.assertEqual(bot.send_message.await_count, 2 + int(failed == 'special 2'))
+
+    async def test_slow_send_yields_event_loop_and_preserves_decision_time(self):
+        (scope, result, *_), attempts, _, heartbeats = await self.exercise(slow=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(heartbeats, [True])
+        self.assertEqual(result['delivery_errors'], [])
+        capture = scope['research_event_runtime'].capture_sent_maxpain.call_args.kwargs
+        self.assertLessEqual(capture['event_time'], capture['delivery_attempted_at_utc'])
+        self.assertLessEqual(capture['delivery_attempted_at_utc'], capture['delivered_at_utc'])
+
+    async def test_no_trade_signal_does_not_disable_ordinary_watch(self):
+        (scope, result, order, archives, *_), attempts, _, _ = await self.exercise(empty=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['sent'], 0)
+        self.assertIn('header', attempts)
+        self.assertEqual(len(archives), 1)
+        scope['_send_magnet_watch_reports'].assert_awaited_once()
+        scope['watch_transition_delivery'].drain.assert_awaited_once()
+
+    async def test_shutdown_cancellation_is_not_swallowed(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.exercise('header', failure=asyncio.CancelledError())
+
+    async def test_ordinary_and_magnet_failures_preserve_both_results(self):
+        (scope, result, order, archives, captures, bot, bundle), attempts, _, _ = await self.exercise(
+            'header', magnet_failure=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['magnet_sent'], 2)
+        self.assertEqual([error['symbol'] for error in result['delivery_errors']], ['ordinary_header', 'SOL'])
+        summary = bot.bot.send_message.call_args.kwargs['text']
+        self.assertIn('כותרת המחזור', summary)
+        self.assertIn('SOL', summary)
+        self.assertNotIn('ordinary_header', summary)
+
+
 if __name__ == '__main__':
     unittest.main()
