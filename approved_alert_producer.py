@@ -132,7 +132,8 @@ def _approved_intent(intent, state, current, *, now_ms, fence_ms):
             partial_take_price=displayed_price(p['partial_take_price']),
             partial_fraction='0.75', hold_until=contract.iso_ms(p['hold_until_ms']),
             stop_policy='KEEP_ORIGINAL')
-    return contract.validate(value)
+    value = contract.validate(value)
+    return value if value['kind']=='CANCEL' or contract.new_entry_allowed(value) else None
 
 
 def isolated_records(state, *, now_ms, fence_ms):
@@ -269,4 +270,5 @@ def _formula_intent(intent, state, current, *, now_ms, fence_ms):
         source_sequence=as_of*10+contract.RANK[kind], source_as_of=contract.iso_ms(as_of),
         source_state='CANCELED' if reason else 'APPROVED', valid_until=None, cancel_reason=reason)
     value['occurrence_id'] = contract.occurrence_id(value)
-    return contract.validate(value)
+    value = contract.validate(value)
+    return value if value['kind']=='CANCEL' or contract.new_entry_allowed(value) else None

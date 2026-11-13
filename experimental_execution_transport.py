@@ -248,6 +248,8 @@ class Sender:
             self.pending[identity]['kind'] != 'CANCEL', self.last_attempt.get(identity, -1), identity))
         for identity in ordered:
             value = self.pending[identity]
+            if value['kind'] != 'CANCEL' and not contract.new_entry_allowed(value):
+                continue  # Retain history; never forward a withdrawn entry.
             if report['attempted'] >= MAX_PER_TICK or monotonic()-started >= MAX_TICK_SECONDS:
                 break
             if value['kind'] != 'CANCEL' and (not source_ok or
