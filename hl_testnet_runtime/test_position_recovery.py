@@ -47,7 +47,9 @@ class RecoveryContract:
             round_number=row['round'] if round_number is None else round_number,
             choice=choice,actor=actor,allowed_users={'7'},now=self.venue.now()))
 
-    def test_new_same_market_signal_has_one_refusal_notice_no_choices(self):
+    # Historical approval policy fixture; current roster has separate tests.
+    @patch('approved_alert_contract.new_entry_allowed',return_value=True)
+    def test_new_same_market_signal_has_one_refusal_notice_no_choices(self,_historical_policy):
         from .test_approved_alert_lifecycle import alert
         self.start(alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='first'))
         peer=alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='peer')
@@ -88,7 +90,10 @@ class RecoveryContract:
     def test_partial_fill_change_uses_latest_quantity(self):
         from decimal import Decimal
         from .test_approved_alert_lifecycle import alert
-        msg,_=self.start(alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='partial-recovery'))
+        # This historical GTC trade predates the entry-roster withdrawal.
+        import approved_alert_contract as contract
+        with patch.object(contract,'new_entry_allowed',return_value=True):
+            msg,_=self.start(alert(symbol='SOL',side='SHORT',approved_ms=support.T,cycle='partial-recovery'))
         self.cid=msg['occurrence_id']
         oid=self.venue.oid('ENTRY');o=self.venue.orders[oid]['view']
         half=(Decimal(o['wire_order']['s'])/2).quantize(Decimal('.01'),rounding='ROUND_DOWN')

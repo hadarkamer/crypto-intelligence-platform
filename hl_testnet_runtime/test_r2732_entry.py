@@ -99,11 +99,14 @@ class R2732EntryTests(unittest.TestCase):
         values=fixture();values[-1]['occurrences']=[owned_row(family='maxpain',symbol='DOGE')]
         self.assertIsNotNone(admit(values))
 
-    def test_unknown_attempt_any_formula_blocks_new_work(self):
+    def test_unknown_attempt_same_market_blocks_but_other_market_is_independent(self):
         for phase in ('PREPARED','OUTCOME_UNKNOWN','ACK_UNVERIFIED'):
             values=fixture(); values[-1]['occurrences']=[owned_row(phase=phase,symbol='DOGE',family='other')]
-            with self.subTest(phase=phase),self.assertRaisesRegex(entry.EntryError,'PRIOR_ATTEMPT'):
-                admit(values)
+            with self.subTest(phase=phase):
+                self.assertIsNotNone(admit(values))
+                values[-1]['occurrences'][0]['symbol']='XRP'
+                with self.assertRaisesRegex(entry.EntryError,'PRIOR_ATTEMPT'):
+                    admit(values)
 
     def test_new_reference_cannot_erase_prior_unknown_attempt(self):
         s,msg,m,src,own=fixture();p=admit((s,msg,m,src,own))

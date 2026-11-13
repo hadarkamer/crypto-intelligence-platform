@@ -17,12 +17,12 @@ class RecoveryConnectionTests(unittest.TestCase):
     ingest=connection.FullConnectionTests.ingest
     seed=connection.FullConnectionTests.seed
 
-    def test_incomplete_hype_history_keeps_actual_exposure_but_allows_sol(self):
+    def test_incomplete_hype_history_keeps_actual_exposure_but_allows_xrp(self):
         self.oracle.t=ARM+10000;self.build(ARM-120000)
         self.oracle.instant_fraction=Decimal('.75')
         from .test_approved_alert_lifecycle import alert
-        sol=alert(symbol='SOL',side='SHORT',approved_ms=ARM,cycle='independent-sol')
-        self.oracle.mark[core._lane(self.release['routes']['short_account'],'SOL')]=sol['entry']
+        sol=r2732_message(entry=2.3,decision_ms=ARM-60000)
+        self.oracle.mark[core._lane(self.release['routes']['short_account'],'XRP')]=sol['entry']
         hype=hype_row71205_message(entry=100,decision_ms=ARM-60000)
         self.seed(hype);self.assertEqual(self.service.tick().get('operation'),'ENTRY')
         oid=self.oracle.oid('ENTRY');order=self.oracle.orders[oid]['view']
@@ -34,9 +34,9 @@ class RecoveryConnectionTests(unittest.TestCase):
         self.assertTrue(any(r['phase']=='OUTCOME_UNKNOWN' for r in value['requests'].values()))
         observed=value['external_activity']['accounts'][account]['positions']['HYPE']
         self.assertNotEqual(Decimal(observed),0)
-        self.seed(sol);self.oracle.mark[core._lane(account,'SOL')]=sol['entry'];result=self.service.tick()
+        self.seed(sol);self.oracle.mark[core._lane(account,'XRP')]=sol['entry'];result=self.service.tick()
         self.assertEqual(result.get('operation'),'ENTRY',result)
-        self.assertEqual(self.oracle.requests[-1]['proposal']['symbol'],'SOL')
+        self.assertEqual(self.oracle.requests[-1]['proposal']['symbol'],'XRP')
         self.assertEqual(self.store.load()['external_activity']['accounts'][account]['positions']['HYPE'],observed)
         self.assertEqual(len([r for r in self.http if r['action']['type']=='order']),2)
 
@@ -66,7 +66,7 @@ class RecoveryConnectionTests(unittest.TestCase):
 
     def test_shared_inventory_error_still_blocks_new_entry(self):
         self.oracle.t=ARM+10000;self.build(ARM-120000)
-        msg=sol_g65_message(reference=100,decision_ms=ARM-60000);self.seed(msg)
+        msg=r2732_message(entry=2.3,decision_ms=ARM-60000);self.seed(msg)
         original=self.raw.read
         def read(kind,*args,**kwargs):
             if kind=='clearinghouseState':raise ValueError('COMPLETE_RAW_ACCOUNT_INVENTORY_REQUIRED')

@@ -204,7 +204,8 @@ def _entry_admission(state, cid, metadata, market, source_market, ownership, *, 
         raise EntryError('R2732_OCCURRENCE_ALREADY_KNOWN_IN_DEMO')
     for row in owned.values():
         if row['phase'] not in FINAL:
-            if row['phase'] in ('PREPARED', 'OUTCOME_UNKNOWN', 'ACK_UNVERIFIED'):
+            if (row['family']=='r2732' or row['symbol']=='XRP') and row['phase'] in (
+                    'PREPARED', 'OUTCOME_UNKNOWN', 'ACK_UNVERIFIED'):
                 raise EntryError('R2732_PRIOR_ATTEMPT_UNRESOLVED')
             if row['family'] == 'r2732':
                 raise EntryError('R2732_DEMO_FORMULA_CAP_ONE')

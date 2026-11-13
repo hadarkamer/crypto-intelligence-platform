@@ -402,8 +402,9 @@ class LiveEvidenceProvider:
         if (previous['account']!=account or previous['symbol']!=symbol
                 or previous['at_ms']>self.now()):
             raise ProviderError('COLLECTOR_CHECKPOINT_SCOPE_CHANGED')
-        if meter is not None and self.now()-previous['at_ms'] > recovery.WINDOW_MS:
-            raise ProviderError('RECOVERY_HISTORY_GAP_REQUIRES_REVIEW')
+        # A round deadline limits work, not the age of the persisted checkpoint.
+        # The existing collector proves the full gap (including retention and
+        # pagination); InquiryReader and the shared budget still bound each read.
         if bindings:
             receipt=(self.safety._receipt(state)
                 if callable(getattr(type(self.safety),'_receipt',None)) else None)
@@ -624,6 +625,9 @@ class LiveEvidenceProvider:
         for cid,source in state['sources'].items():
             msg=source['source'];role='long_account' if msg['side']=='LONG' else 'short_account'
             account=state['routes'][role]
+            if not contract.new_entry_allowed(msg):
+                result['entry_blocked'][cid]='FORMULA_NEW_ENTRIES_DISABLED'
+                continue
             if (not entries_enabled or cid in retired or cid in deferred
                     or cid in state['trades'] and not entry_retry_ready(state,cid,now)
                     or not runtime._source_active(source,now)

@@ -158,6 +158,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def _admit(self, state, cid, context, now, *, risk_snapshot=None):
         msg = state['sources'][cid]['source']
+        if not contract.new_entry_allowed(msg):
+            _entry_decision(state, cid, context, now, 'FORMULA_NEW_ENTRIES_DISABLED', scope='source')
+            return None
         # Provider replays the pure admission with an unconstructed planner;
         # the actual worker and final sender independently enforce release.
         release = self._release(state, now) if callable(getattr(self,'release_loader',None)) else {}

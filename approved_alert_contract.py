@@ -36,6 +36,18 @@ DOGE_PARTIAL_POLICY_FIELDS = POLICY_FIELDS | frozenset((
 FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     'hype_row71205': ('HYPE_ROW71205_SHORT', 'HYPE'),
     'sol_g65': ('SOL_G65_K49_PROFIT_LOCK', 'SOL')}
+# Entry roster approved 2026-11-13. Historical contracts remain readable.
+# Four additional approved formulas require their identified implementation first.
+NEW_ENTRY_IDENTITIES = frozenset((
+    ('r2732', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
+    ('hype_row71205', 'HYPE_ROW71205_SHORT', 'HYPE'),
+))
+
+
+def new_entry_allowed(message):
+    return (message.get('family'), message.get('rule_id'), message.get('symbol')) in NEW_ENTRY_IDENTITIES
+
+
 MAX_BYTES = legacy.MAX_BYTES
 ContractError = legacy.ContractError
 moment_ms = legacy.moment_ms

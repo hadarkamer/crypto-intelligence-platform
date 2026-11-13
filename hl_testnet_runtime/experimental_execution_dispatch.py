@@ -46,6 +46,8 @@ def _source(source, current, now, *, entry):
             or current['plan_digest'] != contract.plan_digest(source)):
         raise BoundaryError('FROZEN_PROSPECTIVE_SOURCE_CHANGED')
     if entry:
+        if not contract.new_entry_allowed(source):
+            raise BoundaryError('FORMULA_NEW_ENTRIES_DISABLED')
         approved = contract.is_approved(latest)
         if (current['entry_permission'] != 'WAITING' or current.get('cancellation') is not None
                 or latest['kind'] == 'CANCEL'

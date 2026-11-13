@@ -195,9 +195,6 @@ def advance(state, context, now):
         if bad:
             row['retryable'] = False
             _finish(state, row, 'WAITING', now, 'ACTION_REQUIRES_REVIEW')
-        elif context.get('blocked_lanes', {}).get(_lane(trade['account'], trade['symbol'])) == 'RECOVERY_HISTORY_GAP_REQUIRES_REVIEW':
-            row['retryable'] = False
-            _finish(state, row, 'WAITING', now, 'RECOVERY_HISTORY_GAP_REQUIRES_REVIEW')
         elif now >= row['deadline_ms']:
             _finish(state, row, 'WAITING', now, 'ROUND_DEADLINE')
 
