@@ -15,7 +15,7 @@ PINNED={
     'market_vision/coinglass_heatmap_capture.py':'d1d75f2c99ea3c1fd72c7e1f9cfb1ec29a0890ab',
     'market_vision/openai_heatmap_scanner.py':'9dd18b993d6d87cf326848720fa08d1d6a554087',
 }
-BROWSER_REQUIREMENTS={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0'}
+BROWSER_REQUIREMENTS={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0','pycryptodome':'3.21.0'}
 
 
 def prepare_browser():
@@ -29,7 +29,7 @@ def prepare_browser():
     subprocess.run([sys.executable,'-m','playwright','install','chromium'],check=True,timeout=240)
     for package,expected in BROWSER_REQUIREMENTS.items():
         if version(package)!=expected:raise RuntimeError('Standalone dependency mismatch')
-    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0',flush=True)
+    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0 pycryptodome=3.21.0',flush=True)
 
 
 def validator_ast(text):
@@ -59,7 +59,8 @@ def prepare():
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
                  'capture_readiness.py','capture_failure_observer.py','capture_failure_diagnostics.py',
-                 'store_diagnostics.py','heatmap_hover.py'):
+                 'store_diagnostics.py','heatmap_hover.py',
+                 'session_state.py','session_runtime.py','session_capture.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -119,6 +120,12 @@ def prepare():
         'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
         'test_failure_diagnostic_integration','test_source_reload','-v'],
         cwd=HERE,check=True,timeout=240)
+    from install_capture_readiness import install_session_capture
+    from install_heatmap_models import install_session_bridge
+    install_session_capture(RUNTIME)
+    install_session_bridge(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_session_capture','test_session_state',
+        'test_session_runtime','-v'],cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
         'capture_flow':'one requested model/horizon; existing session, PNG, one DOM hover column and same-image crop',
@@ -137,6 +144,7 @@ def prepare():
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'existing source checks; one page reload after a source-readiness failure, then original validation',
         'source_reload':'one attempt per model/timeframe; no login, request-limit, numeric or AI retry',
+        'managed_session':'optional parent-only encrypted CAS store; existing worker lock; scoped cookie handoff in memory; no keepalive',
         'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,

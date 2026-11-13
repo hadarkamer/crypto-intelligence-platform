@@ -23,6 +23,10 @@ SAFE_REASONS={'loading-indicator','blur','no-canvas','wrong-label','invalid-sour
 
 
 def source_session_configured():
+    if os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true':
+        # Configuration presence is not a claim that stored authentication is
+        # currently accepted. The worker checks the managed row before a scan.
+        return bool(os.getenv('COINGLASS_SESSION_KEY', '').strip())
     return any(bool(os.getenv(name,'').strip()) for name in SESSION_KEYS)
 
 
@@ -118,6 +122,7 @@ async def diagnostic_image(request):
 
 async def run_worker(store):
     from collection_bridge import run_existing_scanner,BridgeError
+    from session_runtime import ManagedSession, SessionError
     while True:
         held=None
         try:
@@ -125,7 +130,14 @@ async def run_worker(store):
             if claimed:
                 held,row=claimed;jid=str(row['id'])
                 try:
-                    result,image=await run_existing_scanner(row['timeframe'],jid,row.get('heatmap_model',1))
+                    try:
+                        session=ManagedSession.from_environment(held,jid)
+                    except SessionError as exc:
+                        raise BridgeError(exc.code,'Session state configuration failed',503) from None
+                    if session is None:
+                        result,image=await run_existing_scanner(row['timeframe'],jid,row.get('heatmap_model',1))
+                    else:
+                        result,image=await run_existing_scanner(row['timeframe'],jid,row.get('heatmap_model',1),session=session)
                     await asyncio.to_thread(store.finish,jid,result,image)
                 except asyncio.CancelledError:
                     await asyncio.to_thread(store.finish,jid,None,None,'interrupted');raise

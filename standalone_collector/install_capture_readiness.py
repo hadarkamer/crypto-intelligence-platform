@@ -127,3 +127,67 @@ def install_reload(runtime: Path):
     text = expand_source_reload(path.read_text())
     compile(text, str(path), "exec")
     path.write_text(text, encoding="utf-8")
+
+
+def expand_session_capture(source):
+    """Attach managed-session lifecycle to the final generated reader only.
+
+    Source selection, guards, retry policy, screenshot and Hover remain intact.
+    The before-close hook runs in the existing cleanup, including Hover failure;
+    an outer idempotent fallback closes the pipe if setup failed before that try.
+    """
+    tree = ast.parse(source)
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'capture_heatmaps')
+    index = next((i + 1 for i, n in enumerate(tree.body)
+                  if isinstance(n, ast.ImportFrom) and n.module == '__future__'), 0)
+    tree.body.insert(index, ast.ImportFrom(module='session_capture',
+        names=[ast.alias(name='CaptureSession')], level=0))
+    changed = {'state': 0, 'cookies': 0, 'page': 0, 'error': 0, 'close': 0}
+
+    class SessionHooks(ast.NodeTransformer):
+        def visit_Assign(self, node):
+            if isinstance(node.value, ast.Call):
+                call = ast.unparse(node.value.func)
+                if call == '_load_authenticated_storage_state':
+                    changed['state'] += 1
+                    node.value = ast.parse('_capture_session.state if _capture_session else _load_authenticated_storage_state()', mode='eval').body
+                elif call == '_load_cookie_header':
+                    changed['cookies'] += 1
+                    node.value = ast.parse('[] if _capture_session else _load_cookie_header()', mode='eval').body
+                elif call == 'context.new_page':
+                    changed['page'] += 1
+                    return [node, *ast.parse('if _capture_session:\n    _capture_session.attach(context, page)').body]
+            return node
+
+        def visit_ExceptHandler(self, node):
+            self.generic_visit(node)
+            if node.name == 'exc' and any(isinstance(n, ast.Call)
+                and ast.unparse(n.func) == 'observe_capture_failure' for n in ast.walk(node)):
+                changed['error'] += 1
+                node.body[:0] = ast.parse('if _capture_session:\n    _capture_session.note_source_error(exc)').body
+            return node
+
+        def visit_With(self, node):
+            self.generic_visit(node)
+            if len(node.items) == 1 and ast.unparse(node.items[0].context_expr) == "capture_operation('context_close')":
+                changed['close'] += 1
+                return ast.Try(body=ast.parse('if _capture_session:\n    _capture_session.finish(context)').body,
+                               handlers=[], orelse=[], finalbody=[node])
+            return node
+
+    function.body = [SessionHooks().visit(n) for n in function.body]
+    if changed != {'state': 1, 'cookies': 1, 'page': 1, 'error': 1, 'close': 1}:
+        raise RuntimeError('Session lifecycle insertion points changed')
+    prefix = ast.parse('_capture_session = CaptureSession.from_environment()\ncontext = None').body
+    handler = ast.ExceptHandler(type=ast.Name(id='BaseException', ctx=ast.Load()), name='_session_error',
+        body=ast.parse('if _capture_session:\n    _capture_session.note_source_error(_session_error)\nraise').body)
+    final = ast.parse('if _capture_session:\n    _capture_session.finish(context)').body
+    function.body = [*prefix, ast.Try(body=function.body, handlers=[handler], orelse=[], finalbody=final)]
+    return ast.unparse(ast.fix_missing_locations(tree)) + '\n'
+
+
+def install_session_capture(runtime: Path):
+    path = runtime / 'market_vision/coinglass_heatmap_capture.py'
+    text = expand_session_capture(path.read_text())
+    compile(text, str(path), 'exec')
+    path.write_text(text, encoding='utf-8')

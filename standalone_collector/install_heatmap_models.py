@@ -161,3 +161,47 @@ def install(runtime:Path):
     text=once(text,'LIMIT 1""", (timeframe,)).fetchone()',
         'LIMIT 1""", (getattr(store,"heatmap_model",1),timeframe)).fetchone()')
     save(path,text)
+
+
+def expand_session_bridge(source):
+    """Use the parent-owned managed Session around the existing child process."""
+    tree = ast.parse(source)
+    function = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'run_existing_scanner')
+    function.args.args.append(ast.arg(arg='session'))
+    function.args.defaults.append(ast.Constant(value=None))
+    changed = {'spawn': 0}
+
+    class Spawn(ast.NodeTransformer):
+        def visit_Assign(self, node):
+            if (isinstance(node.value, ast.Await) and isinstance(node.value.value, ast.Call)
+                    and ast.unparse(node.value.value.func) == 'asyncio.create_subprocess_exec'):
+                changed['spawn'] += 1
+                call = node.value.value
+                for keyword in call.keywords:
+                    if keyword.arg == 'env': keyword.value = ast.Name(id='_session_child_env', ctx=ast.Load())
+                call.keywords.append(ast.keyword(arg='pass_fds',
+                    value=ast.parse('_session_transport.pass_fds if _session_transport else ()', mode='eval').body))
+                before = ast.parse("_session_child_env = child_environment(heatmap_model)\n"
+                    "_session_child_env.pop('COINGLASS_SESSION_KEY', None)\n"
+                    "if session is not None:\n"
+                    "    _session_transport = await session.open_transport(_session_child_env)\n"
+                    "    _session_child_env = _session_transport.env\n").body
+                after = ast.parse('if _session_transport is not None:\n    _session_transport.spawned()\n_session_child_env.clear()').body
+                return [*before, node, *after]
+            return node
+
+    function.body = [Spawn().visit(n) for n in function.body]
+    if changed != {'spawn': 1}: raise RuntimeError('Session child insertion point changed')
+    prefix = ast.parse('from session_runtime import SessionError\n_session_transport = None\n_session_begun = False').body
+    begin = ast.parse('if session is not None:\n    await session.begin()\n    _session_begun = True').body
+    final = ast.parse('if session is not None and _session_begun:\n    await session.finish(_session_transport)').body
+    protected = ast.Try(body=[*begin, *function.body], handlers=[], orelse=[], finalbody=final)
+    handler = ast.ExceptHandler(type=ast.Name(id='SessionError', ctx=ast.Load()), name='_session_error',
+        body=ast.parse("raise BridgeError(_session_error.code, 'Session state operation failed', 503) from None").body)
+    function.body = [*prefix, ast.Try(body=[protected], handlers=[handler], orelse=[], finalbody=[])]
+    return ast.unparse(ast.fix_missing_locations(tree)) + '\n'
+
+
+def install_session_bridge(runtime: Path):
+    path = runtime / 'collection_bridge.py'
+    save(path, expand_session_bridge(path.read_text()))
