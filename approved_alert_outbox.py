@@ -28,6 +28,11 @@ def synchronize(conn, source_key, state, now_ms):
     # The durable row survives removal of source history/intents. Missing or
     # ended source position withdraws the remainder, never closes a venue fill.
     for row in rows:
+        # A validated SFF intake acknowledgement completes its one-shot
+        # source handoff. NULL + acknowledged sequence + canceled=false is an
+        # identity tombstone, not a source cancellation or a venue closure.
+        if row['payload_json'] is None:
+            continue
         try:
             value = contract.validate(json.loads(row['payload_json']))
             identity = row['occurrence_id']
@@ -89,6 +94,7 @@ def synchronize(conn, source_key, state, now_ms):
             'payload_json=EXCLUDED.payload_json,source_sequence=EXCLUDED.source_sequence,'
             'canceled=EXCLUDED.canceled '
             'WHERE NOT approved_alert_execution_outbox_mainnet.canceled '
+            'AND approved_alert_execution_outbox_mainnet.payload_json IS NOT NULL '
             'AND EXCLUDED.source_sequence>approved_alert_execution_outbox_mainnet.source_sequence '
             'RETURNING occurrence_id',
             (source_key, identity, ids[identity], raw, value['source_sequence'], value['kind'] == 'CANCEL')).fetchone()
@@ -139,12 +145,14 @@ def read(conn, source_keys, *, isolate=False):
 
 def acknowledge(conn, source_keys, value):
     """Exact revision acknowledgement cannot erase a newer cancellation."""
+    contract.validate(value)
+    complete_handoff = value['kind'] == 'ALERT' and value['family'] == 'sol_sff1361'
     conn.execute(
         'UPDATE approved_alert_execution_outbox_mainnet SET acknowledged_sequence=%s,'
-        'payload_json=CASE WHEN canceled THEN NULL ELSE payload_json END '
+        'payload_json=CASE WHEN canceled OR %s THEN NULL ELSE payload_json END '
         'WHERE source_key=ANY(%s) AND occurrence_id=%s AND source_sequence=%s '
         'AND acknowledged_sequence<source_sequence',
-        (value['source_sequence'], list(source_keys), value['occurrence_id'], value['source_sequence']))
+        (value['source_sequence'], complete_handoff, list(source_keys), value['occurrence_id'], value['source_sequence']))
 
 
 @contextmanager

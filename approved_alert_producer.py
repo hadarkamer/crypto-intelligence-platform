@@ -15,6 +15,7 @@ FORMULA_STORES = {
 
 MODE = 'experimental_approved_alert_bridge_v2'
 SOURCE_VERSION = 'sol-proximity-notification-store-v1'
+SELECTED_VERSION = 'selected-six-approved-source-v1'
 
 
 def displayed_price(value):
@@ -49,7 +50,7 @@ def _previous_source_intent(state, payload, approved_ms, now_ms):
 
 
 def approved_messages(state, *, now_ms, fence_ms):
-    if state.get('version') not in (SOURCE_VERSION, *FORMULA_STORES):
+    if state.get('version') not in (SOURCE_VERSION, SELECTED_VERSION, *FORMULA_STORES):
         raise contract.ContractError('MAXPAIN_SOURCE_VERSION')
     intents = state.get('intents')
     if not isinstance(intents, list) or len(intents) > 1024:
@@ -65,6 +66,21 @@ def approved_messages(state, *, now_ms, fence_ms):
 
 
 def _approved_intent(intent, state, current, *, now_ms, fence_ms):
+    if state.get('version') == SELECTED_VERSION:
+        import alert_delivery_policy
+        value = contract.validate(intent['payload'])
+        if (intent['position_id'] != intent['intent_id']
+                or intent['decision']['event_id'] != intent['intent_id']
+                or value['proof']['source_config_sha256'] != state['config_sha256']):
+            raise contract.ContractError('APPROVED_SOURCE_IDENTITY')
+        approved = contract.moment_ms(value['approved_at'])
+        if approved < fence_ms or contract.moment_ms(value['source_as_of']) > now_ms:
+            return None
+        if value['kind'] == 'ALERT' and (now_ms >= contract.moment_ms(value['expires_at'])
+                or not contract.new_entry_allowed(value)
+                or not alert_delivery_policy.selected_rule_enabled(value['rule_id'])):
+            return None
+        return value
     if state.get('version') in FORMULA_STORES:
         return _formula_intent(intent, state, current, now_ms=now_ms, fence_ms=fence_ms)
     p = intent.get('payload', {})
@@ -143,7 +159,7 @@ def isolated_records(state, *, now_ms, fence_ms):
     acknowledged nor assigned new identities/deadlines. Retained outbox rows
     independently preserve cancellation through their original signed plan.
     """
-    if state.get('version') not in (SOURCE_VERSION, *FORMULA_STORES):
+    if state.get('version') not in (SOURCE_VERSION, SELECTED_VERSION, *FORMULA_STORES):
         raise contract.ContractError('MAXPAIN_SOURCE_VERSION')
     intents = state.get('intents')
     if not isinstance(intents, list) or len(intents) > 1024:
@@ -183,6 +199,8 @@ def source_positions(state):
 def source_open(state, position):
     if position is None:
         return False
+    if state['version'] == SELECTED_VERSION:
+        return position.get('status') == 'APPROVED'
     if state['version'] == SOURCE_VERSION:
         return (position.get('status') == 'OPEN' and not (
             position.get('rule_id') == contract.DOGE_PARTIAL_RULE
@@ -193,6 +211,8 @@ def source_open(state, position):
 
 def source_end_ms(state, position, value):
     approved = contract.moment_ms(value['approved_at'])
+    if state['version'] == SELECTED_VERSION:
+        return max(approved, (position or {}).get('ended_ms', approved))
     if state['version'] == SOURCE_VERSION:
         return max(approved, ((position or {}).get('terminal_ms') or
             (position or {}).get('unknown_ms') or

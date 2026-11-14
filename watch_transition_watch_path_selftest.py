@@ -92,7 +92,8 @@ class CardPathTests(unittest.IsolatedAsyncioTestCase):
 
 class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def one_pass(self, *, general=True, scan=False, chat=99,
-                       magnet=False, coordinator_alive=True, after_restore=None):
+                       magnet=False, coordinator_alive=True, after_restore=None,
+                       selected_error=None):
         bot = object()
         drain = AsyncMock(return_value=0)
         runtime = {"chat_id": chat, "scan_in_progress": scan}
@@ -118,12 +119,17 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "watch_transition_delivery": SimpleNamespace(drain=drain),
             "dual_cvd65_delivery": SimpleNamespace(drain=AsyncMock(return_value=0)),
             "manual_formula_alert_delivery": SimpleNamespace(run_once=AsyncMock(return_value=0)),
+            "selected_six_formula_delivery": SimpleNamespace(
+                run_once=AsyncMock(return_value=0, side_effect=selected_error)),
             "maxpain_cvd_short_alert": SimpleNamespace(FORMULA_ID="FORMULA_MP65_CVD_SHORT"),
         })
         load_main({"_watch_consumers_active", "_watch_supervisor_loop"}, scope)
         with self.assertRaises(asyncio.CancelledError):
             await scope["_watch_supervisor_loop"](SimpleNamespace(bot=bot))
-        sleep.assert_awaited_once_with(15)
+        if isinstance(selected_error, asyncio.CancelledError):
+            sleep.assert_not_awaited()
+        else:
+            sleep.assert_awaited_once_with(15)
         self.assertNotEqual(runtime.get("last_cycle_status"), "supervisor_retry")
         return scope, drain, ensure, bot
 
@@ -139,27 +145,36 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
         manual.assert_awaited_once()
         self.assertEqual(manual.await_args.args, (bot, 99))
         manual_may_deliver = manual.await_args.kwargs["may_deliver"]
+        selected = scope["selected_six_formula_delivery"].run_once
+        selected.assert_awaited_once()
+        self.assertEqual(selected.await_args.args, (bot, 99))
+        selected_may_deliver = selected.await_args.kwargs["may_deliver"]
         self.assertTrue(may_deliver())
         self.assertTrue(manual_may_deliver())
+        self.assertTrue(selected_may_deliver())
         # Recovery receives a live eligibility check, including changes that
         # happen after this supervisor pass has entered the delivery helper.
         scope["WATCH_RUNTIME"]["scan_in_progress"] = True
         self.assertFalse(may_deliver())
         self.assertFalse(manual_may_deliver())
+        self.assertFalse(selected_may_deliver())
         scope["WATCH_RUNTIME"]["scan_in_progress"] = False
         scope["WATCH_GENERAL_ENABLED"] = False
         self.assertFalse(may_deliver())
         self.assertFalse(manual_may_deliver())
+        self.assertFalse(selected_may_deliver())
         scope["WATCH_GENERAL_ENABLED"] = True
         scope["WATCH_RUNTIME"]["chat_id"] = 100
         self.assertFalse(may_deliver())
         self.assertFalse(manual_may_deliver())
+        self.assertFalse(selected_may_deliver())
 
     async def test_recovery_also_runs_after_coordinator_restore(self):
         scope, drain, ensure, _ = await self.one_pass(coordinator_alive=False)
         ensure.assert_awaited_once()
         self.assertEqual(drain.await_count, 2)
         scope["manual_formula_alert_delivery"].run_once.assert_awaited_once()
+        scope["selected_six_formula_delivery"].run_once.assert_awaited_once()
         self.assertEqual(scope["WATCH_RUNTIME"]["supervisor_restarts"], 1)
 
     async def test_busy_disabled_and_magnet_only_never_recover_general_messages(self):
@@ -173,6 +188,7 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 scope, drain, _, _ = await self.one_pass(**options)
                 drain.assert_not_awaited()
                 scope["manual_formula_alert_delivery"].run_once.assert_not_awaited()
+                scope["selected_six_formula_delivery"].run_once.assert_not_awaited()
 
     async def test_recipient_change_during_restore_blocks_previous_chat_recovery(self):
         scope, drain, ensure, _ = await self.one_pass(
@@ -182,6 +198,12 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ensure.assert_awaited_once()
         drain.assert_not_awaited()
         scope["manual_formula_alert_delivery"].run_once.assert_not_awaited()
+        scope["selected_six_formula_delivery"].run_once.assert_not_awaited()
+
+    async def test_shutdown_during_selected_delivery_propagates_without_later_drains(self):
+        scope, drain, _, _ = await self.one_pass(selected_error=asyncio.CancelledError())
+        scope["selected_six_formula_delivery"].run_once.assert_awaited_once()
+        drain.assert_not_awaited()
 
 
 if __name__ == "__main__":

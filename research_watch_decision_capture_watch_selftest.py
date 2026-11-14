@@ -186,6 +186,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             'Mapping': Mapping, 'hashlib': hashlib, 'replace': replace,
         }, filename='research_event_runtime.py')
         rows = [{'symbol': 'BTC'}, {'symbol': 'ADA'}]
+        raw_snapshot = {'BTC': {'fixture_source_timestamp': '2026-09-15T12:02:16Z'}}
         def failed(cycle_id, reason):
             return {'status': 'FAILED', 'cycle_id': cycle_id, 'reason': reason}
         def decision_bundle(**kwargs):
@@ -244,6 +245,18 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         async def send(**kwargs):
             order.append('send')
             return SimpleNamespace(message_id=1)
+        async def selected_capture(chat_id, scores, decisions, snapshot):
+            order.append('capture_selected')
+            self.assertEqual(chat_id, 1)
+            self.assertIs(scores, base_bundle)
+            self.assertIs(snapshot, raw_snapshot)
+            self.assertTrue(archives)
+            if precompute_error or capture_error:
+                self.assertIsNone(decisions)
+            else:
+                self.assertIs(decisions, archives[0]['operational_decisions'])
+            self.assertNotIn('send', order)
+            return {'added': 0, 'errors': []}
         def lifecycle(candidates, **kwargs):
             order.append('combined_lifecycle')
             if captures:
@@ -259,7 +272,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             if consumed_error:
                 raise ValueError('fixture consumed-input capture failure')
             return {'status': 'STUBBED_CAPTURE', 'collector_available': collector is not None}
-        scope['market_confidence_engine'].capture_snapshot = Mock(return_value={})
+        scope['market_confidence_engine'].capture_snapshot = Mock(return_value=raw_snapshot)
         scope['research_event_runtime'] = SimpleNamespace(
             set_watch_context=Mock(side_effect=context_scope['set_watch_context']),
             reset_watch_context=Mock(side_effect=context_scope['reset_watch_context']),
@@ -299,6 +312,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             'watch_transition_delivery': SimpleNamespace(record_watch=AsyncMock(), drain=AsyncMock(return_value=0),
                 cycle_result=Mock(return_value={'status': 'COMPLETE'})),
             'manual_formula_alert_delivery': SimpleNamespace(run_watch=AsyncMock(side_effect=manual_delivery)),
+            'selected_six_formula_delivery': SimpleNamespace(capture_watch=AsyncMock(side_effect=selected_capture)),
             'research_ordered_experimental_worker': SimpleNamespace(WORKER=SimpleNamespace(drain_for_watch=AsyncMock())),
             'maxpain_cvd_short_alert': SimpleNamespace(FORMULA_ID='FORMULA_MP65_CVD_SHORT'),
             '_preview_watch_formula_sources': Mock(side_effect=preview_sources),
@@ -324,6 +338,31 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             result = await scope['run_watch_cycle'](bot, 1, top8_only=True, general_enabled=general)
         self.assertIsNone(context_scope['_WATCH_CONTEXT'].get())
         return scope, result, order, archives, captures, bot, base_bundle
+
+    async def test_selected_capture_uses_frozen_inputs_before_telegram_without_another_collection(self):
+        scope, result, order, archives, captures, bot, base = await self.run_cycle()
+        self.assertTrue(result['ok'], result)
+        capture = scope['selected_six_formula_delivery'].capture_watch
+        capture.assert_awaited_once()
+        self.assertIs(capture.await_args.args[1], base)
+        self.assertIs(capture.await_args.args[2], archives[0]['operational_decisions'])
+        self.assertIs(capture.await_args.args[3], scope['market_confidence_engine'].capture_snapshot.return_value)
+        self.assertLess(order.index('archive'), order.index('capture_selected'))
+        self.assertLess(order.index('capture_selected'), order.index('send'))
+        scope['market_confidence_engine'].capture_snapshot.assert_called_once()
+        scope['research_watch_score_capture'].build_bundle.assert_called_once()
+        scope['research_watch_decision_capture'].build_bundle.assert_called_once()
+
+    async def test_selected_capture_does_not_invent_failed_decisions_or_run_with_general_watch_off(self):
+        for options in ({'capture_error': True}, {'precompute_error': True}):
+            with self.subTest(**options):
+                scope, result, *_ = await self.run_cycle(**options)
+                capture = scope['selected_six_formula_delivery'].capture_watch
+                capture.assert_awaited_once()
+                self.assertIsNone(capture.await_args.args[2])
+        scope, result, *_ = await self.run_cycle(general=False)
+        self.assertTrue(result['ok'], result)
+        scope['selected_six_formula_delivery'].capture_watch.assert_not_awaited()
 
     async def test_formula_references_are_frozen_before_dual_and_manual_delivery(self):
         scope, result, order, archives, captures, bot, base = await self.run_cycle()

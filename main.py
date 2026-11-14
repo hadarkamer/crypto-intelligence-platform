@@ -36,6 +36,7 @@ import watch_transition_delivery
 import dual_cvd65_delivery
 import experimental_reference_price
 import manual_formula_alert_delivery
+import selected_six_formula_delivery
 import u21_experimental_worker
 import xrp_r2732_experimental_worker
 import hype_row71205_experimental_worker
@@ -4117,6 +4118,7 @@ async def run_watch_cycle(
                                 computed_at_utc=datetime.now(timezone.utc),
                                 top8_only=top8_only, general_enabled=general_enabled,
                             )
+                            live_result["watch_selected_decision_bundle"] = archive_context["metadata"]["operational_decisions"]
                         except Exception as exc:
                             archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.failure(
                                 watch_scan_id, "CAPTURE:" + research_watch_decision_capture.error_reason(exc),
@@ -4146,11 +4148,17 @@ async def run_watch_cycle(
         # The user's standalone rule consumes the same frozen all-coin scores,
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        selected_decision_bundle = live_result.pop("watch_selected_decision_bundle", None)
         research_alert_decision_watch.bind_score(dual_cvd_bundle)
         research_watch_runtime.stage(runtime_observation_handle, 'BEFORE_DELIVERY')
         # SOL consumes all frozen targets, before any presentation threshold.
         # This adds no DOM/derivatives collector and has an isolated outbox.
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
+            # Persist the frozen inputs before notification delivery. Price
+            # completion runs through the existing forwarder after queue drain.
+            await selected_six_formula_delivery.capture_watch(
+                chat_id, dual_cvd_bundle, selected_decision_bundle, derivatives_snapshot,
+            )
             await sol_proximity_experimental_worker.WORKER.observe(dual_cvd_bundle, chat_id)
             await asyncio.gather(*(
                 worker.observe(dual_cvd_bundle, chat_id)
@@ -5070,6 +5078,12 @@ async def _watch_supervisor_loop(bot_app) -> None:
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
+                    await selected_six_formula_delivery.run_once(
+                        bot_app.bot, int(chat_id),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
+                    )
                     if alert_delivery_policy.other_experimental_alerts_enabled():
                         await watch_transition_delivery.drain(
                             bot_app.bot, int(chat_id),
@@ -5435,6 +5449,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _persist_watch_subscriptions()
     await dual_cvd65_delivery.initialize(chat_id)
     await manual_formula_alert_delivery.initialize(chat_id)
+    await selected_six_formula_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -5486,6 +5501,7 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _persist_watch_subscriptions()
     await dual_cvd65_delivery.initialize(chat_id)
     await manual_formula_alert_delivery.initialize(chat_id)
+    await selected_six_formula_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -5923,6 +5939,7 @@ async def health(request):
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
+        "selected_six_formulas": selected_six_formula_delivery.status(),
         "u21_experimental": u21_experimental_worker.WORKER.status(),
         "xrp_r2732_experimental": xrp_r2732_experimental_worker.WORKER.status(),
         "hype_row71205_experimental": hype_row71205_experimental_worker.WORKER.status(),
@@ -7153,6 +7170,9 @@ async def main():
     schema_runtime = await _prepare_research_schema()
     research_schema_ready = bool(schema_runtime.get("ready"))
     await manual_formula_alert_delivery.initialize(
+        WATCH_RUNTIME.get("chat_id") if WATCH_GENERAL_ENABLED else None,
+    )
+    await selected_six_formula_delivery.initialize(
         WATCH_RUNTIME.get("chat_id") if WATCH_GENERAL_ENABLED else None,
     )
     await bot_app.start()

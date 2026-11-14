@@ -36,6 +36,8 @@ def approved_source_keys(scopes):
         if not isinstance(scope, str) or not contract.HEX.fullmatch(scope):
             raise contract.ContractError('SOURCE_SCOPE_HASH')
         subscription = 'general-watch:' + scope
+        from selected_six_formula_store import key_for as selected_key
+        keys.append(selected_key(subscription))
         from approved_alert_producer import FORMULA_STORES
         keys.extend(version + ':' + hashlib.sha256(subscription.encode()).hexdigest()
                     for version in FORMULA_STORES)

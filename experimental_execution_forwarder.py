@@ -1,4 +1,4 @@
-"""Default-off standalone source-to-Testnet-plan gateway worker.
+"""Explicitly configured source-to-manager gateway on its existing cadence.
 
 Launch only after approving the concrete source and receiver release:
 ``python -m experimental_execution_forwarder``. Configuration explicitly names
@@ -9,7 +9,9 @@ The source producer must independently enable prospective MaxPain evidence
 capture with EXPERIMENTAL_EXECUTION_BRIDGE_MODE. This worker cannot reconstruct
 missing evidence or turn historical notifications into new execution plans.
 All database reads and HTTPS delivery use the reviewed bridge/transport paths.
-No source state, alert, strategy or database schema is modified by this worker.
+Approved mode drains its queue first, then gives the four selected source
+formulas one bounded shared-price step. It never creates database schema or
+sends exchange orders; the existing receiver remains the sole executor.
 """
 from __future__ import annotations
 
@@ -113,6 +115,18 @@ class Forwarder:
             if report['status'] == 'DISABLED':
                 return
             if self.config and self.config.transport.mode == transport.APPROVED_MODE:
+                # Optional formula work follows the already-committed queue
+                # and releases the sender lock before any provider I/O. The
+                # adapter performs at most one shared 1,000-minute symbol read;
+                # no extra scheduler, parallel loop or catch-up burst exists.
+                try:
+                    import selected_six_formula_source
+                    source_report = selected_six_formula_source.tick(
+                        ['general-watch:' + scope for scope in self.config.scopes])
+                    if source_report.get('approved'):
+                        self.wake.set()
+                except Exception:
+                    pass
                 # Clear before reading, so a commit during a slow sender cycle
                 # remains set and prompts another bounded, non-overlapping read.
                 self.wake.wait(DELAY_SECONDS)
