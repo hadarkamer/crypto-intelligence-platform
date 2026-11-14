@@ -1560,11 +1560,14 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
     print(f"[forward-evaluation] startup={results['forward-evaluation']}", flush=True)
     try:
         started = await research_liquidity_forward_worker.start_worker(
-            database_url=DATABASE_URL, enabled=bool(schema_ready),
+            # Retired independent paper study: no approved formula consumes
+            # its projection. Keep its historical tables and status readable.
+            database_url=DATABASE_URL, enabled=False,
             runtime_commit=os.getenv("RENDER_GIT_COMMIT", ""),
         )
         results["liquidity-forward"] = {
             "started": bool(started), "status": research_liquidity_forward_worker.status(),
+            "reason": "independent_research_autostart_retired_20261114",
         }
     except Exception as exc:
         results["liquidity-forward"] = {"started": False, "error_type": type(exc).__name__}
@@ -4154,14 +4157,18 @@ async def run_watch_cycle(
                 for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values()
             ))
             await doge_partial_experimental_worker.WORKER.observe(dual_cvd_bundle, chat_id)
-        # Freeze source-clock references before any experimental intent. This is
-        # a display-only contract; native outcome entry prices remain unchanged.
-        try:
-            experimental_references.update(
-                await experimental_reference_price.prepare_reference_prices(dual_cvd_bundle)
-            )
-        except Exception as exc:
-            print(f"[experimental-reference] unavailable: {type(exc).__name__}", flush=True)
+        # These references serve only legacy experimental message displays.
+        # In particular their HYPE Binance MARK request is not ROW71205's
+        # Hyperliquid input. Do not fetch them with no authorized consumer.
+        if (alert_delivery_policy.other_experimental_alerts_enabled()
+                or any(alert_delivery_policy.manual_rule_enabled(rule)
+                       for rule in alert_delivery_policy.SELECTED_MANUAL_RULES)):
+            try:
+                experimental_references.update(
+                    await experimental_reference_price.prepare_reference_prices(dual_cvd_bundle)
+                )
+            except Exception as exc:
+                print(f"[experimental-reference] unavailable: {type(exc).__name__}", flush=True)
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
             # C1274 is intentionally independent of Magnet, Max Pain and the
             # dual-CVD/legacy planned-event paths. Freeze and drain it directly

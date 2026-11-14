@@ -105,6 +105,8 @@ class SolG65Worker:
     def status(self):
         return {**deepcopy(self.runtime), 'running': bool(self.task and not self.task.done()),
                 'delivery_allowed_by_profile': policy.sol_g65_experimental_enabled(),
+                'new_entries_enabled': policy.sol_g65_experimental_enabled(),
+                'retired_monitor_only': signal.RULE_ID in policy.RETIRED_EXPERIMENTAL_RULES,
                 'overlap_cap': 1, 'cap_includes_pending': True, 'pending_ttl_hours': None,
                 'holding_time_limit': None, 'price_source': store.PRICE_SOURCE, 'btc_price_source': hyperliquid.price_source('BTC'),
                 'source_contract_version': store.SOURCE_CONTRACT_VERSION,
@@ -166,7 +168,7 @@ class SolG65Worker:
             return self.cache
         raise ValueError('Position source provenance is missing or unsupported')
 
-    async def monitor(self, scope, state):
+    async def monitor(self, scope, state, *, retired=False):
         active = state.get('active')
         if active and active.get('monitor_status') != 'AMBIGUOUS':
             start = ms(active['bar_cursor'])+MINUTE
@@ -175,7 +177,13 @@ class SolG65Worker:
                 cache = self.position_cache(active)
                 rows = await asyncio.to_thread(cache.fill, 'SOL', start, end)
                 bars = [dict(open_at=dt(r[0]),open=r[1],high=r[2],low=r[3],close=r[4]) for r in rows]
-                await self.db(store.advance_position,scope,bars,dt(self.clock()),position_id=active['position_id'])
+                # Retirement preserves the original source/configuration;
+                # never migrate historical exposure merely to keep monitoring.
+                if retired:
+                    await asyncio.to_thread(store.advance_position, scope, bars, dt(self.clock()),
+                        position_id=active['position_id'], config_sha256=state['config_sha256'])
+                else:
+                    await self.db(store.advance_position,scope,bars,dt(self.clock()),position_id=active['position_id'])
                 state = await asyncio.to_thread(store.snapshot,scope)
                 cache.prune({'SOL': end-2*MINUTE})
         self.runtime.update(active_position=state.get('active'), counts=state.get('counts',{}),
@@ -218,12 +226,27 @@ class SolG65Worker:
             self.runtime['delivered'] += 1
             self.runtime['last_delivery_at'] = dt(self.clock()).isoformat()
 
+    async def drain_retired(self, scope):
+        slot = (scope, self.clock()//MINUTE)
+        if self.last_poll == slot:
+            return
+        state = await self.db(store.retire_scope, scope, dt(self.clock()))
+        if state is not None:
+            state = await self.monitor(scope, state, retired=True)
+        self.last_poll = slot
+        self.runtime.update(ready=True, last_error_type=None, next_retry_at=None,
+            state='RETIRED_MONITORING' if state and state.get('active') else 'RETIRED',
+            active_position=state.get('active') if state else None)
+
     async def tick(self):
         enabled,chat_id = self.subscription()
         if chat_id is None:
             self.runtime['state']='WATCH_OFF'
             return
         scope = subscription_scope(chat_id)
+        if signal.RULE_ID in policy.RETIRED_EXPERIMENTAL_RULES:
+            await self.drain_retired(scope)
+            return
         allowed = self.allowed(chat_id)
         if scope not in self.scopes:
             if not allowed:

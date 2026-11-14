@@ -104,7 +104,7 @@ class ReducerTests(unittest.TestCase):
     def test_notification_renders_full_contract(self):
         p=filled()['active'][0];text=w.render_alert(p)
         for value in ['100.95','101.6','75%','25%','24','0.2%','Hyperliquid']:self.assertIn(value,text)
-        self.assertTrue(w.WORKER.policy_enabled())
+        self.assertFalse(w.WORKER.policy_enabled())
         self.assertEqual(w.WORKER.status()['operational_state_capacity'],1)
     def test_old_workers_keep_same_config_and_api(self):
         for worker in [parent.WORKER,*parent.ADDITIONAL_WORKERS.values()]:
@@ -156,7 +156,10 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             worker=w.DogePartialWorker(cache=parent.SolPriceCache(fetch),clock=lambda:now)
             worker.bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=55)))
             worker.subscription=lambda:(True,123);scope=worker.scope_for(123)
-            with patch.object(store,'_connect',db.connect):
+            # Historical renderer/delivery behavior remains regression-tested;
+            # the production policy is retired and separately tested as such.
+            with patch.object(store,'_connect',db.connect), \
+                 patch.object(policy,'maxpain_component_experimental_enabled',return_value=True):
                 await worker.initialize(scope)
                 store.transact(scope,now,worker.config_sha256,lambda x:x.update(filled()))
                 await worker.deliver(scope,123);await worker.deliver(scope,123)

@@ -212,6 +212,45 @@ def snapshot(scope, *, database_url=None):
         return state
 
 
+def retire_scope(scope, now, *, config_sha256=None, database_url=None):
+    """Retire unfilled observations and unsent alerts, preserving old exposure.
+
+    This never initializes or migrates a scope. The two known source versions
+    retain their frozen price routes; an ambiguous fill or attempted delivery
+    remains unresolved rather than being silently cancelled or retried.
+    """
+    key, moment = key_for(scope), utc(now)
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
+        _lock(conn, key)
+        row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
+        if row is None:
+            return None
+        state = json.loads(row['value'])
+        _validate(state)
+        if state.get('config_sha256') not in {config_sha256, LEGACY_MIXED_SOURCE_CONFIG_SHA256}:
+            raise ValueError('SOL g65/k49 frozen configuration hash mismatch; retirement cannot migrate')
+        before = _encode(state)
+        _maintain(state, moment)
+        active = state.get('active')
+        if active and state.get('config_sha256') == LEGACY_MIXED_SOURCE_CONFIG_SHA256:
+            # Known pre-migration exposure retains its original venue.
+            active.setdefault('price_source', LEGACY_POSITION_PRICE_SOURCE)
+        if active and active.get('phase') == 'PENDING' and active.get('monitor_status') != 'AMBIGUOUS':
+            active.update(outcome='CANCELLED_FORMULA_RETIRED', cancelled_at=iso(moment),
+                          exit_reason='UNFILLED_FORMULA_RETIRED')
+            state['history'].append(deepcopy(active))
+            state['active'] = None
+            _count(state, 'cancelled_formula_retired')
+        for intent in state['intents']:
+            if intent['status'] == 'PENDING':
+                intent.update(status='CANCELLED', acknowledged_at=iso(moment), error_type='FORMULA_RETIRED')
+                _count(state, 'retired_notifications')
+        _maintain(state, moment)
+        if _encode(state) != before:
+            _save(conn, key, state, moment, execution_changes)
+        return deepcopy(state)
+
+
 def _decision_status(state, decision, now):
     if decision.second or decision.microsecond or decision.minute % 30:
         raise ValueError('SOL g65/k49 decision must be on a UTC 30-minute boundary')

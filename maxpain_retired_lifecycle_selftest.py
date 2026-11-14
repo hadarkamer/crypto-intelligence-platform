@@ -213,9 +213,9 @@ class RetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.values, before)
         self.assertEqual(store.snapshot(scope)['active'], original['active'])
 
-    def test_retained_doge_worker_and_cache_unchanged(self):
-        self.assertTrue(doge.WORKER.policy_enabled())
-        self.assertNotIn(doge.RULE_ID, policy.RETIRED_EXPERIMENTAL_RULES)
+    def test_retired_doge_worker_keeps_historical_cache(self):
+        self.assertFalse(doge.WORKER.policy_enabled())
+        self.assertIn(doge.RULE_ID, policy.RETIRED_EXPERIMENTAL_RULES)
         self.assertIs(doge.WORKER.cache, worker.ADDITIONAL_WORKERS['DOGE'].cache)
         self.assertEqual(worker.config_hash(SPECS['SOL']), worker.CONFIG_SHA256)
 

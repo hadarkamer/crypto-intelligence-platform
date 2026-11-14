@@ -1,23 +1,21 @@
 """Owner-selected notification roster; collection and ordinary Watch stay independent.
 
-The 2026-10-17 roster keeps only the owner's four selected leaders. A legacy
+The current roster keeps only the owner's selected rules. A legacy
 ALL deployment profile must not re-enable retired experimental sources.
 """
 from __future__ import annotations
 
 import os
 
-ROSTER_VERSION = "owner-top4-20261017-v4"
+ROSTER_VERSION = "owner-approved-retirement-20261114-v5"
 SELECTED_MANUAL_RULES = frozenset()
-MAXPAIN_COMPONENT_RULES = frozenset((
-    'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
-))
+MAXPAIN_COMPONENT_RULES = frozenset()
 SELECTED_EXPERIMENTAL_RULES = frozenset((
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK',
     'HYPE_ROW71205_SHORT',
-    'SOL_G65_K49_PROFIT_LOCK',
 )) | MAXPAIN_COMPONENT_RULES
 RETIRED_EXPERIMENTAL_RULES = frozenset((
+    'SOL_G65_K49_PROFIT_LOCK', 'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
     'SOL_MAXPAIN_DIST1_3_RANGE24', 'HYPE_MAXPAIN_DIST05_15_LONG_TF',
     'DOGE_MAXPAIN_DIST15_25_LONG_TF', 'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
     'ETH_MAXPAIN_LONG_DIST1_3',

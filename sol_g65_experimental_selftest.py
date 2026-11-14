@@ -194,6 +194,11 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.dbpatch.start();self.addCleanup(self.dbpatch.stop)
         self.policy=patch.object(worker.policy,'sol_g65_experimental_enabled',return_value=True,create=True)
         self.policy.start();self.addCleanup(self.policy.stop)
+        # Replay the archived active contract for lifecycle regression tests;
+        # production retirement is exercised separately without this override.
+        retired=patch.object(worker.policy,'RETIRED_EXPERIMENTAL_RULES',
+            worker.policy.RETIRED_EXPERIMENTAL_RULES-{signal.RULE_ID})
+        retired.start();self.addCleanup(retired.stop)
         self.current=worker.ms(BASE)+1000
         self.calls=[]
         def fetch(symbol,start,end):

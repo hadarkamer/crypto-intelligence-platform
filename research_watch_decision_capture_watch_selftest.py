@@ -229,12 +229,15 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             event = context_scope['_with_watch_context'](ContextSourceEvent(
                 symbol='BTC', direction='LONG', source_side='UPPER',
                 event_type='MAGNET_ALERT', engine_snapshot={}))
-            self.assertEqual(event.engine_snapshot['experimental_price_references'], references['BTC'])
+            if 'prepare_references' in order:
+                self.assertEqual(event.engine_snapshot['experimental_price_references'], references['BTC'])
+            else:
+                self.assertNotIn('experimental_price_references', event.engine_snapshot)
             return [{'symbol': event.symbol, 'direction': event.direction,
                      'event_type': event.event_type, 'engine_snapshot': event.engine_snapshot}]
         async def manual_delivery(bot, chat_id, planned_sources, **kwargs):
             order.append('c1274_manual' if kwargs.get('c1274_bundle') is base_bundle else 'manual')
-            if planned_sources and not empty:
+            if planned_sources and not empty and 'prepare_references' in order:
                 self.assertEqual(planned_sources[0]['engine_snapshot']['experimental_price_references'],
                                  references['BTC'])
             return 0
