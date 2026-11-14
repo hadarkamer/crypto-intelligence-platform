@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - app/model1-standalone-20260915
+      - test/coinglass-session-path-20261114
     paths:
       - standalone_collector/**
       - collection_bridge.py
@@ -21,6 +22,7 @@ on:
       - market_vision/coinglass_heatmap_capture.py
       - market_vision/openai_heatmap_scanner.py
       - .github/workflows/standalone-heatmap-check.yml
+      - experiments/session-path-20261114/**
   workflow_dispatch:
     inputs:
       hover_source_check:
@@ -33,6 +35,7 @@ permissions:
 
 jobs:
   validate:
+    if: github.ref != 'refs/heads/test/coinglass-session-path-20261114'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -74,4 +77,106 @@ jobs:
           name: hover-source-evidence
           path: hover-source-evidence
           retention-days: 7
+
+  session_path_dummy:
+    if: >-
+      github.event_name == 'push' && github.run_attempt == 1 &&
+      github.ref == 'refs/heads/test/coinglass-session-path-20261114' &&
+      contains(github.event.head_commit.message, '[session-path-once-20261114]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: coinglass-session-path-20261114
+      cancel-in-progress: false
+    env:
+      COINGLASS_COOKIE_HEADER: ""
+      COINGLASS_STORAGE_STATE_JSON: ""
+      COINGLASS_SESSION_KEY: ""
+      DATABASE_URL: ""
+      OPENAI_API_KEY: ""
+      COLLECTION_BRIDGE_ENABLED: "false"
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Start bounded compatibility window
+        run: echo "SESSION_PATH_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /standalone_collector/
+            /collection_bridge.py
+            /collection_model1_task.py
+            /market_vision/
+            /experiments/model3-preparation-fix-20261031/check_capture.py
+            /experiments/session-path-20261114/
+      - uses: actions/setup-python@v5
+        timeout-minutes: 1
+        with:
+          python-version: '3.11.11'
+      - name: Install matched browser and test dependencies
+        timeout-minutes: 6
+        run: |
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/session-path-browsers"
+          python -m pip install 'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3' 'playwright==1.55.0' 'Pillow==12.3.0' 'pycryptodome==3.21.0'
+          python -m playwright install --with-deps chromium
+          command -v pg_config
+          test -x "$(pg_config --bindir)/initdb"
+      - name: Full session path with isolated PostgreSQL and Chromium
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Leave more than a minute for cleanup and the action post steps.
+          test "$(( $(date +%s) - SESSION_PATH_STARTED ))" -lt 480
+          work="$RUNNER_TEMP/session-path-work"
+          mkdir -m 700 "$work"
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/session-path-browsers"
+          # The Actions agent stays outside; app, PostgreSQL and browser share
+          # one namespace that has no network interface or route except loopback.
+          timeout --signal=TERM --kill-after=15s 260s sudo unshare \
+            --net --pid --fork --kill-child=SIGKILL --mount-proc \
+            bash -c '
+              set -euo pipefail
+              ip link set lo up
+              test "$(ip -o link show | wc -l)" -eq 1
+              test -z "$(ip route show)"
+              test -z "$(ip -6 route show default)"
+              exec runuser -u "$1" -- env -i \
+                PATH="$2" HOME="$3" TMPDIR="$4" CG_TEST_WORK="$4" \
+                PLAYWRIGHT_BROWSERS_PATH="$5" PYTHONUTF8=1 \
+                PYTHONDONTWRITEBYTECODE=1 \
+                bash "$6"
+            ' session-path "$(id -un)" "$PATH" "$HOME" "$work" \
+              "$PLAYWRIGHT_BROWSERS_PATH" \
+              "$GITHUB_WORKSPACE/experiments/session-path-20261114/run.sh"
+      - name: Verify owned cleanup and remove private test files
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          python - "$RUNNER_TEMP/session-path-work" "$RUNNER_TEMP/session-path-browsers" "$GITHUB_WORKSPACE/standalone_collector/runtime" <<'PY'
+          import json,os,pathlib,shutil,sys
+          paths=list(map(pathlib.Path,sys.argv[1:]))
+          survivors=[]
+          for directory in pathlib.Path('/proc').iterdir():
+              if not directory.name.isdecimal() or int(directory.name)==os.getpid(): continue
+              try:
+                  args=(directory/'cmdline').read_bytes().split(b'\0')
+                  if not args: continue
+                  name=pathlib.Path(args[0].decode(errors='ignore')).name
+                  if name not in {'postgres','chrome','chromium','headless_shell','chrome-headless-shell','python','python3','python3.11'}: continue
+                  if any(str(p).encode() in arg for p in paths for arg in args): survivors.append(int(directory.name))
+              except (OSError,ValueError): pass
+          clean=not survivors
+          for path in paths:
+              try:
+                  if path.exists(): shutil.rmtree(path)
+              except OSError: clean=False
+          clean=clean and all(not path.exists() for path in paths)
+          print('SESSION_PATH_WORKSPACE_CLEANUP '+json.dumps({'owned_processes_remaining':len(survivors),'owned_files_removed':all(not p.exists() for p in paths),'cleanup_ok':clean}))
+          if not clean: raise SystemExit(1)
+          PY
 
