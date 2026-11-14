@@ -1,0 +1,766 @@
+{
+  "format": "formula-selection-handoff/v1",
+  "language": "he",
+  "title_he": "שש הנוסחאות שנבחרו לקבוצה המומלצת",
+  "created_at_israel": "2026-11-13T19:27:46.895096+02:00",
+  "purpose_he": "קובץ הגדרות להעברה ולהעלאה לצ׳ט או לתוכנת מחקר. זהו מבנה JSON תיעודי; לא אומתה התאמה לפורמט יבוא של בוט מסוים.",
+  "selection_basis_he": "חמש נוסחאות ליבה: OCONF0034_13, XRP Liquidity inverse, CT009, XRP R2732 ו־SOL SFF1361. בנוסף HYPE ROW71205 בהתאם לבחירת המשתמש. רק OCONF0034_13 נוספה בהמלצה המצוטטת לעומת החמש שנבחרו קודם.",
+  "data_cutoff_utc": "2026-11-12T13:40:00Z",
+  "data_cutoff_israel": "2026-11-12T15:40:00+02:00",
+  "new_backtest_performed_for_this_export": false,
+  "activation_performed_by_this_export": false,
+  "direct_bot_import_compatibility_verified": false,
+  "interpretation_he": [
+    "המלצה לבחור נוסחה אינה הוכחה שהותקנה או שהיא סוחרת בפועל. מצבי ההפעלה מתייחסים למועד המקור בלבד.",
+    "ציוני האיכות הם ציוני הדוחות מ־12 בנובמבר; הבדיקה המלאה של כל קטלוג התוכנה טרם הושלמה.",
+    "כל שש הנוסחאות בקובץ מבצעות שורט. הן עשויות להיות חשופות לאותו מהלך שוק; אין כאן בדיקת תיק משולב.",
+    "מקור המחיר לביצוע הוא Hyperliquid; מקורות רכיבי הבוט והיעדים נשארים כפי שנשמרו במקור.",
+    "ערכי שבר הם ביחס ל־1: למשל 0.005 הוא 0.5%. שדות המסומנים percent נמדדים באחוזים: 0.25 הוא 0.25%.",
+    "ערך null מציין מידע שלא נקבע או לא אומת, ולא אפס."
+  ],
+  "research_risk_assumptions_for_leading_report": {
+    "initial_risk_usd": 5,
+    "notional_cap_usd": 5000,
+    "base_roundtrip_cost_fraction": 0.0006,
+    "stress_roundtrip_cost_fraction": 0.0016,
+    "live_allocation": false,
+    "note_he": "אלה הנחות המחקר של הדוח הוותיק, לא תקציב חי מאומת. OCONF מדווחת ביחידות R ובעלויות נפרדות בתוך הרשומה שלה."
+  },
+  "portfolio_live_risk_budget": null,
+  "portfolio_overlap_test_complete": false,
+  "formulas": [
+    {
+      "id": "OCONF0034_13",
+      "name_he": "מאקספאיין חוזר, נגזרים והמתנה לעלייה",
+      "exact_research_id": "OCONF0034_13",
+      "predicate_key": "MP_-1_ALL6_repeat24h_ge2_core40_spot_support",
+      "selection_role": "core",
+      "direction": "SHORT",
+      "research_symbols": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE",
+        "HYPE"
+      ],
+      "evidence_grade": {
+        "value": 6.5,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "איכות הראיות, לא הסתברות הצלחה; הציון מהמחקר הקודם."
+      },
+      "description_he": "אישור מאקספאיין יורד שחזר, עם תמיכת מודלי הנגזרים; ממתינים לעלייה ואז נכנסים לשורט אל היעד המקורי.",
+      "conditions_he": [
+        "אישור מאקספאיין עם יעד מתחת למחיר. זו נוסחת אישור מאקספאיין, לא נוסחת אישור מגנט.",
+        "לפחות שתי הופעות ב־24 שעות, כולל הצילום הנוכחי, באותו מטבע, סוג אישור וכיוון יעד; נספרים צילומי החלטה נפרדים. כמה טווחים באותו צילום אינם כמה חזרות.",
+        "כל יעד קודם מושווה ליעד הנוכחי: max(previous_target,current_target)/min(previous_target,current_target) <= 1.004.",
+        "ציון OI מהיר המיושר לירידה לפחות 40; ציון CVD חוזים מהיר המיושר לירידה לפחות 40; ציון CVD ספוט מהיר המיושר לירידה לפחות 0.",
+        "הציון המהיר מחושב ממשפחות המודל: (0.35*now + 0.30*short)/0.65. now היא משפחת 30 דקות; short כוללת שעה וארבע שעות. אין להחליף זאת בממוצע חדש של נתוני OI או CVD גולמיים.",
+        "שדה חסר או מיושן אינו עובר את תנאי הסף. אין דרישת ציון מאקספאיין 65 או 75 בגרסה זו."
+      ],
+      "parameters": {
+        "confirmation_type": "MP",
+        "repeat_lookback_hours": 24,
+        "minimum_distinct_snapshots_including_current": 2,
+        "same_target_max_min_ratio": 1.004,
+        "oi_fast_aligned_min": 40,
+        "futures_cvd_fast_aligned_min": 40,
+        "spot_cvd_fast_aligned_min": 0,
+        "now_weight": 0.35,
+        "short_weight": 0.3,
+        "normalization_weight": 0.65,
+        "adverse_distance_fraction": 0.2,
+        "stop_from_entry_fraction": 0.012,
+        "pending_expiry_hours": 24,
+        "holding_time_limit_hours": null
+      },
+      "price_geometry": {
+        "variables": {
+          "P": "מחיר הייחוס במועד יצירת ההזדמנות",
+          "T": "יעד המאקספאיין המקורי, T < P",
+          "E": "מחיר הכניסה המתוכנן"
+        },
+        "entry": "E = P + 0.2*(P - T)",
+        "stop": "SL = E*1.012",
+        "take_profit": "TP = T",
+        "example": {
+          "P": 100,
+          "T": 98,
+          "E": 100.4,
+          "SL": 101.6048,
+          "TP": 98
+        }
+      },
+      "entry_and_exit_he": "פקודת הכניסה פגה לאחר 24 שעות. אם היעד המקורי הושג לפני המילוי, מבטלים. אחרי מילוי אין מגבלת זמן להחזקה; היציאה בטייק או בסטופ.",
+      "deduplication_he": "איחוד לאפיזודת יעד לצורך מניעת כניסות כפולות הוא כלל נפרד מספירת חזרות: כל טווח היעדים המצטבר באפיזודה נדרש להישאר בתוך 0.4%. פוזיציה או פקודת כניסה ממתינה חוסמת אות נוסף באותו מטבע בתוך הנוסחה.",
+      "signal_data_source_he": "ציוני הבוט והחלטות האישור המקוריים שנשמרו בזמן התצפית. צילום אינו הוכחה למסירת הודעה בטלגרם.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "coverage_he": "סריקת האישורים מ־2.10 עד 12.11.2026; מקור הציונים האחרון התקף 12.11 בשעה 13:07:03 UTC. חלון הבדיקה המאוחר: 1–12 בנובמבר. מקור יעדי הבוט נשמר כפי שהיה ואינו בהכרח Hyperliquid.",
+      "activation": {
+        "source_snapshot_active": null,
+        "source_status_he": "מועמדת חדשה במחקר; לא הוכחה התקנה",
+        "current_live_state_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "unit": "R",
+        "R_definition_he": "יחידת הסיכון המתוכנן ההתחלתי לעסקה",
+        "training_closed": 34,
+        "training_stress_net_R": 10.09,
+        "later_window_start": "2026-11-01",
+        "later_closed": 13,
+        "later_wins": 10,
+        "later_base_net_R": 5.24,
+        "later_stress_net_R": 3.72,
+        "base_roundtrip_cost_fraction": 0.0016,
+        "stress_roundtrip_cost_fraction": 0.003,
+        "funding_included": false,
+        "later_capacity_blocked_events": 0,
+        "not_selected_on_completely_unseen_future_period": true
+      },
+      "overlap_he": "עשויה לחפוף לנוסחאות שורט אחרות באותם מטבעות. לא נבדק תיק משולב של שש הנוסחאות עם תקציב סיכון משותף.",
+      "source_ids": [
+        "watch_report",
+        "watch_evidence"
+      ],
+      "evidence_member_paths": [
+        "confirmations/observed/report_ready_review.json",
+        "data/build_observed_mp.py"
+      ]
+    },
+    {
+      "id": "XRP_LIQUIDITY_RAW_INVERSE",
+      "name_he": "XRP — נזילות בביצוע הפוך",
+      "exact_research_id": "XRP_LIQUIDITY_INVERSE__RAW__QUALIFIED__3d__0.2342784544453025__0.8671878740191461__0.0105286625253104",
+      "selection_role": "core",
+      "direction": "SHORT",
+      "research_symbols": [
+        "XRP"
+      ],
+      "evidence_grade": {
+        "value": 6.0,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "ציון איכות הראיות, לא הסתברות הצלחה; הועתק מהדוח ולא חושב מחדש."
+      },
+      "description_he": "אות לונג כשיר עם נתח נזילות עליון לפחות 60%; משקפים את היעד ומבצעים שורט אחרי המתנה נגדית.",
+      "conditions_he": "אות לונג במצב זכאות Combined משוחזר; רכיב נזילות תומך שבו סכום הליקווידציה ביעד העליון לפחות 60% מסכום שני היעדים, לפחות בטווח תומך אחד. משמרים את אות הלונג והופכים רק את הביצוע לשורט. אין תנאי Futures 65 או ממוצע 27.51.",
+      "entry_description_he": "יעד המקור משוקף לצד השורט. ממתינים לתנועה נגדית בגודל 23.43% מהמרחק ליעד המשוקף.",
+      "exit_description_he": "טייק אחרי 86.72% מהמרחק מהכניסה החדשה ליעד המשוקף; סטופ 1.0529%.",
+      "signal_data_source_he": "מצבי QUALIFIED משוחזרים של הבוט, כולל נזילות בכל טווח תומך. יעד הלונג המקורי משוקף סביב מחיר הייחוס לפני ההמתנה לתנועה הנגדית; מחיר הייחוס ומחירי הביצוע הם מחוזה XRP תמידי ב־Hyperliquid.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "coverage_he": "מקורות הבוט עד מועד התצפית האחרון המפורט בראיות; מחירי Hyperliquid עד חתך הבדיקה.",
+      "activation": {
+        "source_snapshot_active": false,
+        "source_snapshot_as_of_utc": "2026-11-12T13:40:00Z",
+        "current_live_state_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "full": {
+          "closed": 37,
+          "wins": 22,
+          "win_pct": 59.45945945945946,
+          "base_net": 112.2175634454364,
+          "stress_net": 94.6464807409363,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": 486.0,
+          "gap_censored": 0
+        },
+        "last_7_days": {
+          "closed": 3,
+          "wins": 3,
+          "win_pct": 100.0,
+          "base_net": 33.9760528032718,
+          "stress_net": 32.551370421825844,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": 0
+        },
+        "last_30_days": {
+          "closed": 30,
+          "wins": 18,
+          "win_pct": 60.0,
+          "base_net": 82.45096940775151,
+          "stress_net": 68.20414559329197,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": 0
+        },
+        "window_basis_he": "עסקאות שנכנסו בחלון מתוך הרצה רציפה, לאחר שמירת מצב הפוזיציה מלפניו; הרווח המוצג הוא של הסגורות.",
+        "pnl_currency": "USD",
+        "stress_roundtrip_cost_fraction": 0.0016,
+        "funding_included": false,
+        "exchange_fills_verified": false
+      },
+      "overlap_he": "נוסחה נפרדת מהפעילות; חפיפת פוזיציות עדכנית אינה נמדדת כאן.",
+      "evidence_notes_he": [
+        "ציון קודם ב־9.11: 6.0. שינוי רווח הסגורות מאז: 11.48$ מחמיר."
+      ],
+      "source_ids": [
+        "leading_json",
+        "leading_report",
+        "combined_evidence"
+      ],
+      "detailed_evidence_url": "https://chatgpt.com/library?file_id=libfile_de648bd61b108191928c229e39cda239&account_id=personal",
+      "parameters": {
+        "source_direction": "LONG",
+        "execution_direction": "SHORT",
+        "source_state": "COMBINED_QUALIFIED",
+        "upper_target_liquidation_share_min": 0.6,
+        "supporting_timeframes_min": 1,
+        "futures_65_condition": false,
+        "maxpain_mean_27_51_condition": false,
+        "adverse_distance_fraction": 0.2342784544453025,
+        "take_remaining_distance_fraction": 0.8671878740191461,
+        "stop_from_entry_fraction": 0.0105286625253104,
+        "pending_expiry_hours": 24,
+        "holding_time_limit_hours": null
+      },
+      "price_geometry": {
+        "variables": {
+          "P": "פתיחת דקת Hyperliquid המלאה הבאה אחרי זמינות האות, לפני ההמתנה",
+          "U": "יעד הלונג המקורי",
+          "T": "היעד המשוקף",
+          "E": "מחיר הכניסה המתוכנן לשורט"
+        },
+        "reflected_target": "T = 2*P - U",
+        "valid_geometry": "0 < T < P; U > P",
+        "entry": "E = P + 0.2342784544453025*(P - T)",
+        "stop": "SL = E*(1 + 0.0105286625253104)",
+        "take_profit": "TP = E + 0.8671878740191461*(T - E)",
+        "cancel_before_fill_if": "reflected target T reached",
+        "clarification_he": "השיקוף סביב P, מחיר הייחוס לפני ההמתנה; לא מחשבים מחדש את השיקוף סביב E לאחר העלייה. ההבהרה נבדקה בקוד replay_gapaware.py ו־replay_original.py ומחליפה ניסוח עמום בדוח."
+      },
+      "deduplication_he": "פוזיציה/הזמנה אחת למטבע בנוסחה; זהות יעד לפי מטבע, כיוון וטווח, טווח יעד מצטבר של 0.4% ופער של עד 90 דקות. מקור האות נשאר לונג; ההיפוך מתבצע רק בגאומטריית העסקה."
+    },
+    {
+      "id": "CT009_FROZEN_3D",
+      "name_he": "CT009 — חזרות והמתנה נגדית",
+      "exact_research_id": "CT009__3d__0.1814560294151306__0.9365681871771814__0.0040077843998312",
+      "selection_role": "core",
+      "direction": "SHORT",
+      "research_symbols": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE",
+        "HYPE",
+        "BNB",
+        "ZEC"
+      ],
+      "evidence_grade": {
+        "value": 6.0,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "ציון איכות הראיות, לא הסתברות הצלחה; הועתק מהדוח ולא חושב מחדש."
+      },
+      "description_he": "שורט חוזר על יעד קרוב; ממוצע ציוני ההתראות הקודמות לפחות 72.8; ממתינים לעלייה לפני הכניסה.",
+      "conditions_he": "התראת שורט רגילה בטווח מאקספאיין 48 שעות או 3 ימים. ב־24 השעות שקדמו לה הופיעה התראה באותו מטבע, כיוון וטווח, על יעד שמרחקו עד 0.4% מהיעד הנוכחי. ממוצע ציוני המאקספאיין בהתראות הקודמות הללו לפחות 72.8. ההתראה הנוכחית אינה חלק מהממוצע.",
+      "entry_description_he": "ממתינים לעלייה נגד השורט בגודל 18.15% מהמרחק המקורי ליעד. ההזמנה פגה אחרי 24 שעות או מתבטלת אם היעד המקורי הושג לפני המילוי.",
+      "exit_description_he": "טייק אחרי 93.66% מהדרך מהכניסה החדשה ליעד; סטופ 0.4008%. אין מגבלת החזקה לאחר מילוי.",
+      "signal_data_source_he": "התראות רגילות שנמסרו ונשמרו; ממוצע של אירועי ההתראה הקודמים ולא חישוב רציף מכל מצבי הבוט.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "coverage_he": "בחלונות 7/30: סל BTC, ETH, SOL, XRP, DOGE, HYPE עם מחיר רציף. המצטבר כולל גם מקטעי BNB/ZEC הזמינים.",
+      "activation": {
+        "source_snapshot_active": false,
+        "source_snapshot_as_of_utc": "2026-11-12T13:40:00Z",
+        "current_live_state_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "full": {
+          "closed": 93,
+          "wins": 42,
+          "win_pct": 45.16129032258064,
+          "base_net": 318.19870762800883,
+          "stress_net": 202.1745023290449,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": 193.0,
+          "gap_censored": 1
+        },
+        "last_7_days": {
+          "closed": 17,
+          "wins": 7,
+          "win_pct": 41.17647058823529,
+          "base_net": 65.20833379097603,
+          "stress_net": 43.99960809116543,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": 0
+        },
+        "last_30_days": {
+          "closed": 51,
+          "wins": 22,
+          "win_pct": 43.13725490196078,
+          "base_net": 186.05915030925675,
+          "stress_net": 122.43297320982498,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": 0
+        },
+        "window_basis_he": "עסקאות שנכנסו בחלון מתוך הרצה רציפה, לאחר שמירת מצב הפוזיציה מלפניו; הרווח המוצג הוא של הסגורות.",
+        "pnl_currency": "USD",
+        "stress_roundtrip_cost_fraction": 0.0016,
+        "funding_included": false,
+        "exchange_fills_verified": false
+      },
+      "overlap_he": "נוסחה נפרדת מהפעילות; חפיפת פוזיציות עדכנית אינה נמדדת כאן.",
+      "evidence_notes_he": [
+        "מצב GAP_CENSORED אינו עסקה פתוחה שניתן לשערך: תוצאה לא ידועה אינה נספרת כרווח או הפסד, והיא ממשיכה לחסום כניסה באותו מטבע.",
+        "ציון קודם ב־9.11: 6.0. שינוי רווח הסגורות מאז: -13.98$ מחמיר."
+      ],
+      "source_ids": [
+        "leading_json",
+        "leading_report",
+        "combined_evidence"
+      ],
+      "detailed_evidence_url": "https://chatgpt.com/library?file_id=libfile_de648bd61b108191928c229e39cda239&account_id=personal",
+      "parameters": {
+        "source_population": "OBSERVED_DELIVERED_ORDINARY_ALERTS",
+        "maxpain_timeframes": [
+          "48h",
+          "3d"
+        ],
+        "previous_alert_lookback_hours": 24,
+        "same_target_max_min_ratio": 1.004,
+        "same_target_ratio_numeric_tolerance": 1e-12,
+        "minimum_previous_matching_alerts": 1,
+        "previous_scores_mean_min": 72.8,
+        "exclude_current_alert_from_mean": true,
+        "adverse_distance_fraction": 0.1814560294151306,
+        "take_remaining_distance_fraction": 0.9365681871771814,
+        "stop_from_entry_fraction": 0.0040077843998312,
+        "pending_expiry_hours": 24,
+        "holding_time_limit_hours": null
+      },
+      "price_geometry": {
+        "variables": {
+          "P": "פתיחת הדקה המלאה הבאה אחרי זמינות האות",
+          "T": "יעד המקור, נמוך מ־P",
+          "E": "מחיר הכניסה המתוכנן"
+        },
+        "entry": "E = P + 0.1814560294151306*(P - T)",
+        "stop": "SL = E*(1 + 0.0040077843998312)",
+        "take_profit": "TP = E + 0.9365681871771814*(T - E)",
+        "cancel_before_fill_if": "original target T reached",
+        "same_bar_policy_he": "מחקר המקור שומר נתיבי נר חלופיים; התוצאה הראשית היא path0. סדר מילוי אמיתי מחייב נתוני ביצוע ואינו מוכח מנר דקה בלבד."
+      },
+      "universe_note_he": "המחקר המצטבר כלל שמונה מטבעות. בחלונות 7/30 השתמשו בששת המטבעות הרציפים; BNB ו־ZEC בעלי פערי מחיר. רשימת מטבעות לפריסה חיה אינה נקבעת בקובץ זה.",
+      "deduplication_he": "פוזיציה/הזמנה אחת למטבע בתוך הנוסחה; זהות אירוע לפי המקור ואפיזודת יעד. אפיזודות ההתראות הופרדו גם בפער מעל 90 דקות או טווח יעדים מצטבר מעל 0.4%. חישוב ממוצע 24 השעות נפרד מהאפיזודה."
+    },
+    {
+      "id": "R2732_BINANCE_RECENT_YEAR",
+      "name_he": "XRP R2732 — מחיר וסשן ניו־יורק",
+      "exact_research_id": "RG_XRP_SHORT_g11_R2732__lock05_at2__ny_weekdays__HYPERLIQUID_V2",
+      "selection_role": "core",
+      "direction": "SHORT",
+      "research_symbols": [
+        "XRP"
+      ],
+      "evidence_grade": {
+        "value": 5.5,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "ציון איכות הראיות, לא הסתברות הצלחה; הועתק מהדוח ולא חושב מחדש."
+      },
+      "description_he": "שורט בימי חול, כשהמחיר כ־0.416%–1.742% מתחת לשיא סשן NYSE האחרון שהושלם.",
+      "conditions_he": "כל15דקות ביום חול בניו־יורק: מחיר הסגירה האחרון נמוך משיא הסשן האחרון שהושלם בשיעור של לפחות כ־0.41581764% ופחות מכ־1.74158769%, עם גבולות מדויקים שמורים. שורט בפתיחת הדקה הבאה, סטופ0.5%,טייק8%,סטופ נעילה ברווח0.25% לאחר תנועה לטובת העסקה1%, פעיל מהדקה הבאה בלבד.",
+      "entry_description_he": "החלטה על בסיס הדקה הסגורה; כניסה בפתיחת הדקה שאחרי ההחלטה.",
+      "exit_description_he": "סטופ 0.5%; טייק 8%. אחרי ירידה של 1% הסטופ עובר לנעילת רווח מחיר 0.25%, החל מהדקה הבאה; לא מחילים אותו על נר הטריגר.",
+      "signal_data_source_he": "מחירי דקה מקוריים של חוזה XRP תמידי בהייפרליקוויד ולוח סשני NYSE. אותו כלל ואותה זירה כמו הנוסחה הפעילה; יומן המחקר כולל את כלל ההזדמנויות ואינו יומן מסירת ההתראות.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "coverage_he": "37.74 ימי תמיכה משותפת של מקור ומחיר; מחיר רציף עד החתך.",
+      "activation": {
+        "source_snapshot_active": true,
+        "source_snapshot_as_of_utc": "2026-11-12T13:40:00Z",
+        "current_live_state_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null,
+        "source_worker_notification_only": true,
+        "source_worker_live_order_execution": false,
+        "downstream_exchange_execution_verified": false
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "full": {
+          "closed": 40,
+          "wins": 14,
+          "win_pct": 35.0,
+          "base_net": 191.00000000000512,
+          "stress_net": 151.0000000000042,
+          "open": 1,
+          "open_stress": 58.75266315215439,
+          "cap": 921,
+          "gap_censored": null
+        },
+        "last_7_days": {
+          "closed": 4,
+          "wins": 2,
+          "win_pct": 50.0,
+          "base_net": -7.399999999999936,
+          "stress_net": -11.39999999999999,
+          "open": 1,
+          "open_stress": 58.75266315215439,
+          "cap": 107,
+          "gap_censored": null
+        },
+        "last_30_days": {
+          "closed": 32,
+          "wins": 10,
+          "win_pct": 31.25,
+          "base_net": 128.3000000000044,
+          "stress_net": 96.30000000000366,
+          "open": 1,
+          "open_stress": 58.75266315215439,
+          "cap": 696,
+          "gap_censored": null
+        },
+        "window_basis_he": "עסקאות שנכנסו בחלון מתוך הרצה רציפה, לאחר שמירת מצב הפוזיציה מלפניו; הרווח המוצג הוא של הסגורות.",
+        "pnl_currency": "USD",
+        "stress_roundtrip_cost_fraction": 0.0016,
+        "funding_included": false,
+        "exchange_fills_verified": false
+      },
+      "overlap_he": "זהה ל־XRP R2732 הפעילה, באותו שוק. המחקר כולל עסקה אחת שקדמה להפעלה; אין לצרף את הרווחים.",
+      "evidence_notes_he": [
+        "ציון קודם ב־9.11: 5.5. שינוי רווח הסגורות מאז: -12.30$ מחמיר."
+      ],
+      "source_ids": [
+        "leading_json",
+        "leading_report",
+        "xrp_r2732_experimental_signal.py",
+        "xrp_r2732_experimental_worker.py"
+      ],
+      "detailed_evidence_url": "https://chatgpt.com/library?file_id=libfile_2ac2dfa30b70819190691dbed0f26e96&account_id=personal",
+      "operational_formula_id": "RG_XRP_SHORT_g11_R2732__lock05_at2__ny_weekdays__HYPERLIQUID_V2",
+      "parameters": {
+        "decision_grid_minutes_utc": 15,
+        "weekday_timezone": "America/New_York",
+        "allowed_weekdays_monday_zero": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "holiday_on_weekday_blocks_signal": false,
+        "distance_expression": "last_closed_price/prior_completed_NYSE_session_high - 1",
+        "distance_lower_exclusive": -0.017415876858352997,
+        "distance_upper_inclusive": -0.004158176397388663,
+        "stop_from_entry_fraction": 0.005,
+        "take_from_entry_fraction": 0.08,
+        "lock_trigger_original_R": 2,
+        "locked_profit_original_R": 0.5,
+        "holding_time_limit_hours": null,
+        "max_positions_per_formula": 1
+      },
+      "price_geometry": {
+        "entry": "D+1 minute OPEN after the UTC decision D",
+        "stop": "initial_SL = E*1.005",
+        "take_profit": "TP = E*0.92",
+        "original_risk": "R_price = abs(E - initial_SL)",
+        "lock_trigger": "E - 2*R_price",
+        "locked_stop": "E - 0.5*R_price",
+        "lock_effective_he": "בודקים קודם סטופ וטייק ישנים; נעילה שזוהתה בנר סגור חלה רק מהדקה שאחריו, ולא על נר הטריגר."
+      },
+      "implementation_notes_he": [
+        "BINANCE במזהה המחקר הוא שם היסטורי; גרסת המקור שנבחרה משתמשת במחירי חוזה XRP תמידי ב־Hyperliquid.",
+        "הספים המדויקים הועתקו מהקוד; הגבול השלילי התחתון אינו כלול והעליון כלול.",
+        "נדרשים נרות מלאים של סשן NYSE הקודם שהושלם והדקה האחרונה לפני ההחלטה. אין תנאי BTC, מיקום בתוך הסשן או רוחב סשן מינימלי.",
+        "לוח השנה בקוד שנבדק מוגבל לשנות התמיכה המוגדרות בו; לשימוש בשנה אחרת נדרש לוח סשנים מתאים."
+      ]
+    },
+    {
+      "id": "SFF1361_SOL_RECENT",
+      "name_he": "SOL SFF1361 — משפחת 30 דקות",
+      "exact_research_id": "SFF1361__SOL__-1__CONTROL_010_020__none",
+      "selection_role": "core",
+      "direction": "SHORT",
+      "research_symbols": [
+        "SOL"
+      ],
+      "evidence_grade": {
+        "value": 5.5,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "ציון איכות הראיות, לא הסתברות הצלחה; הועתק מהדוח ולא חושב מחדש."
+      },
+      "description_he": "שורט; OI ו־Futures של 30 דקות לפחות 40; שינוי המחיר בשעה בין ‎−0.5% ל־+0.5%.",
+      "conditions_he": "ב־SOL ציוני מחיר+OI ו־Futures במשפחת 30 דקות, מיושרים לשורט, לפחות 40. השינוי במחיר בשעה האחרונה בין מינוס 0.5% לפלוס 0.5%, כולל הגבולות. משפחות 30 הדקות צריכות להיות מלאות וזמינות. נדרשת גם היסטוריית מחיר מלאה של 24 שעות, אף שהתנאי המספרי משתמש בשעה האחרונה. אין תנאי ספוט CVD.",
+      "entry_description_he": "פתיחת הדקה הבאה לאחר זמינות תנאי הבוט.",
+      "exit_description_he": "סטופ 1%; טייק 2%.",
+      "signal_data_source_he": "ציוני בוט משוחזרים ממשפחת זמן קצרה ונתוני שינוי מחיר בשעה.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "coverage_he": "מחיר Hyperliquid רציף מ־3.10 לפנות בוקר בישראל עד 12.11; זמינות התנאים תלויה בשדות הנוסחה.",
+      "activation": {
+        "source_snapshot_active": false,
+        "source_snapshot_as_of_utc": "2026-11-12T13:40:00Z",
+        "current_live_state_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "full": {
+          "closed": 72,
+          "wins": 37,
+          "win_pct": 51.388888888888886,
+          "base_net": 173.39999999999998,
+          "stress_net": 137.4,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": 431,
+          "gap_censored": null
+        },
+        "last_7_days": {
+          "closed": 13,
+          "wins": 5,
+          "win_pct": 38.46153846153846,
+          "base_net": 6.100000000000007,
+          "stress_net": -0.39999999999999325,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": null
+        },
+        "last_30_days": {
+          "closed": 57,
+          "wins": 26,
+          "win_pct": 45.6140350877193,
+          "base_net": 87.90000000000002,
+          "stress_net": 59.40000000000003,
+          "open": 0,
+          "open_stress": 0.0,
+          "cap": null,
+          "gap_censored": null
+        },
+        "window_basis_he": "עסקאות שנכנסו בחלון מתוך הרצה רציפה, לאחר שמירת מצב הפוזיציה מלפניו; הרווח המוצג הוא של הסגורות.",
+        "pnl_currency": "USD",
+        "stress_roundtrip_cost_fraction": 0.0016,
+        "funding_included": false,
+        "exchange_fills_verified": false
+      },
+      "overlap_he": "נוסחה נפרדת מהפעילות; חפיפת פוזיציות עדכנית אינה נמדדת כאן.",
+      "evidence_notes_he": [
+        "ציון קודם ב־9.11: 5.5. שינוי רווח הסגורות מאז: -4.80$ מחמיר."
+      ],
+      "source_ids": [
+        "leading_json",
+        "leading_report",
+        "flow_evidence"
+      ],
+      "detailed_evidence_url": "https://chatgpt.com/library?file_id=libfile_6b18796d35a8819191a541bdfe87f848&account_id=personal",
+      "parameters": {
+        "price_oi_30m_short_aligned_min": 40,
+        "futures_cvd_30m_short_aligned_min": 40,
+        "spot_cvd_filter_used": false,
+        "one_hour_price_change_fraction_lower_inclusive": -0.005,
+        "one_hour_price_change_fraction_upper_inclusive": 0.005,
+        "required_complete_price_history_hours": 24,
+        "complete_available_30m_families_required": true,
+        "stop_from_entry_fraction": 0.01,
+        "take_from_entry_fraction": 0.02
+      },
+      "price_geometry": {
+        "entry": "next full minute OPEN after signal data availability",
+        "stop": "SL = E*1.01",
+        "take_profit": "TP = E*0.98"
+      },
+      "implementation_notes_he": [
+        "הגרסה SFF1361 שונה מנוסחת SOL G65 הישנה. אין להחליף בין המזהים או לשייך לה את יומן העסקאות של G65.",
+        "מודלים משוחזרים משתמשים בהנחת זמינות שתועדה במחקר; זו אינה הוכחת זמן קבלת נתוני המקור בזמן אמת."
+      ]
+    },
+    {
+      "id": "HYPE_ROW71205_ALL_HYPERLIQUID_SOURCE_VARIANT_V2",
+      "name_he": "HYPE ROW71205 — השארה בהתאם לבחירת המשתמש",
+      "exact_research_id": "DOGE_GRAMMAR_HYPE_F3_ROW71205_FULL_SOURCE_HISTORY_RETROSPECTIVE",
+      "operational_formula_id": "HYPE_ROW71205_ALL_HYPERLIQUID_SOURCE_VARIANT_V2",
+      "formula_version": "hype-row71205-all-hyperliquid-short-sl005-tp02-cap1-v2",
+      "selection_role": "retained_by_user_preference",
+      "direction": "SHORT",
+      "research_symbols": [
+        "HYPE"
+      ],
+      "context_symbols": [
+        "BTC"
+      ],
+      "evidence_grade": {
+        "value": 3.5,
+        "scale": 10,
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "meaning_he": "איכות ראיות; נמוכה מהחמש האחרות. נשמרה בקבוצה בעקבות העדפת המשתמש."
+      },
+      "description_he": "שורט HYPE כאשר ביטקוין עולה מעט ב־12 שעות, טווח HYPE היומי מוגבל וחלק ניכר ממנו התרחש בארבע השעות האחרונות, ו־HYPE אינו חזק מביטקוין בארבע שעות.",
+      "conditions_he": [
+        "0 < תשואת BTC ב־12 שעות באחוזים < 0.25.",
+        "0 < טווח HYPE ב־24 שעות באחוזים <= 5.1000000000000005.",
+        "טווח HYPE בארבע שעות חלקי הטווח ב־24 שעות גדול מ־0.5.",
+        "תשואת HYPE בארבע שעות פחות תשואת BTC בארבע שעות קטנה או שווה לאפס."
+      ],
+      "parameters": {
+        "decision_grid_minutes_utc": 30,
+        "btc_return_12h_percent_lower_exclusive": 0,
+        "btc_return_12h_percent_upper_exclusive": 0.25,
+        "hype_range_24h_percent_lower_exclusive": 0,
+        "hype_range_24h_percent_upper_inclusive": 5.1000000000000005,
+        "hype_range_4h_to_24h_lower_exclusive": 0.5,
+        "relative_return_4h_upper_inclusive": 0,
+        "stop_from_entry_fraction": 0.005,
+        "take_from_entry_fraction": 0.02,
+        "profit_lock": false,
+        "holding_time_limit_hours": null,
+        "max_positions_per_formula": 1
+      },
+      "feature_definitions": {
+        "return_fraction": "last_closed_close/open_at_window_start - 1",
+        "return_percent": "100*return_fraction",
+        "range_percent": "100*(maximum_high - minimum_low)/open_at_window_start",
+        "relative_return_4h": "HYPE_return_4h_fraction - BTC_return_4h_fraction",
+        "required_history_hours": {
+          "HYPE": 24,
+          "BTC": 12
+        },
+        "closed_contiguous_minutes_required": true
+      },
+      "price_geometry": {
+        "entry": "D+1 minute OPEN after UTC half-hour decision D",
+        "stop": "SL = E*1.005",
+        "take_profit": "TP = E*0.98"
+      },
+      "signal_data_source_he": "נרות דקה סגורים של חוזי HYPE וגם BTC תמידיים ב־Hyperliquid. גרסת V2 ללא החלפה ל־Binance.",
+      "execution_price_venue": "Hyperliquid perpetual",
+      "activation": {
+        "source_snapshot_active": true,
+        "source_snapshot_as_of_utc": "2026-11-12T13:40:00Z",
+        "source_worker_notification_only": true,
+        "source_worker_live_order_execution": false,
+        "current_live_state_verified": false,
+        "downstream_exchange_execution_verified": false,
+        "live_risk_allocation_usd": null,
+        "live_risk_allocation_equity_fraction": null
+      },
+      "research_results": {
+        "as_of_utc": "2026-11-12T13:40:00Z",
+        "basis": "operational_reference_book_not_exchange_fills",
+        "closed": 14,
+        "wins": 4,
+        "win_pct": 28.57142857142857,
+        "base_net_usd": 21.600000000001955,
+        "stress_net_usd": 7.600000000001632,
+        "base_roundtrip_cost_fraction": 0.0006,
+        "stress_roundtrip_cost_fraction": 0.0016,
+        "capacity_omitted_unique_signals": null,
+        "funding_included": false,
+        "exchange_fills_verified": false
+      },
+      "evidence_notes_he": [
+        "רווח מחמיר קטן של 7.60$ על 14 עסקאות בלבד; לא נוספו סגירות מאז העדכון הקודם. הרווח אינו עמיד להסרת עסקה מנצחת אחת.",
+        "מסמך ההסבר הישן מתאר BTC ב־Binance; גרסת הרכיב התפעולי V2 היא המקור הקובע להגדרת הבורסה.",
+        "לא מאחדים את תוצאות מחקר גרסת המקור הישנה עם תוצאות גרסת Hyperliquid כאילו זו אותה סדרת ביצוע."
+      ],
+      "source_ids": [
+        "leading_json",
+        "active_evidence",
+        "hype_row71205_experimental_signal.py",
+        "hype_row71205_experimental_worker.py"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "leading_json",
+      "name": "Leading_Active_Formulas_20261112.json",
+      "url": "https://chatgpt.com/library?file_id=libfile_6b72accccd70819183c7073ba8ab97a2&account_id=personal",
+      "sha256": "837563cd35f5fd811e13b82528a7e4afbde319db642fed65ee4aad5b5108aaff"
+    },
+    {
+      "id": "leading_report",
+      "name": "Leading_Active_Formulas_20261112.html",
+      "url": "https://chatgpt.com/library?file_id=libfile_2234235b5c9c8191b9db04927e7f5db6&account_id=personal",
+      "sha256": "c76c53e0f42f639c437f9aad2a8ba3736afe66046c82592e03f268624b293c0e"
+    },
+    {
+      "id": "watch_report",
+      "name": "Watch_MaxPain_Research_20261112.html",
+      "url": "https://chatgpt.com/library?file_id=libfile_726d6119066481918a28b0684a6213bf&account_id=personal",
+      "sha256": "3353dc51a3d30b57784f6a66ff25e9cd1423ee9b9249d94c710da55e803b12b5"
+    },
+    {
+      "id": "watch_evidence",
+      "name": "watch_research_evidence_20261112.zip",
+      "url": "https://chatgpt.com/library?file_id=libfile_ff9b280fec4c8191b250992f5e09bf6f&account_id=personal"
+    },
+    {
+      "id": "combined_evidence",
+      "name": "Combined_MP_Verified_Checkpoint_20261112.zip",
+      "url": "https://chatgpt.com/library?file_id=libfile_de648bd61b108191928c229e39cda239&account_id=personal",
+      "sha256": "e0c2b33e05cec138038eb1dc20a8fef39e011e034988ded5d9c02e47d2c0ac17"
+    },
+    {
+      "id": "active_evidence",
+      "name": "Active_Formulas_20261112_Checkpoint.zip",
+      "url": "https://chatgpt.com/library?file_id=libfile_18e546b1d04c81918f841d131caf51cb&account_id=personal",
+      "sha256": "c9fef42e0510b9339804b2f8c26bbcd7b28b04d0bdbebe9f0e27d4d3b014180d"
+    },
+    {
+      "id": "flow_evidence",
+      "name": "MPflow_Validated_Update_20261112_Evidence.zip",
+      "url": "https://chatgpt.com/library?file_id=libfile_6b18796d35a8819191a541bdfe87f848&account_id=personal"
+    },
+    {
+      "id": "xrp_r2732_experimental_signal.py",
+      "name": "xrp_r2732_experimental_signal.py",
+      "url": "https://github.com/hadarkamer/crypto-intelligence-platform/blob/a81f4e4e1b8f03615ba7f37ba6703086a9f286ed/xrp_r2732_experimental_signal.py",
+      "commit": "a81f4e4e1b8f03615ba7f37ba6703086a9f286ed"
+    },
+    {
+      "id": "xrp_r2732_experimental_worker.py",
+      "name": "xrp_r2732_experimental_worker.py",
+      "url": "https://github.com/hadarkamer/crypto-intelligence-platform/blob/a81f4e4e1b8f03615ba7f37ba6703086a9f286ed/xrp_r2732_experimental_worker.py",
+      "commit": "a81f4e4e1b8f03615ba7f37ba6703086a9f286ed"
+    },
+    {
+      "id": "hype_row71205_experimental_signal.py",
+      "name": "hype_row71205_experimental_signal.py",
+      "url": "https://github.com/hadarkamer/crypto-intelligence-platform/blob/a81f4e4e1b8f03615ba7f37ba6703086a9f286ed/hype_row71205_experimental_signal.py",
+      "commit": "a81f4e4e1b8f03615ba7f37ba6703086a9f286ed"
+    },
+    {
+      "id": "hype_row71205_experimental_worker.py",
+      "name": "hype_row71205_experimental_worker.py",
+      "url": "https://github.com/hadarkamer/crypto-intelligence-platform/blob/a81f4e4e1b8f03615ba7f37ba6703086a9f286ed/hype_row71205_experimental_worker.py",
+      "commit": "a81f4e4e1b8f03615ba7f37ba6703086a9f286ed"
+    }
+  ],
+  "reconstruction_notes": {
+    "combined_code_members": [
+      "update_nov12/combined/replay_gapaware.py",
+      "update_nov12/combined/replay_original.py",
+      "update_nov12/combined/prepare_observed.py",
+      "update_nov12/combined/prepare_raw_candidates.py"
+    ],
+    "combined_replay_paths_he": "פרמטרי הגאומטריה אומתו מול קוד המחקר השמור. path0 הוא הנתיב הראשי של CT009 ו־XRP Liquidity; נתיב חלופי אינו מסירת אות או מילוי בורסה אמיתי.",
+    "known_remaining_integration_details_he": [
+      "מיפוי שמות השדות לשדות הבוט ופורמט היבוא שלו אינם מוגדרים בקובץ.",
+      "גודל הסיכון החי, מדיניות התנגשות בין שש הנוסחאות ופרטי ביצוע בבורסה לא אומתו.",
+      "ב־CT009 הרשימה המחקרית כוללת שמונה מטבעות; ששת המטבעות הרציפים מובחנים משני המטבעות בעלי הפערים.",
+      "ב־SFF1361 פרטי משך ההחזקה ומנגנון סיום מחוץ לטייק/סטופ אינם מפורטים במקור המסכם; לא הומצא ערך עבורם."
+    ]
+  }
+}

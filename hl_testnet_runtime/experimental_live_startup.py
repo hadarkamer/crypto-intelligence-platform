@@ -436,9 +436,12 @@ def stop():
 def health():
     with _lock:
         coordinator = _coordinator
-    return coordinator.health() if coordinator is not None else dict(
+    result = coordinator.health() if coordinator is not None else dict(
         configured=False, running=False, status='STARTUP_NOT_READY',
         new_entries_enabled=False, cross_process_ownership_verified=False)
+    import approved_alert_contract
+    result['new_entry_roster'] = approved_alert_contract.new_entry_roster()
+    return result
 
 
 def application(environ, start_response):

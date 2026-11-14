@@ -1,4 +1,4 @@
-"""Three already-existing formulas through approved entry and owned exits."""
+"""Retained entry formulas and the withdrawn G65 historical exit contract."""
 from copy import deepcopy
 import unittest
 
@@ -19,8 +19,8 @@ class FormulaExecutionTests(unittest.TestCase):
     make_worker = support.RuntimeContract.make_worker
     cycle = support.RuntimeContract.cycle
 
-    def test_all_three_enter_once_as_gtc_then_protect_and_close(self):
-        for family in ('r2732','hype_row71205','sol_g65'):
+    def test_retained_formulas_enter_once_as_gtc_then_protect_and_close(self):
+        for family in ('r2732','hype_row71205'):
             with self.subTest(family=family):
                 stamp = T if family == 'sol_g65' else T-60000
                 self.venue.__init__(stamp+1000)

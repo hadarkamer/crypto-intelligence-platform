@@ -47,7 +47,19 @@ def prepare(source, metadata):
 def require_entry_mark(source, metadata, mark):
     """Reuse price preparation before optional account reads; no new rule."""
     prepared = prepare(source, metadata)
-    stop, take = (Decimal(prepared['execution'][k]) for k in ('stop', 'take_profit'))
-    if not min(stop, take) < Decimal(mark) < max(stop, take):
+    if not entry_mark_allowed(source, prepared['execution'], mark):
         raise price_precision.PrecisionError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
     return prepared
+
+
+def entry_mark_allowed(source, levels, mark):
+    """Pending adverse entries expire at the original target, not their TP.
+
+    This affects only unfilled entry quantity. Observed fills always retain
+    the frozen exit prices and the existing sizing/risk checks.
+    """
+    stop, take = (Decimal(levels[k]) for k in ('stop', 'take_profit'))
+    target = contract.pending_cancel_price(source)
+    if target is not None:
+        take = target
+    return min(stop, take) < Decimal(mark) < max(stop, take)

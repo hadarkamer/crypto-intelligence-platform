@@ -19,7 +19,7 @@ from . import maxpain_execution, experimental_allocations, two_account_execution
 from .experimental_plan_store import reduce_source
 from .experimental_execution_state import ExecutionState, PostgresExecutionState, StateError
 from .risk_policy import budget, assert_new_entry_budget
-from .experimental_execution_prices import prepare as prepare_prices
+from .experimental_execution_prices import prepare as prepare_prices, entry_mark_allowed
 from . import experimental_shared_market as shared_market
 from . import doge_partial_execution as doge
 
@@ -112,8 +112,10 @@ def _source_active(source, now):
 def _working_entry_active(source, now):
     """Initial delivery freshness is not a lease on an accepted GTC order."""
     if contract.is_approved(source['source']):
+        deadline = contract.pending_entry_deadline(source['source'])
         return (source['cancellation'] is None and source['source']['kind'] == 'ALERT'
-            and source['entry_permission'] == 'WAITING')
+            and source['entry_permission'] == 'WAITING'
+            and (deadline is None or now < deadline))
     return _source_active(source, now)
 
 
@@ -430,7 +432,7 @@ class IsolatedExecutionRuntime:
             if any(trade['order_legs'][oid]=='ENTRY' for oid,o in active):
                 mark=_number(self._mark(trade,context,now)['mark_price'])
                 msg=trade['source']
-                if contract.is_approved(msg) and not min(_number(trade['prices']['stop']), _number(trade['prices']['take_profit'])) < mark < max(_number(trade['prices']['stop']), _number(trade['prices']['take_profit'])):
+                if contract.is_approved(msg) and not entry_mark_allowed(msg, trade['prices'], mark):
                     trade['entry_retired_reason']='APPROVED_ALERT_EXIT_ALREADY_REACHED'
                 if msg['family']=='maxpain' and (mark>=_number(msg['original_target']) if msg['side']=='LONG' else mark<=_number(msg['original_target'])):
                     trade['entry_retired_reason']='TESTNET_TARGET_SAFETY_CANCEL_REMAINDER'

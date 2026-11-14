@@ -9,6 +9,7 @@ The facade keeps v1 readable for historical recovery. Release admission must
 explicitly choose the supported version; validation is never order authority.
 """
 from copy import deepcopy
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 import hashlib
 import re
 
@@ -36,16 +37,62 @@ DOGE_PARTIAL_POLICY_FIELDS = POLICY_FIELDS | frozenset((
 FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     'hype_row71205': ('HYPE_ROW71205_SHORT', 'HYPE'),
     'sol_g65': ('SOL_G65_K49_PROFIT_LOCK', 'SOL')}
-# Entry roster approved 2026-11-13. Historical contracts remain readable.
-# Four additional approved formulas require their identified implementation first.
+# Explicit source adapters, not a configurable formula interpreter. Historical
+# CT009 research symbols remain readable; operational admission is six only.
+CT009_SYMBOLS = frozenset(('BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'HYPE'))
+SELECTED_FORMULAS = {
+    'sol_sff1361': ('SFF1361_SOL_RECENT', frozenset(('SOL',))),
+    'oconf0034_13': ('OCONF0034_13', CT009_SYMBOLS),
+    'ct009': ('CT009_FROZEN_3D', CT009_SYMBOLS | frozenset(('BNB', 'ZEC'))),
+    'xrp_liquidity_inverse': ('XRP_LIQUIDITY_RAW_INVERSE', frozenset(('XRP',))),
+}
+PENDING_FAMILIES = frozenset(('oconf0034_13', 'ct009', 'xrp_liquidity_inverse'))
+SELECTED_PROOF_FIELDS = PROOF_FIELDS | frozenset((
+    'decision_at', 'data_available_at', 'reference_at', 'reference_price', 'source_target'))
+SELECTED_PENDING_POLICY_FIELDS = POLICY_FIELDS | frozenset((
+    'pending_expires_at', 'cancel_before_fill_price'))
+# The operational CT009 restriction is independent from historical validation.
 NEW_ENTRY_IDENTITIES = frozenset((
     ('r2732', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     ('hype_row71205', 'HYPE_ROW71205_SHORT', 'HYPE'),
-))
+)) | frozenset((family, rule, symbol)
+    for family, (rule, symbols) in SELECTED_FORMULAS.items()
+    for symbol in (CT009_SYMBOLS if family == 'ct009' else symbols))
 
 
 def new_entry_allowed(message):
     return (message.get('family'), message.get('rule_id'), message.get('symbol')) in NEW_ENTRY_IDENTITIES
+
+
+def new_entry_roster():
+    """Current executable admission policy for existing read-only health views."""
+    return [dict(family=family, rule_id=rule,
+                 symbols=sorted(symbol for f, r, symbol in NEW_ENTRY_IDENTITIES
+                                if (f, r) == (family, rule)))
+            for family, rule in sorted({(f, r) for f, r, _ in NEW_ENTRY_IDENTITIES})]
+
+
+def pending_entry_deadline(message):
+    """Order lifetime, deliberately separate from first-admission expires_at."""
+    if is_approved(message) and message.get('family') in PENDING_FAMILIES:
+        return moment_ms(message['policy']['pending_expires_at'])
+    return None
+
+
+def pending_cancel_price(message):
+    if is_approved(message) and message.get('family') in PENDING_FAMILIES:
+        return positive(message['policy']['cancel_before_fill_price'])
+    return None
+
+
+def selected_price(value):
+    """Canonical source decimal at the existing 28-significant-digit boundary."""
+    with localcontext() as ctx:
+        ctx.prec = 28
+        ctx.rounding = ROUND_HALF_EVEN
+        result = format(+Decimal(str(value)), 'f')
+    positive(result)
+    return result
 
 
 MAX_BYTES = legacy.MAX_BYTES
@@ -80,19 +127,89 @@ def plan_digest(value):
     return hashlib.sha256(legacy._canonical(immutable(value))).hexdigest()
 
 
+def _validate_selected_formula(value, times):
+    """Validate four fixed, approved source adapters and their frozen prices."""
+    require = legacy._require
+    family, policy, proof = value['family'], value['policy'], value['proof']
+    legacy._keys(proof, SELECTED_PROOF_FIELDS, 'SELECTED_FORMULA_PROOF')
+    require(proof['source_contract_version'] == SOURCE_CONTRACT
+            and isinstance(proof['source_config_sha256'], str)
+            and HEX.fullmatch(proof['source_config_sha256']) is not None,
+            'SOURCE_PROVENANCE')
+    for key in ('cycle_id', 'episode_key'):
+        require(isinstance(proof[key], str) and 0 < len(proof[key]) <= 200,
+                'SELECTED_FORMULA_SOURCE_IDENTITY')
+    decision, available, reference = (moment_ms(proof[key]) for key in
+        ('decision_at', 'data_available_at', 'reference_at'))
+    require(decision <= available <= reference == times['source_at']
+            and reference <= times['created_at'] <= times['approved_at'],
+            'SELECTED_FORMULA_AVAILABILITY')
+    if family != 'oconf0034_13':
+        require(reference == (available // 60_000 + 1) * 60_000,
+                'SELECTED_FORMULA_NEXT_AVAILABLE_MINUTE')
+    allowed_tf = (('30m',) if family == 'sol_sff1361' else
+        ('48h', '3d') if family == 'ct009' else
+        (*legacy.TIMEFRAMES, 'ALL6') if family == 'oconf0034_13' else legacy.TIMEFRAMES)
+    require(proof['timeframe'] in allowed_tf, 'SELECTED_FORMULA_TIMEFRAME')
+    expected_policy = dict(name=value['rule_id'] + '_V1', entry_kind='LIMIT_AFTER_ALERT',
+        source_price=f"HYPERLIQUID_{value['symbol']}_PERPETUAL_TRADE_1M")
+    with localcontext() as ctx:
+        ctx.prec = 60
+        p = positive(proof['reference_price'])
+        if family == 'sol_sff1361':
+            legacy._keys(policy, POLICY_FIELDS, 'SELECTED_FORMULA_POLICY')
+            require(proof['source_target'] is None and value['original_target'] is None,
+                    'SELECTED_FORMULA_TARGET')
+            entry, stop, take = p, p * Decimal('1.01'), p * Decimal('.98')
+        else:
+            legacy._keys(policy, SELECTED_PENDING_POLICY_FIELDS, 'SELECTED_FORMULA_POLICY')
+            target = positive(proof['source_target'])
+            if family == 'xrp_liquidity_inverse':
+                require(target > p, 'SELECTED_FORMULA_SOURCE_TARGET')
+                target = 2 * p - target
+            require(0 < target < p, 'SELECTED_FORMULA_TARGET')
+            require(positive(value['original_target']) == target,
+                    'SELECTED_FORMULA_TARGET')
+            if family == 'oconf0034_13':
+                entry = p + Decimal('.2') * (p - target)
+                stop, take = entry * Decimal('1.012'), target
+            elif family == 'ct009':
+                entry = p + Decimal('0.1814560294151306') * (p - target)
+                stop = entry * Decimal('1.0040077843998312')
+                take = entry + Decimal('0.9365681871771814') * (target - entry)
+            else:
+                entry = p + Decimal('0.2342784544453025') * (p - target)
+                stop = entry * Decimal('1.0105286625253104')
+                take = entry + Decimal('0.8671878740191461') * (target - entry)
+            require(moment_ms(policy['pending_expires_at']) == reference + 86_400_000
+                    and times['approved_at'] < reference + 86_400_000
+                    and positive(policy['cancel_before_fill_price']) == target,
+                    'SELECTED_FORMULA_PENDING_TERMS')
+            expected_policy.update(pending_expires_at=policy['pending_expires_at'],
+                cancel_before_fill_price=policy['cancel_before_fill_price'])
+        require(policy == expected_policy, 'SELECTED_FORMULA_POLICY')
+        require(all(positive(value[key]) == Decimal(selected_price(expected)) for key, expected in
+                    (('entry', entry), ('stop', stop), ('take_profit', take))),
+                'SELECTED_FORMULA_FROZEN_PRICES')
+
+
 def _validate_approved(message):
     require = legacy._require
     legacy._canonical(message)
     legacy._keys(message, FIELDS, 'APPROVED_ALERT_FIELDS')
     value = deepcopy(message)
     require(value['version'] == VERSION and value['kind'] in RANK
-            and value['family'] in ('maxpain', *FORMULAS), 'APPROVED_ALERT_VERSION')
+            and value['family'] in ('maxpain', *FORMULAS, *SELECTED_FORMULAS), 'APPROVED_ALERT_VERSION')
     if value['family'] == 'maxpain':
         require(value['rule_id'] in SPECS, 'APPROVED_ALERT_RULE')
         spec = SPECS[value['rule_id']]
         require(value['symbol'] == spec[0] and value['side'] in ('LONG', 'SHORT')
                 and (spec[-1] == 'BOTH' or value['side'] == spec[-1]),
                 'APPROVED_ALERT_IDENTITY')
+    elif value['family'] in SELECTED_FORMULAS:
+        rule, symbols = SELECTED_FORMULAS[value['family']]
+        require(value['rule_id'] == rule and value['symbol'] in symbols
+                and value['side'] == 'SHORT', 'APPROVED_ALERT_IDENTITY')
     else:
         require((value['rule_id'], value['symbol']) == FORMULAS[value['family']]
                 and value['side'] == 'SHORT', 'APPROVED_ALERT_IDENTITY')
@@ -104,7 +221,7 @@ def _validate_approved(message):
              'arm_at', 'approved_at', 'expires_at', 'source_as_of')}
     require(times['source_at'] <= times['created_at'] <= times['approved_at']
             and times['arm_at'] == times['approved_at']
-            and times['approved_at'] % 60_000 == 0
+            and (value['family'] in SELECTED_FORMULAS or times['approved_at'] % 60_000 == 0)
             and times['expires_at'] == times['approved_at'] + LEASE_MS
             and times['source_as_of'] >= times['approved_at'], 'APPROVED_ALERT_TIMES')
     require(value['valid_until'] is None, 'APPROVED_ALERT_HAS_NO_HEARTBEAT_LEASE')
@@ -153,6 +270,8 @@ def _validate_approved(message):
         target = positive(value['original_target'])
         require(proof['episode_key'] == format(target.normalize(), 'f'),
                 'APPROVED_ALERT_TARGET_IDENTITY')
+    elif value['family'] in SELECTED_FORMULAS:
+        _validate_selected_formula(value, times)
     else:
         require(proof['source_contract_version'] == SOURCE_CONTRACT
                 and isinstance(proof['source_config_sha256'], str)

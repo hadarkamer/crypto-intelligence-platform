@@ -285,7 +285,7 @@ def review(request, context, *, now_ms):
         _fresh(market['at_ms'],now_ms,15000,'ACTUAL_TESTNET_MARK_EXPIRED')
         mark=life.number(market['mark_price'],positive=True)
         levels=prepared['execution']
-        if not min(Decimal(levels['stop']),Decimal(levels['take_profit']))<mark<max(Decimal(levels['stop']),Decimal(levels['take_profit'])):
+        if not execution_prices.entry_mark_allowed(source, levels, mark):
             raise BoundaryError('TESTNET_MARK_OUTSIDE_FROZEN_EXITS')
         if (not contract.is_approved(source) and source['family'] in ('maxpain','sol_g65')
                 and (mark<=Decimal(levels['entry']) if source['side']=='LONG' else mark>=Decimal(levels['entry']))):
