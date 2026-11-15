@@ -15,10 +15,21 @@ INITIAL_USD = '40'
 FRACTION = '0.05'
 DAY_MS = 86400000
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
+UNALLOCATED_FORMULAS = frozenset(('HYPE_WATCH_LIQ4050_24H_INVERSE',))
 
 
 class AccountingError(ValueError):
     pass
+
+
+def require_live_allocation(formula):
+    """An operationally new formula cannot inherit the historical default.
+
+    Historical snapshots remain valid for management/settlement. Only new
+    admission checks this gate; an explicit live allocation is still required.
+    """
+    if formula in UNALLOCATED_FORMULAS:
+        raise AccountingError('FORMULA_LIVE_ALLOCATION_NOT_APPROVED')
 
 
 def validate_risk(value, formula=None):
@@ -42,6 +53,7 @@ def validate_risk(value, formula=None):
 def risk_for(state, source):
     formula = source['rule_id']
     life.ident(formula)
+    require_live_allocation(formula)
     for trade in state['trades'].values():
         if (trade.get('entry_risk', {}).get('formula') == formula
                 and not trade.get('settlement')

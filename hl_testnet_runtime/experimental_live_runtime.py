@@ -28,6 +28,7 @@ MODE = 'explicit_approved_mainnet_worker_v1'
 # These are expected candidate refusals, not permission to swallow corrupt
 # state, missing fields, ownership conflicts or an arbitrary implementation bug.
 LOCAL_ENTRY_REFUSALS = frozenset((
+    'FORMULA_LIVE_ALLOCATION_NOT_APPROVED',
     'FORMULA_NET_SETTLEMENT_PENDING', 'FORMULA_CAPITAL_EXHAUSTED',
     'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS', 'ASSET_NOT_FOUND',
     'ASSET_PRECISION_OR_LISTING_INVALID', 'ASSET_UNAVAILABLE',
@@ -174,6 +175,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             or context.get('account_entry_blocked', {}).get(account)
             or context.get('blocked_lanes', {}).get(_lane(account, msg['symbol'])))
         if reason:
+            self._retire_hype_capacity(state, cid, now, occupancy_reason=reason)
             _entry_decision(state, cid, context, now, reason)
             return None
         state.setdefault('entry_blocked', {}).pop(cid, None)
@@ -214,7 +216,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if trade['orders'] or trade['entry_fills'] or trade['exit_fills']:
                 raise RuntimeError('UNSENT_ENTRY_CONFLICTS_WITH_OBSERVED_EXPOSURE')
             attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-            retry = (reason in RETRYABLE_UNSENT and _source_active(state['sources'][cid], now)
+            retry = (not contract.is_hype_watch(trade['source'])
+                and reason in RETRYABLE_UNSENT and _source_active(state['sources'][cid], now)
                 and all(r['phase'] == 'ABORTED_UNSENT' and r.get('certified_unsent') is True
                     and r.get('unsent_reason') in RETRYABLE_UNSENT for r in attempts))
             trade['phase'] = 'RETRY_WAIT_UNSENT' if retry else 'CANCELED_WITHOUT_FILL'
@@ -393,6 +396,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         if context.get('basis_revision') != state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
         self._retire_suspended_sources(state, now)
+        for cid in state['sources']:
+            self._retire_hype_capacity(state, cid, now)
         from . import experimental_external_activity as external
         external.apply(state,context.get('external_observation'))
         accounts = context.get('inventory_accounts')

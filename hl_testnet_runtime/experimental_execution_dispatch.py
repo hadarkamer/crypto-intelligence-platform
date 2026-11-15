@@ -16,6 +16,7 @@ from . import card_lifecycle as life, filled_quantity_dispatch as wire
 from . import price_precision, risk_policy, two_account_execution as roles
 from . import experimental_execution_prices as execution_prices
 from . import doge_partial_execution as doge
+from . import hype_watch_execution as hype_watch
 from .filled_dispatch_store import DefinitelyUnsent
 from .long_stream_runtime import _validate_account_inventory
 
@@ -58,6 +59,9 @@ def _source(source, current, now, *, entry):
                 or latest['valid_until'] is not None and now >= contract.moment_ms(latest['valid_until'])
                 or latest['expires_at'] is not None and now >= contract.moment_ms(latest['expires_at'])):
             raise BoundaryError('ORIGINAL_SOURCE_WINDOW_EXPIRED')
+        if (hype_watch.is_hype(latest)
+                and not contract.moment_ms(latest['source_at']) <= now < contract.immediate_entry_deadline(latest)):
+            raise BoundaryError('HYPE_ORIGINAL_ENTRY_MINUTE_EXPIRED')
     return source
 
 
@@ -68,7 +72,8 @@ def _terms(request, source, metadata, *, formula_risk=None):
             or p['role'] != role or p['source_at'] != source['source_at']):
         raise BoundaryError('SOURCE_REQUEST_IDENTITY_MISMATCH')
     if p['operation'] in ('TIME_EXIT','PARTIAL_TAKE') and (
-            not doge.is_doge(source) or p.get('source_rule_id')!=source['rule_id']
+            not (doge.is_doge(source) or p['operation']=='TIME_EXIT' and hype_watch.is_hype(source))
+            or p.get('source_rule_id')!=source['rule_id']
             or p.get('source_version')!=source['version']):
         raise BoundaryError('EXACT_APPROVED_DOGE_IMMEDIATE_SOURCE_REQUIRED')
     prepared=execution_prices.prepare(source,metadata)
@@ -89,9 +94,13 @@ def _terms(request, source, metadata, *, formula_risk=None):
         wire.precise(o['p'],o['s'],decimals)
         levels=prepared['execution']
         if p['operation']=='ENTRY':
+            if hype_watch.is_hype(source):
+                from .formula_accounting import require_live_allocation
+                require_live_allocation(source['rule_id'])
             if (p['leg']!='ENTRY' or action['type']!='order' or o['r'] is not False
                     or o['b'] is not (source['side']=='LONG')
-                    or o['p']!=levels['entry'] or o['t']!={'limit':{'tif':('Gtc' if contract.is_approved(source) or source['family'] in ('maxpain','sol_g65') else 'Ioc')}}):
+                    or o['p']!=levels['entry'] or o['t']!={'limit':{'tif':('Ioc' if hype_watch.is_hype(source) else
+                        'Gtc' if contract.is_approved(source) or source['family'] in ('maxpain','sol_g65') else 'Ioc')}}):
                 raise BoundaryError('EXACT_FROZEN_ENTRY_ACTION_REQUIRED')
             # The live filled-quantity lane submits an entry before observed-fill
             # exits. Apply the SAME risk rule to an exact synthetic bracket;
@@ -108,7 +117,7 @@ def _terms(request, source, metadata, *, formula_risk=None):
                 or o['b'] is not (source['side']=='SHORT')):
             raise BoundaryError('REDUCE_ONLY_EXACT_OWNER_EXIT_REQUIRED')
         elif p['operation'] in ('EMERGENCY_CLOSE', 'TIME_EXIT'):
-            if p['operation']=='TIME_EXIT' and not doge.is_doge(source):
+            if p['operation']=='TIME_EXIT' and not (doge.is_doge(source) or hype_watch.is_hype(source)):
                 raise BoundaryError('DOGE_TIME_EXIT_CONTRACT_REQUIRED')
             if action['type']!='order' or p['leg']!='STOP' or o['t']!={'limit':{'tif':'Ioc'}}:
                 raise BoundaryError('EXACT_EMERGENCY_IOC_REQUIRED')
@@ -376,7 +385,13 @@ def review(request, context, *, now_ms):
                 take=life.number(prepared['execution']['take_profit'])
                 crossed=(mark<=stop or mark>=take) if source['side']=='LONG' else (mark>=stop or mark<=take)
                 if p['operation']=='TIME_EXIT':
-                    if not doge.timeout_due(source,now_ms):
+                    if hype_watch.is_hype(source):
+                        observed_entry_fills = [f for f in snap['fills']
+                            if f['oid'] in owner['orders']['ENTRY']]
+                        deadline = hype_watch.holding_deadline(source, observed_entry_fills)
+                        if deadline is None or now_ms < deadline:
+                            raise BoundaryError('HYPE_ACTUAL_FILL_HOLDING_DEADLINE_NOT_REACHED')
+                    elif not doge.timeout_due(source,now_ms):
                         raise BoundaryError('DOGE_HOLDING_DEADLINE_NOT_REACHED')
                 elif p['operation']=='PARTIAL_TAKE':
                     partial=life.number(doge.partial_price(source,decimals))
@@ -418,6 +433,10 @@ class DisabledDispatchPort:
             raise BoundaryError('ROLE_SIGNER_MISMATCH')
         admission.validate(value)
         action=deepcopy(first['action']); expires=value['nonce']+15000
+        if value['proposal']['operation'] == 'ENTRY':
+            entry_deadline = contract.immediate_entry_deadline(frozen['source'])
+            if entry_deadline is not None:
+                expires = min(expires, entry_deadline)
         signature=signer.sign(action,None,value['nonce'],expires,False)
         if action!=first['action']:
             raise BoundaryError('SIGNER_MUTATED_FROZEN_ACTION')

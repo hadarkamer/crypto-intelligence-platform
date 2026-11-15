@@ -22,6 +22,7 @@ from .risk_policy import budget, assert_new_entry_budget
 from .experimental_execution_prices import prepare as prepare_prices, entry_mark_allowed
 from . import experimental_shared_market as shared_market
 from . import doge_partial_execution as doge
+from . import hype_watch_execution as hype_watch
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
@@ -101,6 +102,9 @@ def _source_active(source, now):
     msg = source['source']
     if contract.entry_retirement_required(msg):
         return False
+    deadline = contract.immediate_entry_deadline(msg)
+    if deadline is not None and not contract.moment_ms(msg['source_at']) <= now < deadline:
+        return False
     if contract.is_approved(msg):
         return (source['entry_permission'] == 'WAITING' and source['cancellation'] is None
             and msg['kind'] == 'ALERT' and msg['source_state'] == 'APPROVED'
@@ -114,6 +118,9 @@ def _source_active(source, now):
 def _working_entry_active(source, now):
     """Initial delivery freshness is not a lease on an accepted GTC order."""
     if contract.entry_retirement_required(source['source']):
+        return False
+    deadline = contract.immediate_entry_deadline(source['source'])
+    if deadline is not None and now >= deadline:
         return False
     if contract.is_approved(source['source']):
         deadline = contract.pending_entry_deadline(source['source'])
@@ -175,6 +182,37 @@ class IsolatedExecutionRuntime:
                 state['events'].append(dict(at_ms=now,
                     kind='FORMULA_NEW_ENTRIES_SUSPENDED', occurrence_id=cid))
 
+    @staticmethod
+    def _retire_hype_capacity(state, cid, now, *, occupancy_reason=None):
+        """The first selected HYPE event cannot wait for its occupied lane.
+
+        Only already owned/unknown activity in this account and symbol is used;
+        no research occupancy model or guessed account-wide capacity is added.
+        """
+        source = state['sources'][cid]; msg = source['source']
+        if (not hype_watch.is_hype(msg) or not contract.new_entry_allowed(msg)
+                or source['entry_permission'] != 'WAITING' or cid in state['trades']):
+            return False
+        account = state['routes']['short_account']
+        from . import experimental_external_activity as external
+        occupied = (occupancy_reason in (shared_market.ENTRY_BLOCK, external.HUMAN,
+                external.OCCUPIED, 'LEGACY_PREDECESSOR_NOT_FINAL', 'MARKET_OUTCOME_UNKNOWN')
+            or external.managed(state, account, msg['symbol'])
+            or any(t['cid'] != cid and t['account'] == account and t['symbol'] == msg['symbol']
+                   and t['phase'] not in FINAL for t in state['trades'].values())
+            or any(r['proposal']['card_id'] != cid and r['proposal']['account'] == account
+                   and r['proposal']['symbol'] == msg['symbol']
+                   and r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
+                   for r in state['requests'].values()))
+        if not occupied:
+            return False
+        source.update(entry_permission='RETIRED',
+            terminal_reason='HYPE_FIRST_EVENT_CAPACITY_REJECTED',
+            revision=source['revision'] + 1, updated_at=contract.iso_ms(now))
+        state['events'].append(dict(at_ms=now, occurrence_id=cid,
+            kind='HYPE_FIRST_EVENT_CAPACITY_REJECTED'))
+        return True
+
     def _receive(self, messages, *, domain, status):
         """Shared transition; public workers choose a fixed persisted domain."""
         now = self.venue.now()
@@ -191,6 +229,8 @@ class IsolatedExecutionRuntime:
                         from . import sol_g65_conditional_stop
                         state['formula_states'][cid]=sol_g65_conditional_stop.initialize_from_contract(cid,msg)
                     state['events'].append(dict(at_ms=now, kind='SOURCE_'+msg['kind'], occurrence_id=cid))
+                changed = self._retire_hype_capacity(state, cid, now) or changed
+                source = state['sources'][cid]
                 receipts.append(dict(occurrence_id=cid,revision=source['revision'],status='RECORDED' if changed else 'DUPLICATE',record_only=True,entry_permission=source['entry_permission']))
             return dict(recorded=len(values),receipts=receipts,**status)
         return self.store.mutate_sources(transition, [m['occurrence_id'] for m in values])
@@ -320,7 +360,7 @@ class IsolatedExecutionRuntime:
             basis=life.digest(state['snapshots']),observed_at_ms=now)
         if operation == 'ENTRY' and trade.get('entry_risk'):
             proposal['entry_risk'] = deepcopy(trade['entry_risk'])
-        if doge.is_doge(trade['source']):
+        if doge.is_doge(trade['source']) or hype_watch.is_hype(trade['source']):
             proposal['source_rule_id'] = trade['source']['rule_id']
             proposal['source_version'] = trade['source']['version']
         return proposal
@@ -336,7 +376,8 @@ class IsolatedExecutionRuntime:
         serial = state.get('archived_request_count', 0) + len(state['requests'])
         c = '0x'+life.digest([VERSION,trade['cid'],leg,serial,price,quantity])[:32]
         order = dict(a=index,b=trade['side']=='LONG' if leg=='ENTRY' else trade['side']=='SHORT',p=price,s=quantity,
-            r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if contract.is_approved(trade['source']) or trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
+            r=leg!='ENTRY',t=dict(limit=dict(tif='Ioc' if hype_watch.is_hype(trade['source']) else
+                'Gtc' if contract.is_approved(trade['source']) or trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
                 if leg=='ENTRY' else dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=c)
         action = dict(type='order',orders=[order],grouping='na') if old_oid is None else dict(type='batchModify',modifies=[dict(oid=int(old_oid),order=order)])
         return self._proposal(state,trade,leg,action,quantity,now,operation='ENTRY' if leg=='ENTRY' else 'CREATE_EXIT' if old_oid is None else 'AMEND_EXIT')
@@ -401,6 +442,19 @@ class IsolatedExecutionRuntime:
                 continue
             active = [(oid,o) for oid,o in trade['orders'].items() if o['status']=='OPEN']
             remaining = _remaining(trade)
+            if hype_watch.timeout_due(trade, now):
+                trade['entry_retired_reason'] = 'HYPE_ACTUAL_FILL_HOLDING_DEADLINE'
+                for oid, row in active:
+                    if trade['order_legs'][oid] == 'ENTRY':
+                        return self._cancel(state, trade, oid, now)
+                if remaining:
+                    # Reuse the sole bounded reducing-IOC path. Its legacy
+                    # name does not alter order ownership or quantity checks.
+                    proposal = self._doge_ioc(state, trade, context, now,
+                        operation='TIME_EXIT', quantity=life.text(remaining))
+                    if proposal is not None:
+                        return proposal
+                    # A partial/exhausted close retains normal native exits.
             if remaining:
                 try:
                     trade['desired_stop'] = self._conditional(trade,context,now)
@@ -610,6 +664,7 @@ class IsolatedExecutionRuntime:
         risk_budget = budget()
         if approved and state.get('domain') == 'mainnet':
             from . import formula_accounting as accounting
+            accounting.require_live_allocation(msg['rule_id'])
             entry_risk = deepcopy(risk_snapshot) if risk_snapshot is not None else accounting.risk_for(state, msg)
             risk_budget = accounting.validate_risk(entry_risk, msg['rule_id'])
         if approved:
@@ -693,6 +748,12 @@ class IsolatedExecutionRuntime:
             trade['execution_audit'] = dict(approved_at=msg['approved_at'],
                 received_at=source['created_at'], entry_decision_at_ms=now,
                 prices=deepcopy(prepared['audit']))
+            if hype_watch.is_hype(msg):
+                trade['execution_audit'].update(entry_mode='NEXT_FULL_MINUTE_IOC',
+                    research_reference_at_ms=contract.moment_ms(msg['source_at']),
+                    original_entry_deadline_ms=contract.immediate_entry_deadline(msg),
+                    holding_clock='FIRST_ACTUAL_ENTRY_FILL',
+                    holding_time_limit_ms=contract.position_holding_limit_ms(msg))
         if entry_risk is not None:
             trade['entry_risk'] = entry_risk
         if doge.is_doge(msg):
@@ -776,6 +837,8 @@ class IsolatedExecutionRuntime:
         if context.get('basis_revision')!=state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
         self._retire_suspended_sources(state, now)
+        for cid in state['sources']:
+            self._retire_hype_capacity(state, cid, now)
         if (context.get('inventory_complete') is not True or context.get('inventory_accounts')!=sorted(state['routes'].values())
                 or type(context.get('inventory_at_ms')) is not int or not 0<=now-context['inventory_at_ms']<=15000):
             raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')

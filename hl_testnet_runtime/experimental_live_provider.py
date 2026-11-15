@@ -89,7 +89,12 @@ def _original_stop_needed(state, trade):
 def _fixed_exits_stable(trade, now):
     """Skip quotes only while every frozen exit covers its exact owned share."""
     from . import doge_partial_execution as partial
+    from . import hype_watch_execution as hype_watch
     if trade['source']['family'] in ('r2732','sol_g65') or runtime._remaining(trade)<=0:
+        return False
+    if hype_watch.timeout_due(trade, now):
+        # A due position close needs the existing shared fresh mark, even while
+        # native protection is complete. Before its deadline no quote is added.
         return False
     active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
             if order['status']=='OPEN']

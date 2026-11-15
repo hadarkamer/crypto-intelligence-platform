@@ -336,9 +336,12 @@ def identity(raw, request, now_ms):
         # turn an arbitrary legacy STOP or TP into an immediate order.
         import approved_alert_contract as approved
         from .doge_partial_execution import RULE
-        if (p.get('source_version')!=approved.VERSION or p.get('source_rule_id')!=RULE
-                or p['symbol']!='DOGE'
-                or leg!=('STOP' if p['operation']=='TIME_EXIT' else 'TAKE_PROFIT')
+        from .hype_watch_execution import RULE as HYPE_WATCH_RULE
+        identity = (p.get('source_rule_id'), p['symbol'], p['operation'], leg)
+        allowed = ((RULE, 'DOGE', 'TIME_EXIT', 'STOP'),
+                   (RULE, 'DOGE', 'PARTIAL_TAKE', 'TAKE_PROFIT'),
+                   (HYPE_WATCH_RULE, 'HYPE', 'TIME_EXIT', 'STOP'))
+        if (p.get('source_version')!=approved.VERSION or identity not in allowed
                 or expected['r'] is not True or expected['t']!={'limit':{'tif':'Ioc'}}):
             raise DispatchError('EXACT_APPROVED_DOGE_IMMEDIATE_INTENT_REQUIRED')
         immediate=True

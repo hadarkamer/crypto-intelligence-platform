@@ -190,6 +190,10 @@ class LiveDispatchPort:
                 from hyperliquid.utils.signing import sign_l1_action
                 action = deepcopy(first['action'])
                 expires = value['nonce'] + 15000
+                if p['operation'] == 'ENTRY':
+                    entry_deadline = boundary.contract.immediate_entry_deadline(context['source'])
+                    if entry_deadline is not None:
+                        expires = min(expires, entry_deadline)
                 signature = _signature(sign_l1_action(wallet, action, None, value['nonce'], expires, True))
             except Exception:
                 raise LiveDispatchError('ROLE_LOCAL_SIGNING_FAILED') from None

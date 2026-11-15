@@ -40,7 +40,10 @@ FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
 # Explicit source adapters, not a configurable formula interpreter. Historical
 # CT009 research symbols remain readable; operational admission is six only.
 CT009_SYMBOLS = frozenset(('BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'HYPE'))
+HYPE_WATCH_RULE = 'HYPE_WATCH_LIQ4050_24H_INVERSE'
+HYPE_WATCH_FAMILY = 'hype_watch_liq4050'
 SELECTED_FORMULAS = {
+    HYPE_WATCH_FAMILY: (HYPE_WATCH_RULE, frozenset(('HYPE',))),
     'sol_sff1361': ('SFF1361_SOL_RECENT', frozenset(('SOL',))),
     'oconf0034_13': ('OCONF0034_13', CT009_SYMBOLS),
     'ct009': ('CT009_FROZEN_3D', CT009_SYMBOLS | frozenset(('BNB', 'ZEC'))),
@@ -51,6 +54,11 @@ SELECTED_PROOF_FIELDS = PROOF_FIELDS | frozenset((
     'decision_at', 'data_available_at', 'reference_at', 'reference_price', 'source_target'))
 SELECTED_PENDING_POLICY_FIELDS = POLICY_FIELDS | frozenset((
     'pending_expires_at', 'cancel_before_fill_price'))
+HYPE_WATCH_POLICY_FIELDS = POLICY_FIELDS | frozenset((
+    'entry_expires_at', 'holding_time_limit_ms'))
+# New HYPE is parseable for isolated acceptance only. It is intentionally absent
+# from admission until its live allocation and activation are explicitly approved.
+
 # Operational activation decision 2026-11-15. Historical contracts stay readable;
 # pausing admission does not revoke management of already filled positions.
 NEW_ENTRY_IDENTITIES = frozenset((
@@ -82,6 +90,21 @@ def new_entry_roster():
                  symbols=sorted(symbol for f, r, symbol in NEW_ENTRY_IDENTITIES
                                 if (f, r) == (family, rule)))
             for family, rule in sorted({(f, r) for f, r, _ in NEW_ENTRY_IDENTITIES})]
+
+
+def is_hype_watch(message):
+    return (is_approved(message) and message.get('family') == HYPE_WATCH_FAMILY
+            and message.get('rule_id') == HYPE_WATCH_RULE and message.get('symbol') == 'HYPE')
+
+
+def immediate_entry_deadline(message):
+    """A fixed live-entry minute, not an order wait or position holding limit."""
+    return moment_ms(message['policy']['entry_expires_at']) if is_hype_watch(message) else None
+
+
+def position_holding_limit_ms(message):
+    """Measured from the first proved actual fill, never a historical candle fill."""
+    return message['policy']['holding_time_limit_ms'] if is_hype_watch(message) else None
 
 
 def pending_entry_deadline(message):
@@ -159,7 +182,8 @@ def _validate_selected_formula(value, times):
     if family != 'oconf0034_13':
         require(reference == (available // 60_000 + 1) * 60_000,
                 'SELECTED_FORMULA_NEXT_AVAILABLE_MINUTE')
-    allowed_tf = (('30m',) if family == 'sol_sff1361' else
+    allowed_tf = (('24h',) if family == HYPE_WATCH_FAMILY else
+        ('30m',) if family == 'sol_sff1361' else
         ('48h', '3d') if family == 'ct009' else
         (*legacy.TIMEFRAMES, 'ALL6') if family == 'oconf0034_13' else legacy.TIMEFRAMES)
     require(proof['timeframe'] in allowed_tf, 'SELECTED_FORMULA_TIMEFRAME')
@@ -168,7 +192,19 @@ def _validate_selected_formula(value, times):
     with localcontext() as ctx:
         ctx.prec = 60
         p = positive(proof['reference_price'])
-        if family == 'sol_sff1361':
+        if family == HYPE_WATCH_FAMILY:
+            legacy._keys(policy, HYPE_WATCH_POLICY_FIELDS, 'HYPE_WATCH_POLICY')
+            require(proof['source_target'] is None and value['original_target'] is None,
+                    'HYPE_WATCH_TARGET_IS_FIXED_RETURN')
+            require(moment_ms(policy['entry_expires_at']) == reference + 60_000
+                    and times['approved_at'] < reference + 60_000
+                    and type(policy['holding_time_limit_ms']) is int
+                    and policy['holding_time_limit_ms'] == 86_400_000,
+                    'HYPE_WATCH_LIVE_CLOCKS')
+            expected_policy.update(entry_kind='NEXT_FULL_MINUTE_IOC',
+                entry_expires_at=policy['entry_expires_at'], holding_time_limit_ms=86_400_000)
+            entry, stop, take = p, p * Decimal('1.02'), p * Decimal('.98')
+        elif family == 'sol_sff1361':
             legacy._keys(policy, POLICY_FIELDS, 'SELECTED_FORMULA_POLICY')
             require(proof['source_target'] is None and value['original_target'] is None,
                     'SELECTED_FORMULA_TARGET')
@@ -234,7 +270,9 @@ def _validate_approved(message):
     require(times['source_at'] <= times['created_at'] <= times['approved_at']
             and times['arm_at'] == times['approved_at']
             and (value['family'] in SELECTED_FORMULAS or times['approved_at'] % 60_000 == 0)
-            and times['expires_at'] == times['approved_at'] + LEASE_MS
+            and times['expires_at'] == (min(times['approved_at'] + LEASE_MS,
+                times['source_at'] + 60_000) if value['family'] == HYPE_WATCH_FAMILY
+                else times['approved_at'] + LEASE_MS)
             and times['source_as_of'] >= times['approved_at'], 'APPROVED_ALERT_TIMES')
     require(value['valid_until'] is None, 'APPROVED_ALERT_HAS_NO_HEARTBEAT_LEASE')
     require(type(value['source_sequence']) is int and value['source_sequence'] ==
