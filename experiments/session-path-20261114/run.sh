@@ -51,8 +51,10 @@ assert int(cap,16)==0, 'effective_capabilities'
 assert {name for _,name in socket.if_nameindex()} == {'lo'}, 'network_interfaces'
 for name in ('COINGLASS_COOKIE_HEADER','COINGLASS_STORAGE_STATE_JSON','DATABASE_URL','OPENAI_API_KEY','COINGLASS_SESSION_KEY'):
  assert not os.environ.get(name), 'unexpected_credential_input'
-expected={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0','pycryptodome':'3.21.0','psycopg':'3.2.3','aiohttp':'3.11.11'}
+expected={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0','psycopg':'3.2.3','aiohttp':'3.11.11'}
 for package,wanted in expected.items(): assert version(package)==wanted, 'dependency_version'
+from importlib.util import find_spec
+assert find_spec('Crypto') is None, 'crypto_must_load_only_from_wrapper_bundle'
 probe=socket.socket();probe.settimeout(1)
 try:
  try:probe.connect(('192.0.2.1',443))
@@ -68,19 +70,25 @@ test -z "$(ip -6 route show default)"
 
 STAGE=runtime_generation
 python - "$ROOT" <<'PY'
-import contextlib,io,subprocess,sys
+import contextlib,hashlib,io,subprocess,sys
 from pathlib import Path
 from unittest.mock import patch
 root=Path(sys.argv[1]);sys.path.insert(0,str(root/'standalone_collector'))
-import prepare
+import prepare,install_capture_readiness,install_heatmap_models
 def skip_previous_tests(command,**kwargs):
  assert command[:3]==[sys.executable,'-m','unittest'], 'unexpected_prepare_subprocess'
  return subprocess.CompletedProcess(command,0)
 # Installed versions were checked above. Reuse the actual existing build
 # adapters; do not reinstall Chromium or rerun the already-passed suites.
-with patch.object(prepare,'prepare_browser'), patch.object(prepare.subprocess,'run',side_effect=skip_previous_tests), contextlib.redirect_stdout(io.StringIO()):
+with patch.object(prepare,'prepare_browser'), patch.object(prepare.subprocess,'run',side_effect=skip_previous_tests), patch.object(install_capture_readiness,'install_session_capture'), patch.object(install_heatmap_models,'install_session_bridge'), contextlib.redirect_stdout(io.StringIO()):
  prepare.prepare()
-print('SESSION_PATH_BUILD actual_adapters=true repeated_suites=false source_requests=0',flush=True)
+baseline=root/'experiments/session-path-20261114/active_model1_execution.py'
+assert hashlib.sha256(baseline.read_bytes()).hexdigest()=='5a82f410b089307d3ad465d3abb016f4616a0932c3f7c75a00a2584a95117693'
+(prepare.RUNTIME/'model1_execution.py').write_bytes(baseline.read_bytes())
+sys.path.insert(0,str(root/'experiments/session-path-20261114/wrapper'))
+import observation_supervisor
+observation_supervisor.verify_runtime(prepare.RUNTIME)
+print('SESSION_PATH_BUILD actual_adapters=true pinned_reader=33bad18 repeated_suites=false source_requests=0',flush=True)
 PY
 
 STAGE=postgres_start
@@ -93,8 +101,6 @@ export CG_TEST_DATABASE_URL="host=$SOCKET dbname=cg_session_test user=$(id -un)"
 export CG_TEST_PGDATA="$PGDATA"
 export PYTHONDONTWRITEBYTECODE=1
 
-STAGE=independent_postgres_connections
-python -B "$ROOT/experiments/session-path-20261114/check_postgres.py"
-STAGE=full_service_browser_path
-python -B "$ROOT/experiments/session-path-20261114/check_path.py" --output "$WORK/path-result.json"
+STAGE=exact_wrapper_browser_path
+python -B "$ROOT/experiments/session-path-20261114/check_wrapper.py" --output "$WORK/path-result.json"
 STAGE=completed

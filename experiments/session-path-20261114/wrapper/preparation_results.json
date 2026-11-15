@@ -1,0 +1,34 @@
+{
+  "scope": "isolated_exact_wrapper_command_with_explicit_boundaries",
+  "tests_passed": 12,
+  "elapsed_seconds": 7.749,
+  "actual_sigterm_cases": [
+    "during_begin_before_source",
+    "after_source_child_started"
+  ],
+  "owned_processes_remaining": 0,
+  "owned_temporary_directories_remaining": 0,
+  "source_requests": 0,
+  "browser_launches": 0,
+  "real_database_connections": 0,
+  "production_writes": 0,
+  "candidate_modules_unchanged": true,
+  "substituted_boundaries": [
+    "HTTP health",
+    "Playwright metadata",
+    "PostgreSQL/store service",
+    "source browser/page",
+    "unavailable local kernel census"
+  ],
+  "real_components": [
+    "entry subprocess and argv",
+    "worker procfs identity/environment",
+    "runtime and package hashes",
+    "supervisor and keeper subprocesses",
+    "candidate ManagedSession",
+    "candidate SessionTransport and private pipe",
+    "candidate CaptureSession with dummy page",
+    "PyCryptodome version and AES import except negative test",
+    "SIGTERM cancellation and cleanup"
+  ]
+}
