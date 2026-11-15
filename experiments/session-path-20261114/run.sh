@@ -87,7 +87,8 @@ assert hashlib.sha256(baseline.read_bytes()).hexdigest()=='5a82f410b089307d3ad46
 (prepare.RUNTIME/'model1_execution.py').write_bytes(baseline.read_bytes())
 sys.path.insert(0,str(root/'experiments/session-path-20261114/wrapper'))
 import observation_supervisor
-observation_supervisor.verify_runtime(prepare.RUNTIME)
+for name, expected in observation_supervisor.RUNTIME_HASHES.items():
+ assert hashlib.sha256((prepare.RUNTIME/name).read_bytes()).hexdigest()==expected, 'runtime_hash_mismatch'
 print('SESSION_PATH_BUILD actual_adapters=true pinned_reader=33bad18 repeated_suites=false source_requests=0',flush=True)
 PY
 
