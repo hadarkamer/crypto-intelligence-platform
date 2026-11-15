@@ -122,6 +122,8 @@ class Row71205Worker:
     def status(self):
         return {**deepcopy(self.runtime), "running": bool(self.task and not self.task.done()),
                 "delivery_allowed_by_profile": policy.hype_row71205_experimental_enabled(),
+                "new_entries_enabled": policy.hype_row71205_experimental_enabled(),
+                "retired_monitor_only": "HYPE_ROW71205_SHORT" in policy.RETIRED_EXPERIMENTAL_RULES,
                 "overlap_cap": 1, "decision_step_minutes": 30,
                 "stop_pct": .5, "take_pct": 2, "profit_lock": False,
                 "price_source": PRICE_SOURCE,
@@ -186,7 +188,7 @@ class Row71205Worker:
                       f"retry_at={self.runtime['next_retry_at']}", flush=True)
             await asyncio.sleep(10)
 
-    async def monitor(self, scope, state, closed_end):
+    async def monitor(self, scope, state, closed_end, *, retired=False):
         active = state.get("active")
         # Bounded recovery after an outage; no new entry while recovery is incomplete.
         if active and active.get("monitor_status") != "AMBIGUOUS":
@@ -196,8 +198,14 @@ class Row71205Worker:
                 rows = await self.prices("fill", "HYPE", start, end)
                 bars = [{"open_at": dt(r[0]), "open": r[1], "high": r[2],
                          "low": r[3], "close": r[4]} for r in rows]
-                await self.db(store.advance_position, scope, bars, dt(self.clock()),
-                              position_id=active["position_id"])
+                if retired:
+                    # Preserve the known frozen source configuration while
+                    # draining an old observation; retirement cannot migrate it.
+                    await asyncio.to_thread(store.advance_position, scope, bars, dt(self.clock()),
+                        position_id=active["position_id"], config_sha256=state["config_sha256"])
+                else:
+                    await self.db(store.advance_position, scope, bars, dt(self.clock()),
+                                  position_id=active["position_id"])
                 state = await asyncio.to_thread(store.snapshot, scope)
         self.runtime.update(active_position=state.get("active"),
                             activated_at=state["activated_at"],
@@ -251,12 +259,29 @@ class Row71205Worker:
             self.runtime["last_delivery_at"] = dt(self.clock()).isoformat()
         print(f"[hype71205] delivery status={terminal}", flush=True)
 
+    async def drain_retired(self, scope):
+        slot = (scope, self.clock() // MINUTE)
+        if self.last_poll_minute == slot:
+            return
+        state = await self.db(store.retire_scope, scope, dt(self.clock()))
+        if state is not None:
+            closed_end = self.clock() // MINUTE * MINUTE
+            state = await self.monitor(scope, state, closed_end, retired=True)
+        self.last_poll_minute = slot
+        self.runtime.update(ready=True, last_error_type=None, last_error_code=None,
+            next_retry_at=None,
+            state="RETIRED_MONITORING" if state and state.get("active") else "RETIRED",
+            active_position=state.get("active") if state else None)
+
     async def tick(self):
         enabled, chat_id = self.subscription()
         if chat_id is None:
             self.runtime.update(state="WATCH_OFF")
             return
         scope = subscription_scope(chat_id)
+        if "HYPE_ROW71205_SHORT" in policy.RETIRED_EXPERIMENTAL_RULES:
+            await self.drain_retired(scope)
+            return
         allowed = self.allowed(chat_id)
         if scope not in self.scopes:
             if not allowed:

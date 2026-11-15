@@ -173,6 +173,9 @@ def approve_state(state, decision, metadata, now_ms):
     # JSON roundtrip normalizes dataclass tuples to the representation read
     # from PostgreSQL; it does not change any numeric string or source value.
     p = json.loads(json.dumps(decision.to_dict() if hasattr(decision, 'to_dict') else decision))
+    import alert_delivery_policy
+    if not alert_delivery_policy.selected_rule_enabled(p['formula_id']):
+        return dict(created=False, reason='FORMULA_DISABLED')
     existing = next((x for x in state['intents'] if x['intent_id'] == p['event_id']), None)
     if existing is not None:
         frozen = existing['decision']
@@ -181,9 +184,6 @@ def approve_state(state, decision, metadata, now_ms):
         if any(frozen[k] != p[k] for k in p if k != 'decision_ms'):
             raise ValueError('selected formula decision revision')
         return dict(created=False, envelope=deepcopy(existing['payload']), intent=deepcopy(existing))
-    import alert_delivery_policy
-    if not alert_delivery_policy.selected_rule_enabled(p['formula_id']):
-        return dict(created=False, reason='FORMULA_DISABLED')
     if p['source_received_at_ms'] <= state['activated_ms']:
         return dict(created=False, reason='BEFORE_ACTIVATION')
     value = envelope(p, metadata, now_ms)
@@ -246,12 +246,34 @@ def claim(conn, scope, now_ms):
     state = load(conn, scope, locked=True)
     if state is None:
         return None
+    apply_entry_policy(state, now_ms)
     prune(state, now_ms)
     pending = next((x for x in state['intents'] if x['status'] == 'PENDING'), None)
     if pending is not None:
         pending.update(status='IN_FLIGHT', attempted_ms=now_ms, attempt_token=uuid4().hex)
     save(conn, scope, state)
     return deepcopy(pending)
+
+
+def apply_entry_policy(state, now_ms):
+    """Retire approvals only; the manager owns entry remainder cancellation.
+
+    Historical decisions and outbox identities are retained. A source CANCEL
+    never asserts an exchange cancellation or changes a filled position.
+    """
+    import alert_delivery_policy
+    for identity, item in list(state['candidates'].items()):
+        if not alert_delivery_policy.selected_rule_enabled(item['formula_id']):
+            del state['candidates'][identity]
+            count(state, 'policy_retired_candidates')
+    for position in list(state['active']):
+        if not alert_delivery_policy.selected_rule_enabled(position['rule_id']):
+            cancel_state(state, position['position_id'], 'FORMULA_NEW_ENTRIES_DISABLED', now_ms)
+    for intent in state['intents']:
+        if (intent['status'] == 'PENDING'
+                and not alert_delivery_policy.selected_rule_enabled(intent['payload']['rule_id'])):
+            intent.update(status='CANCELED', acknowledged_ms=now_ms)
+            count(state, 'policy_retired_notifications')
 
 
 def finish(conn, scope, intent_id, attempt_token, status, now_ms):

@@ -110,6 +110,7 @@ def map_watch_capture(score_bundle, decision_bundle, raw_snapshot, received_at_m
     """
     import research_watch_decision_capture as capture
     import research_watch_score_capture as scores
+    import alert_delivery_policy
     cycle = score_bundle['cycle_id']
     capture.validate_bundle(decision_bundle, score_bundle, cycle_id=cycle,
         available_at_utc=datetime.fromtimestamp(received_at_ms / 1000, timezone.utc))
@@ -120,6 +121,8 @@ def map_watch_capture(score_bundle, decision_bundle, raw_snapshot, received_at_m
     for symbol in sorted(rules.CT009_SYMBOLS):
         coin, decisions = score_bundle['coins'][symbol], decision_bundle['coins'][symbol]
         for item in decisions['prepared_items']:
+            if not alert_delivery_policy.selected_rule_enabled(rules.OCONF0034_13):
+                break
             if item['side'] != 'LONG' or item['maxpain_confirmation'].get('status') not in ('CONFIRMED', 'STRONG_CONFIRMED'):
                 continue
             identity = cycle + ':' + item['item_id']
@@ -226,6 +229,7 @@ def capture_watch(conn, scope, score_bundle, decision_bundle, raw_snapshot, rece
     mapped = map_watch_capture(score_bundle, decision_bundle, raw_snapshot, received_at_ms)
     store.initialize(conn, scope, received_at_ms)
     state = store.load(conn, scope, locked=True)
+    store.apply_entry_policy(state, received_at_ms)
     store.prune(state, received_at_ms)
     for record in mapped['confirmations']:
         target = record['inputs']['target_price']
@@ -297,6 +301,9 @@ def _capture_candidates(state, candidates):
 
 def read_delivered(conn, state, now_ms):
     """Finite source history, once for all six coins; no high-water replay bug."""
+    import alert_delivery_policy
+    if not alert_delivery_policy.selected_rule_enabled(rules.CT009):
+        return 0
     rows = conn.execute('SELECT event_id,symbol,direction,timeframe,event_kind,event_type,delivery_status,'
         'capture_stage,alert_time_utc,delivered_at_utc,created_at,target_price,score,'
         "(SELECT COALESCE(jsonb_object_agg(field.key,field.value),'{}'::jsonb) "
@@ -525,6 +532,7 @@ def tick(scopes, *, database_url=None, fetch=None, clock_ms=None, connect=None):
             with connect(database_url) as conn:
                 store.initialize(conn, scope, now)
                 state = store.load(conn, scope, locked=True)
+                store.apply_entry_policy(state, now)
                 store.retire_acknowledged(conn, scope, state, now)
                 store.prune(state, now)
                 try:

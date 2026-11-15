@@ -261,6 +261,34 @@ def snapshot(scope, *, database_url=None):
         return state
 
 
+
+def retire_scope(scope, now, *, config_sha256=None, database_url=None):
+    """Withdraw only unsent notices; retain old observations and uncertain sends.
+
+    Retirement never initializes, migrates or clears a position. The execution
+    manager independently withdraws only proven unfilled entry remainders.
+    """
+    key, moment = key_for(scope), utc(now)
+    with source_transaction(_connect, database_url) as (conn, execution_changes):
+        _lock(conn, key)
+        row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
+        if row is None:
+            return None
+        state = json.loads(row['value'])
+        _validate(state)
+        if state.get('config_sha256') not in {config_sha256, LEGACY_MIXED_SOURCE_CONFIG_SHA256}:
+            raise ValueError('ROW71205 frozen configuration hash mismatch; retirement cannot migrate')
+        before = _encode(state)
+        for intent in state['intents']:
+            if intent['status'] == 'PENDING':
+                intent.update(status='CANCELLED', acknowledged_at=iso(moment), error_type='FORMULA_RETIRED')
+                _count(state, 'retired_notifications')
+        _maintain(state, moment)
+        if _encode(state) != before:
+            _save(conn, key, state, moment, execution_changes)
+        return deepcopy(state)
+
+
 def _decision_status(state, decision, now):
     if decision.second or decision.microsecond or decision.minute % 30:
         raise ValueError('ROW71205 decision must be on a UTC 30-minute boundary')
@@ -309,6 +337,9 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
     with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)
         state = _locked(conn, key, config_sha256)
+        import alert_delivery_policy
+        if not alert_delivery_policy.hype_row71205_experimental_enabled():
+            return {'status': 'FORMULA_RETIRED', 'position': deepcopy(state['active']), 'intent': None}
         _maintain(state, moment)
         status = _decision_status(state, decision, moment)
         if status is not None:
@@ -448,6 +479,9 @@ def advance_position(scope, closedbars, now, *, position_id=None, config_sha256=
 
 def claim_pending(scope, now, *, expected_position_id=None, config_sha256=None, database_url=None):
     """Commit the unique attempt token before the caller contacts Telegram."""
+    import alert_delivery_policy
+    if not alert_delivery_policy.hype_row71205_experimental_enabled():
+        return None
     moment = utc(now)
     with source_transaction(_connect, database_url) as (conn, execution_changes):
         key = key_for(scope)

@@ -12,8 +12,7 @@ from manual_formula_alert_store_selftest import BASE, c1274_bundle, c1274_refere
 
 _STRICT_MANUAL_RULE_ENABLED = policy.manual_rule_enabled
 _EXPECTED = {
-    'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'HYPE_ROW71205_SHORT',
-    'SFF1361_SOL_RECENT', 'OCONF0034_13', 'CT009_FROZEN_3D',
+    'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'SFF1361_SOL_RECENT',
     'XRP_LIQUIDITY_RAW_INVERSE',
 }
 
@@ -26,7 +25,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertFalse(policy.other_experimental_alerts_enabled())
                 self.assertFalse(policy.u21_experimental_enabled())
                 self.assertTrue(policy.xrp_r2732_experimental_enabled())
-                self.assertTrue(policy.hype_row71205_experimental_enabled())
+                self.assertFalse(policy.hype_row71205_experimental_enabled())
                 self.assertFalse(policy.sol_proximity_experimental_enabled())
                 self.assertFalse(policy.sol_g65_experimental_enabled())
                 self.assertEqual(set(policy.status()['selected_experimental_rule_ids']), _EXPECTED)
@@ -34,7 +33,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertTrue(policy.status()['configuration_valid'])
                 for rule in policy.MAXPAIN_COMPONENT_RULES:
                     self.assertTrue(policy.maxpain_component_experimental_enabled(rule))
-                for rule in policy.RETIRED_EXPERIMENTAL_RULES | {'unknown'}:
+                for rule in policy.RETIRED_EXPERIMENTAL_RULES | policy.PAUSED_EXPERIMENTAL_RULES | {'unknown'}:
                     self.assertFalse(policy.selected_rule_enabled(rule))
                     self.assertFalse(policy.maxpain_component_experimental_enabled(rule))
                     self.assertFalse(policy.manual_rule_enabled(rule))
@@ -48,7 +47,7 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.u21_experimental_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['roster_version'], 'owner-selected-six-20261114-v6')
+            self.assertEqual(policy.status()['roster_version'], 'owner-selected-three-20261115-v7')
             self.assertTrue(policy.ordinary_alerts_enabled())
 
     def test_unknown_profile_fails_closed(self):

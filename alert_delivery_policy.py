@@ -7,18 +7,18 @@ from __future__ import annotations
 
 import os
 
-ROSTER_VERSION = "owner-selected-six-20261114-v6"
+ROSTER_VERSION = "owner-selected-three-20261115-v7"
 SELECTED_MANUAL_RULES = frozenset()
 MAXPAIN_COMPONENT_RULES = frozenset()
 SELECTED_EXPERIMENTAL_RULES = frozenset((
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK',
-    'HYPE_ROW71205_SHORT',
     'SFF1361_SOL_RECENT',
-    'OCONF0034_13',
-    'CT009_FROZEN_3D',
     'XRP_LIQUIDITY_RAW_INVERSE',
 )) | MAXPAIN_COMPONENT_RULES
+# A later repair does not resume a paused rule; only a reviewed roster change can.
+PAUSED_EXPERIMENTAL_RULES = frozenset(('CT009_FROZEN_3D', 'OCONF0034_13'))
 RETIRED_EXPERIMENTAL_RULES = frozenset((
+    'HYPE_ROW71205_SHORT',
     'SOL_G65_K49_PROFIT_LOCK', 'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
     'SOL_MAXPAIN_DIST1_3_RANGE24', 'HYPE_MAXPAIN_DIST05_15_LONG_TF',
     'DOGE_MAXPAIN_DIST15_25_LONG_TF', 'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
@@ -94,6 +94,7 @@ def status():
             'sol_g65_experimental_enabled': sol_g65_experimental_enabled(),
             'selected_experimental_rule_ids': (sorted(SELECTED_EXPERIMENTAL_RULES)
                                                if current in _PROFILES else []),
+            'paused_experimental_rule_ids': sorted(PAUSED_EXPERIMENTAL_RULES),
             'retired_experimental_rule_ids': sorted(RETIRED_EXPERIMENTAL_RULES),
             'manual_rule_allowlist': []}
 
