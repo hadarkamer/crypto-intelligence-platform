@@ -66,7 +66,8 @@ def validate_state(value: dict, *, now: float | None = None) -> dict:
                 raise ValueError()
             if any(type(cookie.get(k)) is not bool for k in ('httpOnly', 'secure')):
                 raise ValueError()
-            if cookie.get('sameSite') not in ('Strict', 'Lax', 'None'):
+            # Preserve an omitted SameSite rather than inventing a policy.
+            if 'sameSite' in cookie and cookie['sameSite'] not in ('Strict', 'Lax', 'None'):
                 raise ValueError()
             expires = cookie.get('expires')
             if type(expires) not in (int, float) or not math.isfinite(expires):

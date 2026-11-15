@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from model1_execution import StageFailure
-from session_state import STATE_LIMIT, SessionStateError, validate_state
+from session_state import COOKIE_FIELDS, STATE_LIMIT, SessionStateError, validate_state
 
 FRAME_LIMIT = STATE_LIMIT + 1024
 ACCOUNT_URL = 'https://capi.coinglass.com/coin-community/api/userapi/info'
@@ -144,7 +144,23 @@ class CaptureSession:
                        for cookie in self.state['cookies']} | {
             'https://www.coinglass.com/pro/futures/LiquidationHeatMap', ACCOUNT_URL,
             'https://fapi.coinglass.com/coin-community/api/user/web/session'})
-        cookies = context.cookies(urls=urls)
+        # Playwright 1.55 context.cookies() supplies "Lax" when Chromium
+        # omits SameSite. Persist Chromium's actual optional attribute instead;
+        # otherwise a second load would turn an unspecified policy into Lax.
+        # This scoped CDP read makes no HTTP request and installs no listener.
+        session = context.new_cdp_session(self.page)
+        try:
+            raw = session.send('Network.getCookies', {'urls': urls})
+            cookies = raw['cookies']
+            if not isinstance(cookies, list): raise ValueError()
+            for cookie in cookies:
+                if (not isinstance(cookie, dict) or cookie.get('partitionKey') is not None
+                        or cookie.get('partitionKeyOpaque') is True):
+                    raise ValueError()
+            cookies = [{key: value for key, value in cookie.items() if key in COOKIE_FIELDS}
+                       for cookie in cookies]
+        finally:
+            session.detach()
         # Natural renewal can introduce a new cookie name or switch from a
         # parent-domain cookie to a host-only cookie. Keep valid CoinGlass
         # cookies returned by these scoped URLs, not only initial identities.

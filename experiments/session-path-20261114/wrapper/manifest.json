@@ -2,18 +2,17 @@
   "candidate_id": "coinglass-session-reuse-20261114-preparation",
   "base_wrapper": "coinglass-session-restore-20261113-preparation",
   "active_code_target": "33bad18f8be322009108584a6b71f3d65fa9b351",
-  "product_candidate": "ace67103638375679c93552204e1573c2b5cb4f5",
   "files": {
     "README.md": "c9666bf203986dfe2a3848bbfbc9b50c0b4e247c8e71d2ae1291e42c6edfacc7",
-    "approved_entry.py": "e0dc7ac64278de98e404bc00316d9218793840834f25d994e9903f0af87f98a5",
+    "approved_entry.py": "6e0fdc8c0c166f0877ccf6f747241173140c2c86e2f6b8a6d6325993159f42eb",
     "collector_browser_fixture.py": "b0189e753e5219feb180b20aa5388386d9743932f69ca29b6c1a205170c124ed",
     "observation_supervisor.py": "dcc206ae70b91f5c39e47473dd102e1872216d1055427dfd6d0af9d3caf6c4a7",
     "preparation_results.json": "02843fbd5ad50d18f6163265091ec08e176e846426a6bb17217762248950b52b",
-    "session_capture.py": "3544546386fc701e89656260d3d106e0a39557a31b6c96a7338e5d746f0d66ab",
-    "session_restore_state.py": "f4fefa446c64a064e5354454d186cd7e269639b36e71a837ba72ee3e0e0cc3a0",
+    "session_capture.py": "f00fa21e46654e4af8a074f1a8ca6e7435b0b2153db32a0ae876c54b85990783",
+    "session_restore_state.py": "5d9b0c37e2d06c1a870254c6959e376c2dfd8e6a7b603fc34a52416016cdf465",
     "session_runtime.py": "327b324d6e48655ae77d62b63a7704603b7ee6242db706cd1948c0c69d2b1aae",
-    "session_state.py": "dd64ffcfe432805f71863b389f68ec8d3f10f1a84524cf9f7153df97732c0760",
-    "test_reuse_preflight.py": "edbd5f4d34c97519d8fbf22af6a90ccda4567e12f919f3cf0c55dfa3c522e56b"
+    "session_state.py": "7c4a1f19e42bbc02f422c315bdf538bd4c33dc0153431d7e442a689f7829eb29",
+    "test_reuse_preflight.py": "43261c9982ab3233c6c3b611f74ba5a86ffa7affe9c905c5ac3e80246a98698b"
   },
   "wrapper_diff": {
     "approved_entry.py": {
@@ -36,16 +35,16 @@
   "durable_storage_authorized": false,
   "live_ready": false,
   "blockers": [
-    "session_transfer_consent_pending",
-    "encrypted_storage_and_key_configuration_consent_pending",
-    "final_wrapper_real_browser_database_integration_pending"
+    "exposed_session_server_revocation_unverified",
+    "new_private_transfer_channel_not_completed",
+    "patched_converter_wrapper_real_browser_integration_pending"
   ],
   "new_storage_mechanisms": 0,
   "new_database_locks": 0,
   "write_scope": "existing candidate private session table only; no runtime DDL/grants; no job writes",
   "attempts": "separate bootstrap/reuse once markers and evidence; reuse gated by protected-map access and saved revision",
   "preparation_evidence": "preparation_results.json",
-  "preparation_revision": "20261115-bundled-crypto",
+  "preparation_revision": "20261115-cookie-semantics-and-private-output",
   "bundled_dependency": {
     "name": "pycryptodome",
     "version": "3.21.0",
@@ -58,5 +57,14 @@
     "source": "https://pypi.org/project/pycryptodome/3.21.0/#files",
     "local_native_import_python": "3.12.14",
     "python_3_11_compatibility": "awaiting actual integrated runner test"
+  },
+  "base_product_candidate": "ace67103638375679c93552204e1573c2b5cb4f5",
+  "candidate_patch": {
+    "purpose": "preserve omitted SameSite through converter, encrypted save and reload",
+    "modules": {
+      "session_state.py": "7c4a1f19e42bbc02f422c315bdf538bd4c33dc0153431d7e442a689f7829eb29",
+      "session_capture.py": "f00fa21e46654e4af8a074f1a8ca6e7435b0b2153db32a0ae876c54b85990783"
+    },
+    "source_file_origin": "standalone_collector in this experiment revision"
   }
 }

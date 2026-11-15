@@ -13,6 +13,7 @@ import atexit
 import base64
 from datetime import datetime, timezone
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.metadata
 import json
 import os
@@ -24,6 +25,8 @@ import subprocess
 import sys
 import sysconfig
 import time
+import threading
+from urllib.parse import urlsplit
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
@@ -58,9 +61,133 @@ def generation(number):
     return 'DUMMY_WRAPPER_STATE_' + str(number)
 
 
+def contains_dummy_secret(raw):
+    """Never return a matched value or raw output, including on failure."""
+    if isinstance(raw, str):
+        raw = raw.encode()
+    return any(marker in raw for marker in (
+        b'DUMMY_WRAPPER_STATE_', b'DUMMY_ATTRIBUTE_',
+        b'DUMMY_STALE_HEADER', base64.b64encode(KEY)))
+
+
+def assert_private_output(reader):
+    check(not reader.overflow, 'private_output_limit')
+    check(not any(contains_dummy_secret(raw) for raw in reader.buffers.values()),
+          'dummy_secret_in_process_output')
+
+
+def drain_stopped_capture(reader, label):
+    """Use the wrapper's existing bounded reader; do not write raw logs."""
+    deadline = time.monotonic() + 2
+    while any(key.data.startswith(label + '_') for key in reader.selector.get_map().values()):
+        check(time.monotonic() < deadline, 'process_output_not_closed')
+        reader.poll(.02)
+    assert_private_output(reader)
+
+
+def worker_secret_presence(worker, expected_bootstrap):
+    """Actual process environment, filtered before it can become evidence."""
+    proc = Path('/proc', str(worker.pid))
+    before = (proc/'stat').read_text().rsplit(')', 1)[1].split()[19]
+    with (proc/'environ').open('rb') as stream:
+        raw = stream.read(1048577)
+    check(len(raw) <= 1048576, 'dummy_worker_environment_limit')
+    selected = dict(item.split(b'=', 1) for item in raw.split(b'\0') if b'=' in item)
+    raw = None
+    try:
+        present = bool(selected.get(b'COINGLASS_STORAGE_STATE_JSON'))
+        valid = False
+        if present:
+            from session_restore_state import validate_storage_state
+            validate_storage_state(selected[b'COINGLASS_STORAGE_STATE_JSON'].decode())
+            valid = True
+        key_matches = selected.get(b'COINGLASS_SESSION_KEY') == base64.b64encode(KEY)
+        check(present is expected_bootstrap and (valid or not expected_bootstrap)
+              and key_matches and selected.get(b'COLLECTION_BRIDGE_ENABLED') == b'false'
+              and before == (proc/'stat').read_text().rsplit(')', 1)[1].split()[19],
+              'dummy_worker_secret_state_invalid')
+        return {'bootstrap_present': present, 'bootstrap_valid': valid if present else None,
+                'key_present_and_matches_fixture': key_matches, 'worker_stable': True,
+                'bridge_disabled': True}
+    finally:
+        selected.clear()
+
+
 def state(number):
-    return {'cookies':[{'name':COOKIE,'value':generation(number),'domain':'.coinglass.com',
-        'path':'/','expires':-1,'httpOnly':True,'secure':True,'sameSite':'Lax'}],'origins':[]}
+    # Missing SameSite is intentional. These are dummy values, not an account.
+    cookies=[{'name':COOKIE,'value':generation(number),'domain':'.coinglass.com',
+        'path':'/','expires':-1,'httpOnly':True,'secure':True}]
+    for name,policy,domain,path,secure,http_only in (
+        ('missing',None,'.coinglass.com','/',False,True),
+        ('lax','Lax','.coinglass.com','/',False,False),
+        ('strict','Strict','.coinglass.com','/',False,False),
+        ('none','None','.coinglass.com','/',True,True),
+        ('host','Lax','www.coinglass.com','/',False,False),
+        ('path','Lax','.coinglass.com','/cookie-probe',False,False)):
+        cookie={'name':'fixture_'+name,'value':'DUMMY_ATTRIBUTE_'+name,
+            'domain':domain,'path':path,'expires':-1,'httpOnly':http_only,'secure':secure}
+        if policy is not None:cookie['sameSite']=policy
+        cookies.append(cookie)
+    return {'cookies':cookies,'origins':[]}
+
+
+def same_state(left,right):
+    return (left.get('origins')==right.get('origins')==[]
+        and {c['name']:c for c in left['cookies']}=={c['name']:c for c in right['cookies']}
+        and len(left['cookies'])==len(right['cookies']))
+
+
+def converter_output(report):
+    """Run the unchanged local converter in Chromium; only clipboard is refused.
+
+    Its real click handler takes its existing fallback path. No OS clipboard,
+    network, personal data or converter implementation is substituted.
+    """
+    from playwright.sync_api import sync_playwright
+    fixture={'cookies':[{**cookie,'session':True,'size':42,'priority':'Medium',
+        'sourceScheme':'Secure','sourcePort':443} for cookie in state(1)['cookies']]}
+    browser=context=None;started_pids=set();profiles=set();result=None
+    before=process_snapshot()
+    try:
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True,chromium_sandbox=False,
+                args=['--disable-background-networking','--disable-component-update',
+                      '--no-first-run','--host-resolver-rules=MAP * ~NOTFOUND'])
+            try:
+                check(browser.version=='140.0.7339.16','converter_chromium_mismatch')
+                rows=process_snapshot()
+                for pid in descendants(os.getpid(),rows)-set(before):
+                    argv=rows[pid][1]
+                    if not argv or Path(os.fsdecode(argv[0])).name not in ('chrome','chromium','headless_shell','chrome-headless-shell'):continue
+                    started_pids.add(pid)
+                    for arg in argv:
+                        if arg.startswith(b'--user-data-dir='):profiles.add(Path(os.fsdecode(arg.partition(b'=')[2])))
+                context=browser.new_context();context.route('**/*',lambda route:route.abort())
+                page=context.new_page();page.set_content((HERE/'coinglass_cookie_converter_offline.html').read_text())
+                page.evaluate("Object.defineProperty(navigator,'clipboard',{value:{writeText:async()=>{throw new Error('dummy clipboard unavailable')}}})")
+                page.locator('#input').fill(json.dumps(fixture))
+                page.locator('#convert').click()
+                page.wait_for_function("document.querySelector('#output').value.length>0")
+                result=page.locator('#output').input_value()
+                check(json.loads(result)==state(1),'converter_attributes_changed')
+                check(page.locator('#input').input_value()=='','converter_input_not_cleared')
+                page.locator('#clear').click()
+                check(page.locator('#output').input_value()=='','converter_output_not_cleared')
+            finally:
+                try:
+                    if context is not None:context.close()
+                finally:
+                    if browser is not None:browser.close()
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline and any(Path('/proc',str(pid)).exists() for pid in started_pids):time.sleep(.05)
+        check(bool(started_pids) and all(not Path('/proc',str(pid)).exists() for pid in started_pids),'converter_process_leaked')
+        check(bool(profiles) and all(not path.exists() for path in profiles),'converter_profile_leaked')
+        report['converter']={'actual_html_sha256':hashlib.sha256((HERE/'coinglass_cookie_converter_offline.html').read_bytes()).hexdigest(),
+            'real_browser_click':True,'output_used_unchanged':True,'attributes_preserved':True,
+            'clipboard_boundary':'forced_unavailable_existing_fallback','os_clipboard_tested':False,
+            'browser_closed':True,'profiles_removed':True,'source_requests':0}
+        return result
+    finally:fixture=None
 
 
 def process_snapshot():
@@ -139,6 +266,7 @@ def install_process_fixture(config):
     original_launch,original_context=BrowserType.launch,Browser.new_context
     original_close,original_browser_close=BrowserContext.close,Browser.close
     original_shot=Page.screenshot
+    original_new_page,original_goto=BrowserContext.new_page,Page.goto
     browsers,contexts=[],[]
     browser_pids,profiles=set(),set()
     number=config['generation'];failure=config['failure']
@@ -152,6 +280,35 @@ def install_process_fixture(config):
         dummy_only_exception=True,internal_sandbox_disabled_observed=False,
         failure_injected=False)
     html=html_fixture()
+    receiver_expected={c['name']:c for c in state(number+1)['cookies']}
+    receipts=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_args):pass
+        def do_GET(self):
+            if self.path not in ('/seed','/cookie-probe/receive','/other'):
+                self.send_error(404);return
+            if self.path!='/seed':
+                host=self.headers.get('Host','').split(':',1)[0]
+                parts=dict(item.strip().split('=',1) for item in self.headers.get('Cookie','').split(';') if '=' in item)
+                wanted={n:c['value'] for n,c in receiver_expected.items() if not c['secure']
+                    and (c['domain'].startswith('.') or c['domain']==host)
+                    and self.path.startswith(c['path'])}
+                receipts.append({'host_match':host in ('www.coinglass.com','capi.coinglass.com'),
+                    'cookies_match':parts==wanted,'secure_absent':COOKIE not in parts and 'fixture_none' not in parts})
+                parts= wanted=None
+            body=b'<!doctype html><title>dummy cookie receiver</title>'
+            self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)))
+            self.end_headers();self.wfile.write(body)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    receiver_closed=False
+    def close_receiver():
+        nonlocal receiver_closed
+        if receiver_closed:return
+        server.shutdown();server.server_close();thread.join(timeout=1)
+        receiver_closed=True;base['dummy_server_closed']=not thread.is_alive()
+        check(base['dummy_server_closed'],'dummy_server_thread_leaked')
+    atexit.register(close_receiver)
     def browser_processes():
         rows=process_snapshot()
         for pid in descendants(os.getpid(),rows):
@@ -168,7 +325,7 @@ def install_process_fixture(config):
     def launch(owner,*args,**kwargs):
         check(owner.name=='chromium' and kwargs.get('headless') is True and not browsers,'unexpected_launch')
         kwargs['args']=[*kwargs.get('args',[]),'--disable-background-networking','--disable-component-update',
-            '--no-first-run','--host-resolver-rules=MAP * ~NOTFOUND']
+            '--no-first-run','--host-resolver-rules=MAP www.coinglass.com 127.0.0.1, MAP capi.coinglass.com 127.0.0.1, MAP * ~NOTFOUND']
         value=original_launch(owner,*args,**kwargs)
         browsers.append(value);base['browser_launches']+=1;base['chromium_version']=value.version
         check(value.version=='140.0.7339.16','chromium_version_mismatch')
@@ -178,6 +335,8 @@ def install_process_fixture(config):
         check(not contexts and 'extra_http_headers' not in kwargs,'unexpected_context')
         value=original_context(owner,*args,**kwargs)
         contexts.append(value);base['contexts']+=1
+        check(same_state(kwargs.get('storage_state'),state(number)),'restored_attributes_changed')
+        base['restored_state_matches_expected_generation']=True
         def route_request(route):
             req=route.request
             if req.url==PAGE_URL and req.method=='GET' and req.is_navigation_request():
@@ -197,18 +356,61 @@ def install_process_fixture(config):
                 check(matches and base['obe_absent'] and base[kind+'_requests']==1,'dummy_request_identity_failed')
                 response={'Content-Type':'application/json','Cache-Control':'no-store',
                     'Access-Control-Allow-Origin':'https://www.coinglass.com','Access-Control-Allow-Credentials':'true'}
-                if kind=='account':response['Set-Cookie']=COOKIE+'='+generation(number+1)+'; Domain=.coinglass.com; Path=/; Secure; HttpOnly; SameSite=Lax'
+                if kind=='account':response['Set-Cookie']=COOKIE+'='+generation(number+1)+'; Domain=.coinglass.com; Path=/; Secure; HttpOnly'
                 route.fulfill(status=200,body='{"success":true}',headers=response)
             else:
                 base['other_requests_aborted']+=1;route.abort()
         value.route('**/*',route_request)
         return value
+    def check_cookie_receipt(value):
+        # Source capture/persistence has already completed. This test-only page
+        # reaches a real HTTP server; no TLS, CORS or SameSite guard is disabled.
+        # Secure cookie HTTPS receipt is NOT claimed by this HTTP-only probe.
+        raw_session=value.new_cdp_session(value.pages[0])
+        try:raw=raw_session.send('Network.getCookies',{'urls':[PAGE_URL,ACCOUNT_URL,'https://www.coinglass.com/cookie-probe/receive']})['cookies']
+        finally:raw_session.detach()
+        expected={c['name']:c for c in state(number+1)['cookies']}
+        actual={c['name']:c for c in raw}
+        check(set(actual)==set(expected),'raw_cookie_names_changed')
+        for name,cookie in expected.items():
+            check(all(actual[name].get(k)==v for k,v in cookie.items()),'raw_cookie_attributes_changed')
+            if 'sameSite' not in cookie:check('sameSite' not in actual[name],'raw_missing_samesite_changed')
+        driver={c['name']:c for c in value.cookies(urls=[PAGE_URL,ACCOUNT_URL])}
+        base['raw_cdp_missing_samesite_preserved']=all('sameSite' not in actual[n] for n in (COOKIE,'fixture_missing'))
+        base['playwright_readback_supplies_lax']=all(driver[n].get('sameSite')=='Lax' for n in (COOKIE,'fixture_missing'))
+        base['explicit_samesite_preserved']=all(actual['fixture_'+n].get('sameSite')==v for n,v in (('lax','Lax'),('strict','Strict'),('none','None')))
+        probe=None
+        try:
+            probe=original_new_page(value)
+            port=server.server_address[1]
+            allowed={f'http://{host}:{port}{path}' for host,path in (
+                ('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
+                ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive'))}
+            def local_only(route):
+                if route.request.url in allowed and route.request.method=='GET':route.continue_()
+                else:route.abort()
+            probe.route('**/*',local_only)
+            # Establish the HTTP schemeful site before asserting Strict receipt.
+            for host,path in (('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
+                              ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive')):
+                original_goto(probe,f'http://{host}:{port}{path}',wait_until='load',timeout=3000)
+            check(len(receipts)==3 and all(all(r.values()) for r in receipts),'actual_server_cookie_mismatch')
+            visible=probe.evaluate('document.cookie')
+            check('fixture_missing=' not in visible,'httponly_cookie_visible')
+            base['http_receiving_server_verified']=True;base['http_secure_cookies_withheld']=True
+            base['http_host_path_samesite_verified']=True;base['httponly_browser_enforced']=True
+            base['https_secure_receiving_server_verified']=False
+        finally:
+            if probe is not None:
+                probe.unroute('**/*',local_only);probe.close()
+            close_receiver()
     def close(value,*args,**kwargs):
         try:
             if value in contexts:
                 cookies=value.cookies(urls=[ACCOUNT_URL])
                 base['updated_cookie_before_close']=any(c.get('name')==COOKIE and c.get('value')==generation(number+1) for c in cookies)
                 cookies=None
+                check_cookie_receipt(value)
         finally:
             result=original_close(value,*args,**kwargs)
             if value in contexts:base['context_closed']=True
@@ -220,6 +422,9 @@ def install_process_fixture(config):
             if value in browsers:base['browser_closed']=not value.is_connected()
         return result
     def screenshot(value,*args,**kwargs):
+        check(not contains_dummy_secret(value.locator('body').text_content(timeout=1000) or ''),
+              'dummy_secret_in_screenshot_content')
+        base['screenshot_content_secret_free']=True
         if failure:
             check(base['account_cookie_matches'] and base['map_cookie_matches'],'failure_before_session_path')
             base['failure_injected']=True
@@ -227,6 +432,7 @@ def install_process_fixture(config):
         return original_shot(value,*args,**kwargs)
     def browser_complete():
         try:
+            close_receiver()
             end=time.monotonic()+2
             while time.monotonic()<end and any(Path('/proc',str(pid)).exists() for pid in browser_pids):time.sleep(.05)
             base['browser_processes_gone']=bool(browser_pids) and all(not Path('/proc',str(pid)).exists() for pid in browser_pids)
@@ -265,8 +471,14 @@ def main():
     args=parser.parse_args();started=time.monotonic()
     report={'status':'failed','phase':'preflight','runs':[],'source_requests':0,'ai_calls':0,
         'production_writes':0,'actual_entry_command':'./.venv/bin/python -B <package>/approved_entry.py --bootstrap|--reuse',
-        'database_and_browser_real':True,'concurrency_suite_repeated':False}
+        'database_and_browser_real':True,'concurrency_suite_repeated':False,
+        'secret_channel': {'scope':'real_local_process_environment',
+            'render_provider_save_apply_delete_tested':False,
+            'agent_secret_ui_access_used':False, 'insertion_applied':False,
+            'removal_applied_to_new_worker':False, 'process_output_secret_free':False,
+            'filtered_evidence_secret_free':False}}
     worker=entry=admin=db=None;hook=None;clean=True
+    output_reader=None;captured_processes=[];worker_input={}
     work=Path(os.environ['CG_TEST_WORK']).resolve();private=work/'private'
     private.mkdir(mode=0o700,exist_ok=True)
     try:
@@ -282,6 +494,7 @@ def main():
         sys.path.insert(0,str(package))
         import observation_supervisor as supervisor
         supervisor.activate_bundled_crypto()
+        output_reader=supervisor.OutputReader()
         from session_state import PgSessionStore,WORK_LOCK
         import psycopg
         from psycopg.rows import dict_row
@@ -299,23 +512,30 @@ def main():
         hook.write_text(str(HERE)+'\nimport wrapper_bootstrap\n');hook.chmod(0o600)
         with socket.socket() as port_socket:
             port_socket.bind(('127.0.0.1',0));port=port_socket.getsockname()[1]
+        converted=converter_output(report)
         env={k:os.environ[k] for k in ('PATH','HOME','LANG','LC_CTYPE','PLAYWRIGHT_BROWSERS_PATH') if k in os.environ}
         env.update(RENDER_GIT_COMMIT=COMMIT,PORT=str(port),COLLECTION_BRIDGE_ENABLED='false',
             DATABASE_URL=writer_dsn(),COINGLASS_SESSION_KEY=base64.b64encode(KEY).decode(),
-            COINGLASS_STORAGE_STATE_JSON=json.dumps(state(1),separators=(',',':')),
+            COINGLASS_STORAGE_STATE_JSON=converted,
             COINGLASS_COOKIE_HEADER=COOKIE+'=DUMMY_STALE_HEADER',
             COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START='false',PYTHONDONTWRITEBYTECODE='1')
+        converted=None
+        worker_input=dict(env)
         worker=subprocess.Popen([sys.executable,'-B','standalone_collector/app.py'],cwd=ROOT,env=env,
-            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        output_reader.add(worker,'worker_initial');captured_processes.append((worker,'worker_initial'))
         env.clear()
         deadline=time.monotonic()+10
         while True:
+            output_reader.poll(0);assert_private_output(output_reader)
             check(worker.poll() is None,'disabled_worker_exited')
             try:
                 with urllib.request.urlopen('http://127.0.0.1:'+str(port)+'/health',timeout=1) as response:
                     if json.loads(response.read(16384)).get('mode')=='not_configured':break
             except (OSError,ValueError):pass
             check(time.monotonic()<deadline,'disabled_worker_not_ready');time.sleep(.05)
+        report['secret_channel']['insertion_probe']=worker_secret_presence(worker,True)
+        report['secret_channel']['insertion_applied']=True
         successful_pids=[]
         for number,mode,failure in ((1,'bootstrap',False),(2,'reuse',False),(3,'bootstrap',True)):
             report['phase']='failure_cleanup' if failure else mode
@@ -329,15 +549,16 @@ def main():
             else:expected=number
             evidence=private/('cycle-'+str(number));evidence.mkdir(mode=0o700)
             write_json(CONFIG,{'package':str(package),'evidence':str(evidence),'generation':expected,'failure':failure})
-            output=evidence/'entry-output.txt'
-            with output.open('wb') as stream:
-                entry=subprocess.Popen([sys.executable,'-B',str(package/'approved_entry.py'),'--'+mode],
-                    cwd=ROOT,env={k:os.environ[k] for k in ('PATH','HOME','LANG','LC_CTYPE','PLAYWRIGHT_BROWSERS_PATH') if k in os.environ},
-                    stdout=stream,stderr=subprocess.DEVNULL,start_new_session=True)
+            label='entry_'+str(number)
+            entry=subprocess.Popen([sys.executable,'-B',str(package/'approved_entry.py'),'--'+mode],
+                cwd=ROOT,env={k:os.environ[k] for k in ('PATH','HOME','LANG','LC_CTYPE','PLAYWRIGHT_BROWSERS_PATH') if k in os.environ},
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            output_reader.add(entry,label);captured_processes.append((entry,label))
             cycle={'mode':mode,'failure_fixture':failure,'entry_pid':entry.pid,'entry_returned':False}
             report['runs'].append(cycle)
             deadline=time.monotonic()+63;lock_seen=False;owner_backend=None
             while entry.poll() is None:
+                output_reader.poll(0);assert_private_output(output_reader)
                 check(time.monotonic()<deadline,'entry_command_timeout')
                 row=db.execute('SELECT revision,status,run_id FROM collector_private.coinglass_session_state').fetchone()
                 if row and row['status']=='in_use':
@@ -348,7 +569,9 @@ def main():
                         owner_backend=db.execute("SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND classid=0 AND objid=%s AND objsubid=1",(WORK_LOCK,)).fetchone()['pid']
                 time.sleep(.05)
             cycle['entry_returned']=entry.returncode==0
-            raw=output.read_text();lines=[line.split(' ',1)[1] for line in raw.splitlines() if line.startswith('COINGLASS_REUSE_12H_RESULT ')]
+            drain_stopped_capture(output_reader,label)
+            raw=bytes(output_reader.buffers[label+'_out']).decode()
+            lines=[line.split(' ',1)[1] for line in raw.splitlines() if line.startswith('COINGLASS_REUSE_12H_RESULT ')]
             check(len(lines)==1,'entry_receipt_missing')
             receipt=json.loads(lines[0]);raw=lines=None
             cycle['receipt']=receipt;cycle['lock_observed']=lock_seen;cycle['lock_owner_backend']=owner_backend
@@ -359,7 +582,9 @@ def main():
             check(db.execute('SELECT pg_try_advisory_lock(%s) AS held',(WORK_LOCK,)).fetchone()['held'] is True,'lock_leaked')
             try:
                 current=PgSessionStore(db,KEY).read()
-                check(any(c['name']==COOKIE and c['value']==generation(expected+1) for c in current['cookies']),'updated_state_not_saved')
+                check(same_state(current,state(expected+1)),'updated_state_or_attributes_not_saved')
+                cycle['saved_attributes_exact']=True
+                cycle['missing_samesite_remains_absent']=all('sameSite' not in c for c in current['cookies'] if c['name'] in (COOKIE,'fixture_missing'))
                 current.clear()
                 row=db.execute('SELECT revision,status,encrypted_payload FROM collector_private.coinglass_session_state').fetchone()
                 check(row['status']=='ready' and generation(expected+1) not in row['encrypted_payload'],'state_not_encrypted')
@@ -374,7 +599,11 @@ def main():
             browser=process_evidence['collector_browser_fixture.py'];cycle['process_evidence']=process_evidence
             required=('account_cookie_matches','map_cookie_matches','obe_absent','updated_cookie_before_close',
                 'context_closed','browser_closed','profiles_removed','browser_processes_gone','parent_secrets_absent',
-                'legacy_header_absent','private_inputs_removed','internal_sandbox_disabled_observed')
+                'legacy_header_absent','private_inputs_removed','internal_sandbox_disabled_observed',
+                'restored_state_matches_expected_generation','raw_cdp_missing_samesite_preserved',
+                'playwright_readback_supplies_lax','explicit_samesite_preserved',
+                'http_receiving_server_verified','http_secure_cookies_withheld',
+                'http_host_path_samesite_verified','httponly_browser_enforced','dummy_server_closed')
             check(all(browser.get(k) is True for k in required),'browser_evidence_failed')
             check(all(browser.get(k)==1 for k in ('browser_launches','contexts','document_requests','account_requests','map_requests')),'browser_count_failed')
             check(receipt.get('session_persistence',{}).get('saved') is True,'session_persistence_failed')
@@ -386,8 +615,31 @@ def main():
                     and observation.get('png_validated') is True,'source_wrapper_dummy_capture_failed')
                 successful_pids.append(browser['browser_pids'])
                 check(cycle['saved_revision']==(3 if mode=='bootstrap' else 5),'revision_sequence_wrong')
-            output.unlink()
         check(set(successful_pids[0]).isdisjoint(successful_pids[1]),'browser_not_restarted')
+        report['phase']='secret_removal'
+        previous_worker_pid=worker.pid
+        check(stop(worker),'initial_worker_not_stopped')
+        drain_stopped_capture(output_reader,'worker_initial');worker=None
+        worker_input.pop('COINGLASS_STORAGE_STATE_JSON',None)
+        worker=subprocess.Popen([sys.executable,'-B','standalone_collector/app.py'],cwd=ROOT,env=worker_input,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        output_reader.add(worker,'worker_removed');captured_processes.append((worker,'worker_removed'))
+        worker_input.clear()
+        deadline=time.monotonic()+10
+        while True:
+            output_reader.poll(0);assert_private_output(output_reader)
+            check(worker.poll() is None,'removed_state_worker_exited')
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:'+str(port)+'/health',timeout=1) as response:
+                    if json.loads(response.read(16384)).get('mode')=='not_configured':break
+            except (OSError,ValueError):pass
+            check(time.monotonic()<deadline,'removed_state_worker_not_ready');time.sleep(.05)
+        check(worker.pid!=previous_worker_pid,'worker_not_restarted_for_removal')
+        report['secret_channel']['removal_probe']=worker_secret_presence(worker,False)
+        report['secret_channel']['removal_applied_to_new_worker']=True
+        check(not any(contains_dummy_secret(path.read_bytes()) for path in private.rglob('*.json')),
+              'dummy_secret_in_filtered_evidence')
+        report['secret_channel']['filtered_evidence_secret_free']=True
         report.update(status='passed',phase='complete',fresh_browser_reuse=True,
             old_bootstrap_ignored=True,failure_cleanup_verified=True,ownership_preserved=True)
     except CheckFailed as error:report['reason']=str(error)
@@ -396,6 +648,23 @@ def main():
         report['exception_kind']=type(error).__name__ if type(error).__name__ in ('OSError','OperationalError','ProgrammingError','IntegrityError','KeyError','ValueError','ImportError','ModuleNotFoundError','AssertionError','FileNotFoundError','PermissionError') else 'other'
     finally:
         clean &= stop(entry);clean &= stop(worker)
+        worker_input.clear()
+        if output_reader is not None:
+            try:
+                for process,label in captured_processes:
+                    if process.poll() is not None:drain_stopped_capture(output_reader,label)
+                assert_private_output(output_reader)
+                report['secret_channel']['process_output_secret_free']=True
+            except CheckFailed as error:
+                report['reason']=str(error);report['status']='failed'
+            except BaseException:
+                report['reason']='private_output_cleanup_failed';report['status']='failed'
+            finally:
+                output_reader.close()
+                for raw in output_reader.buffers.values():raw.clear()
+                for process,_ in captured_processes:
+                    for stream in (process.stdout,process.stderr):
+                        if stream is not None:stream.close()
         locks_remaining = None
         if admin is not None:
             try:
@@ -427,6 +696,10 @@ def main():
             'test_hook_removed':hook is None or not hook.exists()}
         report['elapsed_seconds']=round(time.monotonic()-started,3)
         if not all(report['cleanup'].values()):report['status']='failed'
+        if contains_dummy_secret(json.dumps(report,sort_keys=True,allow_nan=False)):
+            report={'status':'failed','reason':'dummy_secret_in_final_report',
+                    'cleanup':report['cleanup'],'elapsed_seconds':report['elapsed_seconds'],
+                    'render_provider_save_apply_delete_tested':False}
         write_json(args.output,report)
         print('SESSION_WRAPPER_RESULT '+json.dumps(report,sort_keys=True,allow_nan=False),flush=True)
     return 0 if report['status']=='passed' else 1

@@ -42,7 +42,10 @@ def cookie_only_state(cookies):
         if (type(expiry) not in (int, float) or not math.isfinite(expiry)
                 or (expiry != -1 and expiry <= time.time())):
             raise Rejected('state_expired_or_invalid')
-        if item.get('sameSite') not in ('Strict', 'Lax', 'None'):
+        # CDP Network.getCookies can omit SameSite. Playwright's existing
+        # new_context(storage_state=...) accepts that omission unchanged.
+        # Missing is not the explicit string "None" (nor a JSON null).
+        if 'sameSite' in item and item['sameSite'] not in ('Strict', 'Lax', 'None'):
             raise Rejected('state_invalid')
         if 'partitionKey' in item and not isinstance(item['partitionKey'], str):
             raise Rejected('state_invalid')

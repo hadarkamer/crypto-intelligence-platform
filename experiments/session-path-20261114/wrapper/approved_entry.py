@@ -13,7 +13,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent
 COMMIT = '33bad18f8be322009108584a6b71f3d65fa9b351'
-PINS = {'collector_browser_fixture.py': 'b0189e753e5219feb180b20aa5388386d9743932f69ca29b6c1a205170c124ed', 'session_restore_state.py': 'f4fefa446c64a064e5354454d186cd7e269639b36e71a837ba72ee3e0e0cc3a0', 'observation_supervisor.py': 'dcc206ae70b91f5c39e47473dd102e1872216d1055427dfd6d0af9d3caf6c4a7', 'session_state.py': 'dd64ffcfe432805f71863b389f68ec8d3f10f1a84524cf9f7153df97732c0760', 'session_runtime.py': '327b324d6e48655ae77d62b63a7704603b7ee6242db706cd1948c0c69d2b1aae', 'session_capture.py': '3544546386fc701e89656260d3d106e0a39557a31b6c96a7338e5d746f0d66ab'}
+PINS = {'collector_browser_fixture.py': 'b0189e753e5219feb180b20aa5388386d9743932f69ca29b6c1a205170c124ed', 'session_restore_state.py': '5d9b0c37e2d06c1a870254c6959e376c2dfd8e6a7b603fc34a52416016cdf465', 'observation_supervisor.py': 'dcc206ae70b91f5c39e47473dd102e1872216d1055427dfd6d0af9d3caf6c4a7', 'session_state.py': '7c4a1f19e42bbc02f422c315bdf538bd4c33dc0153431d7e442a689f7829eb29', 'session_runtime.py': '327b324d6e48655ae77d62b63a7704603b7ee6242db706cd1948c0c69d2b1aae', 'session_capture.py': 'f00fa21e46654e4af8a074f1a8ca6e7435b0b2153db32a0ae876c54b85990783'}
 result = {'status': 'blocked', 'source_observer_launches': 0, 'ai_calls': 0, 'job_writes': 0}
 reason = 'preflight'
 reserved = False

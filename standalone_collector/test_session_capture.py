@@ -44,12 +44,18 @@ class Page:
 class Context:
     def __init__(self, cookies=None):
         self.values = copy.deepcopy(cookies if cookies is not None else [COOKIE])
-        self.reads = 0
-    def cookies(self, *, urls):
+        self.reads = self.detaches = 0
+    def new_cdp_session(self, page):
+        assert page is not None
+        return self
+    def send(self, method, params):
         self.reads += 1
+        assert method == 'Network.getCookies'
+        urls = params['urls']
         assert urls and all(url.startswith('https://') for url in urls)
         assert all('.invalid' not in url for url in urls)
-        return self.values
+        return {'cookies': self.values}
+    def detach(self): self.detaches += 1
 
 
 def request(page, body=b'{"success":true,"data":{"private":"DO_NOT_EMIT"}}', *, status=200, url=ACCOUNT_URL):
@@ -133,6 +139,27 @@ class CaptureSessionTests(unittest.TestCase):
         self.assertEqual(value['state']['cookies'],[COOKIE,new_cookie])
         self.assertEqual(context.reads,1);self.assertFalse(any(page.listeners.values()))
         session.finish(context);self.assertEqual(context.reads,1)
+
+    def test_snapshot_preserves_missing_and_explicit_samesite_and_detaches(self):
+        session,read_fd=self.open();page=Page()
+        missing={key:value for key,value in COOKIE.items() if key!='sameSite'}
+        raw=[{**missing,'size':55,'priority':'Medium','session':True},
+             *[{**COOKIE,'name':'explicit_'+policy,'sameSite':policy}
+               for policy in ('Lax','Strict','None')]]
+        context=Context(raw);session.attach(context,page);self.observe(session,page)
+        session.finish(context);saved=self.receive(read_fd)['state']['cookies']
+        self.assertNotIn('sameSite',saved[0]);self.assertEqual(saved[0],missing)
+        self.assertEqual([item['sameSite'] for item in saved[1:]],['Lax','Strict','None'])
+        self.assertEqual(context.detaches,1)
+
+    def test_partitioned_snapshot_stops_without_discarding_partition_semantics(self):
+        session,read_fd=self.open();page=Page()
+        context=Context([{**COOKIE,'partitionKey':{'topLevelSite':'https://coinglass.com'}}])
+        session.attach(context,page);self.observe(session,page)
+        with self.assertRaises(StageFailure) as caught:session.finish(context)
+        self.assertEqual(caught.exception.code,'session_snapshot_failed')
+        self.assertEqual(self.receive(read_fd)['outcome'],'unconfirmed')
+        self.assertEqual(context.detaches,1)
 
     def test_known_rejection_or_source_access_gate_blocks_without_snapshot(self):
         for rejected, gate in ((True,False),(False,True)):

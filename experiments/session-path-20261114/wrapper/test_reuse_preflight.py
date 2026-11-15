@@ -72,7 +72,11 @@ expected = 'DUMMY_REUSED_NOT_SECRET' if scenario == 'reuse' else 'DUMMY_INITIAL_
 assert state['cookies'][0]['value'] == expected
 state['cookies'][0]['value'] = 'DUMMY_UPDATED_NOT_SECRET'
 class Context:
-    def cookies(self, *, urls): return copy.deepcopy(state['cookies'])
+    def new_cdp_session(self, page): return self
+    def send(self, method, params):
+        assert method == 'Network.getCookies' and params['urls']
+        return {'cookies': copy.deepcopy(state['cookies'])}
+    def detach(self): pass
 context = Context()
 class Page:
     def __init__(self):
@@ -274,6 +278,52 @@ def report():
 '''
 
 
+class ConverterCompatibilityTests(unittest.TestCase):
+    """Actual converter script + validators; DOM/clipboard are simulated here.
+
+    The existing real-browser integration separately exercises its click handler
+    and carries that output through the exact entry, storage and new browser.
+    """
+    def test_actual_converter_output_enters_both_real_validators_unchanged(self):
+        import importlib.util
+        path=HERE.parent/'check_wrapper.py'
+        spec=importlib.util.spec_from_file_location('cookie_chain_fixture',path)
+        fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        expected=fixture.state(1)
+        raw={'cookies':[{**cookie,'session':True,'priority':'Medium','size':42,
+            'sourceScheme':'Secure','sourcePort':443} for cookie in expected['cookies']]}
+        script=r"""
+const fs=require('node:fs'),vm=require('node:vm');
+const elements=new Map();
+const document={getElementById(id){if(!elements.has(id))elements.set(id,{value:'',style:{},
+  addEventListener(event,fn){this[event]=fn},focus(){},select(){}});return elements.get(id)}};
+const html=fs.readFileSync(process.argv[1],'utf8');
+const source=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const navigator={clipboard:{async writeText(){throw new Error('dummy clipboard unavailable')}}};
+vm.runInNewContext(source,{document,navigator});
+document.getElementById('input').value=fs.readFileSync(0,'utf8');
+(async()=>{await document.getElementById('convert').click();
+ const value=document.getElementById('output').value;
+ if(!value||document.getElementById('input').value)throw new Error('converter_failed');
+ process.stdout.write(value);document.getElementById('clear').click();
+ if(document.getElementById('output').value)throw new Error('clear_failed');
+})().catch(()=>{process.stderr.write('converter_failed');process.exitCode=1});
+"""
+        result=subprocess.run(['node','-e',script,str(HERE.parent/'coinglass_cookie_converter_offline.html')],
+            input=json.dumps(raw),capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0);self.assertEqual(result.stderr,'')
+        actual=json.loads(result.stdout);self.assertEqual(actual,expected)
+        sys.path.insert(0,str(HERE))
+        from session_restore_state import Rejected,validate_storage_state
+        from session_state import validate_state,SessionStateError
+        self.assertEqual(json.loads(validate_storage_state(result.stdout)),expected)
+        self.assertEqual(validate_state(actual),expected)
+        self.assertNotIn('sameSite',actual['cookies'][0])
+        bad=copy.deepcopy(actual);bad['cookies'][0]['sameSite']=None
+        with self.assertRaises(Rejected):validate_storage_state(json.dumps(bad))
+        with self.assertRaises(SessionStateError):validate_state(bad)
+
+
 class ReuseEntryTests(unittest.TestCase):
     def run_entry(self, *, mode='bootstrap', scenario='ready', commit=COMMIT, state=DUMMY, key=KEY,
                   corrupt_runtime=False, repeat=False, prior_access=True):
@@ -449,6 +499,11 @@ class CandidateHookTests(unittest.TestCase):
             with patch.dict(os.environ,values):session=CaptureSession.from_environment()
             sequence=[]
             class Context:
+                def new_cdp_session(self,page):return self
+                def send(self,method,params):
+                    assert method=='Network.getCookies'
+                    return {'cookies':self.cookies(urls=params['urls'])}
+                def detach(self):pass
                 def cookies(self, *, urls):
                     sequence.append('snapshot')
                     cookies=copy.deepcopy(DUMMY['cookies'])

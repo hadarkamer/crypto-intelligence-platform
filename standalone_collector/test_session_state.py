@@ -261,6 +261,17 @@ class StoreTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_samesite_omission_is_preserved_and_not_json_null(self):
+        state=copy.deepcopy(STATE);del state['cookies'][0]['sameSite']
+        self.assertEqual(validate_state(state),state)
+        self.assertNotIn('sameSite',validate_state(state)['cookies'][0])
+        for invalid in (None,'Unspecified','missing'):
+            bad=copy.deepcopy(state);bad['cookies'][0]['sameSite']=invalid
+            with self.assertRaises(SessionStateError):validate_state(bad)
+        for explicit in ('Lax','Strict','None'):
+            item=copy.deepcopy(state);item['cookies'][0]['sameSite']=explicit
+            self.assertEqual(validate_state(item),item)
+
     def test_structure_scope_and_attributes(self):
         self.assertEqual(validate_state(STATE), STATE)
         bad = copy.deepcopy(STATE); bad['cookies'][0]['domain'] = 'coinglass.com.attacker.invalid'
