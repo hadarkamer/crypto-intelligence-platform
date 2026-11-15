@@ -51,13 +51,25 @@ SELECTED_PROOF_FIELDS = PROOF_FIELDS | frozenset((
     'decision_at', 'data_available_at', 'reference_at', 'reference_price', 'source_target'))
 SELECTED_PENDING_POLICY_FIELDS = POLICY_FIELDS | frozenset((
     'pending_expires_at', 'cancel_before_fill_price'))
-# The operational CT009 restriction is independent from historical validation.
+# Operational activation decision 2026-11-15. Historical contracts stay readable;
+# pausing admission does not revoke management of already filled positions.
 NEW_ENTRY_IDENTITIES = frozenset((
     ('r2732', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
+    ('sol_sff1361', 'SFF1361_SOL_RECENT', 'SOL'),
+    ('xrp_liquidity_inverse', 'XRP_LIQUIDITY_RAW_INVERSE', 'XRP'),
+))
+RETIRED_ENTRY_IDENTITIES = frozenset((
     ('hype_row71205', 'HYPE_ROW71205_SHORT', 'HYPE'),
 )) | frozenset((family, rule, symbol)
-    for family, (rule, symbols) in SELECTED_FORMULAS.items()
-    for symbol in (CT009_SYMBOLS if family == 'ct009' else symbols))
+    for family in ('ct009', 'oconf0034_13')
+    for rule, symbols in (SELECTED_FORMULAS[family],)
+    for symbol in symbols)
+
+
+def entry_retirement_required(message):
+    """Only the three explicitly retired/paused entry identities; never a coin ban."""
+    return (message.get('family'), message.get('rule_id'),
+            message.get('symbol')) in RETIRED_ENTRY_IDENTITIES
 
 
 def new_entry_allowed(message):

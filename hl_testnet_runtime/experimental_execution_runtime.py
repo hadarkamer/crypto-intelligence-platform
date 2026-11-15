@@ -16,7 +16,7 @@ import approved_alert_contract as contract
 from . import card_lifecycle as life, price_precision, request_budget
 from . import filled_quantity_dispatch as wire, r2732_entry, r2732_conditional_stop
 from . import maxpain_execution, experimental_allocations, two_account_execution as roles
-from .experimental_plan_store import reduce_source
+from .experimental_plan_store import reduce_source, retire_suspended_entry, moment
 from .experimental_execution_state import ExecutionState, PostgresExecutionState, StateError
 from .risk_policy import budget, assert_new_entry_budget
 from .experimental_execution_prices import prepare as prepare_prices, entry_mark_allowed
@@ -99,6 +99,8 @@ def _merge_order_fills(trade, request, oid, rows, at_ms, *, complete):
 
 def _source_active(source, now):
     msg = source['source']
+    if contract.entry_retirement_required(msg):
+        return False
     if contract.is_approved(msg):
         return (source['entry_permission'] == 'WAITING' and source['cancellation'] is None
             and msg['kind'] == 'ALERT' and msg['source_state'] == 'APPROVED'
@@ -111,6 +113,8 @@ def _source_active(source, now):
 
 def _working_entry_active(source, now):
     """Initial delivery freshness is not a lease on an accepted GTC order."""
+    if contract.entry_retirement_required(source['source']):
+        return False
     if contract.is_approved(source['source']):
         deadline = contract.pending_entry_deadline(source['source'])
         return (source['cancellation'] is None and source['source']['kind'] == 'ALERT'
@@ -161,6 +165,15 @@ class IsolatedExecutionRuntime:
 
     def receive(self, messages):
         return self._receive(messages, domain='software', status=readiness())
+
+    @staticmethod
+    def _retire_suspended_sources(state, now):
+        """Restore durable pauses on startup without inventing source CANCELs."""
+        at = moment(contract.iso_ms(now))
+        for cid, source in state['sources'].items():
+            if retire_suspended_entry(source, now=at):
+                state['events'].append(dict(at_ms=now,
+                    kind='FORMULA_NEW_ENTRIES_SUSPENDED', occurrence_id=cid))
 
     def _receive(self, messages, *, domain, status):
         """Shared transition; public workers choose a fixed persisted domain."""
@@ -429,7 +442,10 @@ class IsolatedExecutionRuntime:
                         return self._order(state,trade,leg,life.text(remaining),price,context['metadata'],now,old_oid=own[0][0] if own else None)
             source = state['sources'][trade['cid']]
             retire = not _working_entry_active(source,now) or bool(trade['exit_fills'])
-            if any(trade['order_legs'][oid]=='ENTRY' for oid,o in active):
+            if contract.entry_retirement_required(trade['source']):
+                trade['entry_retired_reason'] = 'FORMULA_NEW_ENTRIES_SUSPENDED'
+            if (not contract.entry_retirement_required(trade['source'])
+                    and any(trade['order_legs'][oid]=='ENTRY' for oid,o in active)):
                 mark=_number(self._mark(trade,context,now)['mark_price'])
                 msg=trade['source']
                 if contract.is_approved(msg) and not entry_mark_allowed(msg, trade['prices'], mark):
@@ -562,6 +578,8 @@ class IsolatedExecutionRuntime:
 
     def _admit(self, state, cid, context, now, *, risk_snapshot=None):
         source = state['sources'][cid]; msg = source['source']
+        if contract.entry_retirement_required(msg):
+            return None
         if not _source_active(source,now) or cid in state['trades'] or cid in state.get('source_condition_errors',{}):
             return None
         if msg['family']=='sol_g65' and not contract.is_approved(msg):
@@ -757,6 +775,7 @@ class IsolatedExecutionRuntime:
         """Pure shared lifecycle transition; no database or network calls."""
         if context.get('basis_revision')!=state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+        self._retire_suspended_sources(state, now)
         if (context.get('inventory_complete') is not True or context.get('inventory_accounts')!=sorted(state['routes'].values())
                 or type(context.get('inventory_at_ms')) is not int or not 0<=now-context['inventory_at_ms']<=15000):
             raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')

@@ -1,0 +1,1387 @@
+{
+  "format": "formula-activation-handoff/v2",
+  "language": "he",
+  "title_he": "הגדרות נוסחאות והחלטות הפעלה מעודכנות — 15.11.2026",
+  "created_at_israel": "2026-11-15T10:43:44.119147+02:00",
+  "purpose_he": "קובץ עצמאי להעברה ולהעלאה לצ׳ט או למפתח לצורך מימוש החלטות ההפעלה שניתנו בדוח. אינו קובץ הגדרות שיובא ונבדק בבוט.",
+  "direct_bot_import_compatibility_verified": false,
+  "activation_performed_by_this_export": false,
+  "new_market_data_or_backtest_run_for_this_export": false,
+  "research_cutoff_utc": "2026-11-15T08:01:00Z",
+  "research_cutoff_israel": "2026-11-15T10:01:00+02:00",
+  "runtime_snapshot_utc": "2026-11-15T08:05:03.732000+00:00",
+  "recommended_roster": {
+    "keep_enabled": [
+      "R2732_HYPERLIQUID",
+      "SFF1361_SOL_RECENT",
+      "XRP_LIQUIDITY_RAW_INVERSE"
+    ],
+    "add_after_matching_implementation": [
+      "HYPE_WATCH_LIQ4050_24H_INVERSE"
+    ],
+    "pause_new_entries": [
+      "CT009_FROZEN_3D",
+      "OCONF0034_13"
+    ],
+    "remove_from_new_entry_roster": [
+      "HYPE_ROW71205_ALL_HYPERLIQUID_SOURCE_VARIANT_V2"
+    ],
+    "target_final_active_formula_ids": [
+      "R2732_HYPERLIQUID",
+      "SFF1361_SOL_RECENT",
+      "XRP_LIQUIDITY_RAW_INVERSE",
+      "HYPE_WATCH_LIQ4050_24H_INVERSE"
+    ],
+    "immediate_recommended_existing_active_formula_ids": [
+      "R2732_HYPERLIQUID",
+      "SFF1361_SOL_RECENT",
+      "XRP_LIQUIDITY_RAW_INVERSE"
+    ],
+    "note_he": "יעד הקבוצה הוא שלוש הנוסחאות שנותרות פעילות ועוד HYPE החדשה לאחר מימוש תואם. OCONF נשארת מושהית עד בדיקת התאמה; CT009 מושהית בשל ביצועים. HYPE הישנה אינה כלולה בקבוצה המומלצת."
+  },
+  "application_policy": {
+    "scope": "SELECTED_FORMULAS_NEW_ENTRIES_ONLY",
+    "protect_and_manage_existing_positions": true,
+    "force_close_positions": false,
+    "preserve_ordinary_alerts_and_source_collection": true,
+    "preserve_unrelated_rules_and_settings": true,
+    "no_new_live_risk_or_leverage_budget_set": true,
+    "portfolio_overlap_test_complete": false,
+    "note_he": "הוצאת נוסחה מקבוצת הכניסות אינה הוראה למחוק איסוף נתונים, לבטל סטופ/טייק של פוזיציה קיימת או לסגור פוזיציה בכוח. אין לפרש את $5 במחקר כתקציב מסחר חדש."
+  },
+  "research_cost_assumptions": {
+    "initial_price_stop_risk_usd": 5,
+    "roundtrip_cost_percent": [
+      0.16,
+      0.3
+    ],
+    "funding_included": false,
+    "live_allocation": false,
+    "account_returns": false,
+    "portfolio_backtest": false,
+    "note_he": "סיכון מחיר התחלתי $5; הוצאות מתווספות לסיכון. עלות מהפוזיציה הנומינלית לכל עסקה סגורה. ללא ריבית מימון. אין לחבר את הטורים לתשואת תיק."
+  },
+  "grade_interpretation_he": "הציון הוא שיפוט איכות ראיות בסולם 10, לא הסתברות הצלחה ולא ציון מחושב לפי נוסחה מכוילת. נשקלים מקור המידע, כיסוי, מדגם, רגישות לעלות, התוצאות החדשות והתאמת המימוש.",
+  "formulas": [
+    {
+      "id": "R2732_HYPERLIQUID",
+      "name_he": "XRP R2732",
+      "operational_rule_id": "R2732_XRP_SHORT_NY_WEEKDAYS_LOCK",
+      "decision": {
+        "action": "KEEP_ENABLED",
+        "description_he": "להשאיר פעילה",
+        "desired_final_new_entries": "ENABLED",
+        "implementation_status": "INSTALLED_AS_OF_SNAPSHOT",
+        "evidence_grade": 6.0,
+        "previous_evidence_grade": 5.5,
+        "grade_scale": 10
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "RG_XRP_SHORT_g11_R2732__lock05_at2__ny_weekdays__HYPERLIQUID_V2",
+        "operational_formula_id": "RG_XRP_SHORT_g11_R2732__lock05_at2__ny_weekdays__HYPERLIQUID_V2",
+        "description_he": "שורט בימי חול, כשהמחיר כ־0.416%–1.742% מתחת לשיא סשן NYSE האחרון שהושלם.",
+        "conditions_he": "כל15דקות ביום חול בניו־יורק: מחיר הסגירה האחרון נמוך משיא הסשן האחרון שהושלם בשיעור של לפחות כ־0.41581764% ופחות מכ־1.74158769%, עם גבולות מדויקים שמורים. שורט בפתיחת הדקה הבאה, סטופ0.5%,טייק8%,סטופ נעילה ברווח0.25% לאחר תנועה לטובת העסקה1%, פעיל מהדקה הבאה בלבד.",
+        "parameters": {
+          "decision_grid_minutes_utc": 15,
+          "weekday_timezone": "America/New_York",
+          "allowed_weekdays_monday_zero": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "holiday_on_weekday_blocks_signal": false,
+          "distance_expression": "last_closed_price/prior_completed_NYSE_session_high - 1",
+          "distance_lower_exclusive": -0.017415876858352997,
+          "distance_upper_inclusive": -0.004158176397388663,
+          "stop_from_entry_fraction": 0.005,
+          "take_from_entry_fraction": 0.08,
+          "lock_trigger_original_R": 2,
+          "locked_profit_original_R": 0.5,
+          "holding_time_limit_hours": null,
+          "max_positions_per_formula": 1
+        },
+        "price_geometry": {
+          "entry": "D+1 minute OPEN after the UTC decision D",
+          "stop": "initial_SL = E*1.005",
+          "take_profit": "TP = E*0.92",
+          "original_risk": "R_price = abs(E - initial_SL)",
+          "lock_trigger": "E - 2*R_price",
+          "locked_stop": "E - 0.5*R_price",
+          "lock_effective_he": "בודקים קודם סטופ וטייק ישנים; נעילה שזוהתה בנר סגור חלה רק מהדקה שאחריו, ולא על נר הטריגר."
+        },
+        "entry_description_he": "החלטה על בסיס הדקה הסגורה; כניסה בפתיחת הדקה שאחרי ההחלטה.",
+        "exit_description_he": "סטופ 0.5%; טייק 8%. אחרי ירידה של 1% הסטופ עובר לנעילת רווח מחיר 0.25%, החל מהדקה הבאה; לא מחילים אותו על נר הטריגר.",
+        "signal_data_source_he": "מחירי דקה מקוריים של חוזה XRP תמידי בהייפרליקוויד ולוח סשני NYSE. אותו כלל ואותה זירה כמו הנוסחה הפעילה; יומן המחקר כולל את כלל ההזדמנויות ואינו יומן מסירת ההתראות.",
+        "implementation_notes_he": [
+          "BINANCE במזהה המחקר הוא שם היסטורי; גרסת המקור שנבחרה משתמשת במחירי חוזה XRP תמידי ב־Hyperliquid.",
+          "הספים המדויקים הועתקו מהקוד; הגבול השלילי התחתון אינו כלול והעליון כלול.",
+          "נדרשים נרות מלאים של סשן NYSE הקודם שהושלם והדקה האחרונה לפני ההחלטה. אין תנאי BTC, מיקום בתוך הסשן או רוחב סשן מינימלי.",
+          "לוח השנה בקוד שנבדק מוגבל לשנות התמיכה המוגדרות בו; לשימוש בשנה אחרת נדרש לוח סשנים מתאים."
+        ],
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "XRP"
+        ]
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 46,
+          "wins016": 17,
+          "win_pct016": 36.95652173913043,
+          "net016": 288.9000000000063,
+          "net030": 224.50000000000495,
+          "wins030": 6,
+          "open": 0,
+          "pf016": 2.509404388714758,
+          "pf030": 1.9452631578947481,
+          "cap_excluded": 966
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 5,
+          "wins016": 2,
+          "win_pct016": 40.0,
+          "net016": 59.50000000000186,
+          "net030": 52.50000000000171,
+          "wins030": 1,
+          "open": 0,
+          "pf016": 4.005050505050586,
+          "pf030": 3.1428571428571996
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 9,
+            "wins016": 4,
+            "win_pct016": 44.44444444444444,
+            "net016": 125.60000000000201,
+            "net030": 113.00000000000182,
+            "wins030": 2,
+            "open": 0,
+            "pf016": 4.806060606060654,
+            "pf030": 3.756097560975639
+          },
+          "30": {
+            "closed": 36,
+            "wins016": 12,
+            "win_pct016": 33.33333333333333,
+            "net016": 239.90000000000572,
+            "net030": 189.50000000000458,
+            "wins030": 5,
+            "open": 0,
+            "pf016": 2.5145202020202295,
+            "pf030": 1.969309462915615
+          }
+        },
+        "recent_window_clock": "entry_ms",
+        "first_admitted_trade_utc": "2026-10-05T20:01:00+00:00",
+        "basis_he": "שחזור קפוא לפי מחירי Hyperliquid; אינו רווח חשבון",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "price_rules/price_rule_results.json"
+      },
+      "limitations_he": [
+        "רק כ־40.5 ימי תכונות Hyperliquid בחלון זה; לא שנה של אימות במקור המחיר הזה.",
+        "שני טייקים של 8% תרמו עיקר השיפור בסגירות החדשות. אחת העסקאות נפתחה לפני חיתוך 12.11.",
+        "בעלות 0.30% רק 6 מתוך 46 עסקאות נשארות מרוויחות; 11 יציאות נעילת רווח של 0.25% הופכות להפסד נטו קטן."
+      ],
+      "aliases_not_separate_formulas": [
+        "R2732_BINANCE_RECENT_YEAR",
+        "RG_XRP_SHORT_g11_R2732__lock05_at2__ny_weekdays__HYPERLIQUID_V2"
+      ]
+    },
+    {
+      "id": "SFF1361_SOL_RECENT",
+      "name_he": "SOL SFF1361",
+      "operational_rule_id": "SFF1361_SOL_RECENT",
+      "decision": {
+        "action": "KEEP_ENABLED",
+        "description_he": "להשאיר פעילה",
+        "desired_final_new_entries": "ENABLED",
+        "implementation_status": "INSTALLED_AS_OF_SNAPSHOT",
+        "evidence_grade": 6.0,
+        "previous_evidence_grade": 5.5,
+        "grade_scale": 10
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "SFF1361__SOL__-1__CONTROL_010_020__none",
+        "description_he": "שורט; OI ו־Futures של 30 דקות לפחות 40; שינוי המחיר בשעה בין ‎−0.5% ל־+0.5%.",
+        "conditions_he": "ב־SOL ציוני מחיר+OI ו־Futures במשפחת 30 דקות, מיושרים לשורט, לפחות 40. השינוי במחיר בשעה האחרונה בין מינוס 0.5% לפלוס 0.5%, כולל הגבולות. משפחות 30 הדקות צריכות להיות מלאות וזמינות. נדרשת גם היסטוריית מחיר מלאה של 24 שעות, אף שהתנאי המספרי משתמש בשעה האחרונה. אין תנאי ספוט CVD.",
+        "parameters": {
+          "price_oi_30m_short_aligned_min": 40,
+          "futures_cvd_30m_short_aligned_min": 40,
+          "spot_cvd_filter_used": false,
+          "one_hour_price_change_fraction_lower_inclusive": -0.005,
+          "one_hour_price_change_fraction_upper_inclusive": 0.005,
+          "required_complete_price_history_hours": 24,
+          "complete_available_30m_families_required": true,
+          "stop_from_entry_fraction": 0.01,
+          "take_from_entry_fraction": 0.02
+        },
+        "price_geometry": {
+          "entry": "next full minute OPEN after signal data availability",
+          "stop": "SL = E*1.01",
+          "take_profit": "TP = E*0.98"
+        },
+        "entry_description_he": "פתיחת הדקה הבאה לאחר זמינות תנאי הבוט.",
+        "exit_description_he": "סטופ 1%; טייק 2%.",
+        "signal_data_source_he": "ציוני בוט משוחזרים ממשפחת זמן קצרה ונתוני שינוי מחיר בשעה.",
+        "implementation_notes_he": [
+          "הגרסה SFF1361 שונה מנוסחת SOL G65 הישנה. אין להחליף בין המזהים או לשייך לה את יומן העסקאות של G65.",
+          "מודלים משוחזרים משתמשים בהנחת זמינות שתועדה במחקר; זו אינה הוכחת זמן קבלת נתוני המקור בזמן אמת."
+        ],
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "SOL"
+        ]
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 81,
+          "wins016": 43,
+          "win_pct016": 53.08641975308642,
+          "net016": 175.20000000000007,
+          "net030": 118.49999999999997,
+          "wins030": 43,
+          "open": 0,
+          "pf016": 1.7949183303085297,
+          "pf030": 1.4797570850202424,
+          "cap_excluded": 452
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 9,
+          "wins016": 6,
+          "win_pct016": 66.66666666666667,
+          "net016": 37.80000000000003,
+          "net030": 31.500000000000036,
+          "wins030": 6,
+          "open": 0,
+          "pf016": 3.172413793103449,
+          "pf030": 2.615384615384616
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 17,
+            "wins016": 9,
+            "win_pct016": 52.94117647058823,
+            "net016": 36.400000000000034,
+            "net030": 24.50000000000003,
+            "wins030": 9,
+            "open": 0,
+            "pf016": 1.7844827586206897,
+            "pf030": 1.4711538461538463
+          },
+          "30": {
+            "closed": 59,
+            "wins016": 30,
+            "win_pct016": 50.847457627118644,
+            "net016": 107.80000000000005,
+            "net030": 66.50000000000004,
+            "wins030": 30,
+            "open": 0,
+            "pf016": 1.6409036860879902,
+            "pf030": 1.352785145888594
+          }
+        },
+        "recent_window_clock": "entry_ms",
+        "first_admitted_trade_utc": "2026-10-03T21:03:00+00:00",
+        "basis_he": "שחזור ציוני המקור לפי המודל הקפוא וביצוע במחירי Hyperliquid",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "price_rules/price_rule_results.json"
+      },
+      "limitations_he": [
+        "חלק מנתוני המקור הם נתונים ששוחזרו ממאגר עדכני; זמן זמינות CVD מניח סגירת נר ועוד שתי דקות.",
+        "אין הוכחת קליטה בזמן אמת לכל האותות המשוחזרים. המימוש החי משתמש בצילומי Watch ובספי טריות מחמירים יותר."
+      ]
+    },
+    {
+      "id": "XRP_LIQUIDITY_RAW_INVERSE",
+      "name_he": "XRP Liquidity inverse",
+      "operational_rule_id": "XRP_LIQUIDITY_RAW_INVERSE",
+      "decision": {
+        "action": "KEEP_ENABLED",
+        "description_he": "להשאיר פעילה",
+        "desired_final_new_entries": "ENABLED",
+        "implementation_status": "INSTALLED_AS_OF_SNAPSHOT",
+        "evidence_grade": 6.0,
+        "previous_evidence_grade": 6.0,
+        "grade_scale": 10
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "XRP_LIQUIDITY_INVERSE__RAW__QUALIFIED__3d__0.2342784544453025__0.8671878740191461__0.0105286625253104",
+        "description_he": "אות לונג כשיר עם נתח נזילות עליון לפחות 60%; משקפים את היעד ומבצעים שורט אחרי המתנה נגדית.",
+        "conditions_he": "אות לונג במצב זכאות Combined משוחזר; רכיב נזילות תומך שבו סכום הליקווידציה ביעד העליון לפחות 60% מסכום שני היעדים, לפחות בטווח תומך אחד. משמרים את אות הלונג והופכים רק את הביצוע לשורט. אין תנאי Futures 65 או ממוצע 27.51.",
+        "parameters": {
+          "source_direction": "LONG",
+          "execution_direction": "SHORT",
+          "source_state": "COMBINED_QUALIFIED",
+          "upper_target_liquidation_share_min": 0.6,
+          "supporting_timeframes_min": 1,
+          "futures_65_condition": false,
+          "maxpain_mean_27_51_condition": false,
+          "adverse_distance_fraction": 0.2342784544453025,
+          "take_remaining_distance_fraction": 0.8671878740191461,
+          "stop_from_entry_fraction": 0.0105286625253104,
+          "pending_expiry_hours": 24,
+          "holding_time_limit_hours": null
+        },
+        "price_geometry": {
+          "variables": {
+            "P": "פתיחת דקת Hyperliquid המלאה הבאה אחרי זמינות האות, לפני ההמתנה",
+            "U": "יעד הלונג המקורי",
+            "T": "היעד המשוקף",
+            "E": "מחיר הכניסה המתוכנן לשורט"
+          },
+          "reflected_target": "T = 2*P - U",
+          "valid_geometry": "0 < T < P; U > P",
+          "entry": "E = P + 0.2342784544453025*(P - T)",
+          "stop": "SL = E*(1 + 0.0105286625253104)",
+          "take_profit": "TP = E + 0.8671878740191461*(T - E)",
+          "cancel_before_fill_if": "reflected target T reached",
+          "clarification_he": "השיקוף סביב P, מחיר הייחוס לפני ההמתנה; לא מחשבים מחדש את השיקוף סביב E לאחר העלייה. ההבהרה נבדקה בקוד replay_gapaware.py ו־replay_original.py ומחליפה ניסוח עמום בדוח."
+        },
+        "entry_description_he": "יעד המקור משוקף לצד השורט. ממתינים לתנועה נגדית בגודל 23.43% מהמרחק ליעד המשוקף.",
+        "exit_description_he": "טייק אחרי 86.72% מהמרחק מהכניסה החדשה ליעד המשוקף; סטופ 1.0529%.",
+        "deduplication_he": "פוזיציה/הזמנה אחת למטבע בנוסחה; זהות יעד לפי מטבע, כיוון וטווח, טווח יעד מצטבר של 0.4% ופער של עד 90 דקות. מקור האות נשאר לונג; ההיפוך מתבצע רק בגאומטריית העסקה.",
+        "signal_data_source_he": "מצבי QUALIFIED משוחזרים של הבוט, כולל נזילות בכל טווח תומך. יעד הלונג המקורי משוקף סביב מחיר הייחוס לפני ההמתנה לתנועה הנגדית; מחיר הייחוס ומחירי הביצוע הם מחוזה XRP תמידי ב־Hyperliquid.",
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "XRP"
+        ],
+        "live_source_note_he": "המימוש המותקן משתמש בנתוני Watch שנלכדו ובבדיקות טריות מחמירות. המחקר כולל אוכלוסיית נתוני מקור משוחזרת רחבה יותר; אין להסיק שכל אות היסטורי היה זמין למימוש החי."
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 41,
+          "wins016": 24,
+          "win_pct016": 58.53658536585366,
+          "net016": 95.51497010438882,
+          "net030": 68.25604720605622,
+          "wins030": 24,
+          "open": 0,
+          "pending": 0,
+          "pf016": 2.0307969996935284,
+          "pf030": 1.6565369184073302,
+          "cap_excluded": 501,
+          "target_before_fill": 9
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 4,
+          "wins016": 2,
+          "win_pct016": 50.0,
+          "net016": 0.868489363452527,
+          "net030": -1.7909177485799201,
+          "wins030": 2,
+          "open": 0,
+          "pending": 0,
+          "pf016": 1.075391918898982,
+          "pf030": 0.8606220788632324,
+          "cap_excluded": 15,
+          "target_before_fill": 2,
+          "source_window_label": "NEW_SINCE_BASELINE"
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 6,
+            "wins016": 4,
+            "win_pct016": 66.66666666666667,
+            "net016": 12.34738159125361,
+            "net030": 8.358270923204934,
+            "wins030": 4,
+            "open": 0,
+            "pending": 0,
+            "pf016": 2.071852840939784,
+            "pf030": 1.6504812554892208,
+            "cap_excluded": 41,
+            "target_before_fill": 3
+          },
+          "30": {
+            "closed": 31,
+            "wins016": 18,
+            "win_pct016": 58.064516129032256,
+            "net016": 61.5220437116218,
+            "net030": 40.91163859337033,
+            "wins030": 18,
+            "open": 0,
+            "pending": 0,
+            "pf016": 1.8836586222334795,
+            "pf030": 1.522732028289414,
+            "cap_excluded": 336,
+            "target_before_fill": 8
+          }
+        },
+        "recent_window_clock": "entry_ms",
+        "first_admitted_trade_utc": "2026-10-07T13:51:00+00:00",
+        "basis_he": "שחזור מלוא נתוני הנזילות ומודלי הבוט; מחיר ביצוע Hyperliquid",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "combined/XRP_LIQUIDITY_RAW_INVERSE_comparison_complete.json"
+      },
+      "limitations_he": [
+        "25 הגעות לטייק אך רק 24 עסקאות מרוויחות לאחר עלות 0.16%.",
+        "המחקר משתמש באוכלוסיית מקור משוחזרת ורחבה יותר מהמימוש החי; אין להעביר את כל רווחי ההיסטוריה למנגנון החי.",
+        "נתוני CVD עודכנו גם לאחר החיתוך; זמן הזמינות ההיסטורי הוא הנחת המודל ולא הוכחת קליטה מקומית."
+      ]
+    },
+    {
+      "id": "HYPE_WATCH_LIQ4050_24H_INVERSE",
+      "name_he": "HYPE החדשה — Watch נזילות 40–50%, 24h",
+      "operational_rule_id": null,
+      "decision": {
+        "action": "ADD_AFTER_MATCHING_IMPLEMENTATION",
+        "description_he": "נשארת המועמדת המועדפת להוספה; דורשת מימוש תואם",
+        "desired_final_new_entries": "ENABLED",
+        "implementation_status": "NOT_INSTALLED",
+        "evidence_grade": 5.5,
+        "previous_evidence_grade": 5.5,
+        "grade_scale": 10
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": false,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "HYPE"
+        ],
+        "description_he": "כאשר Watch מצביע על יעד עולה ב־HYPE בטווח 24 שעות, ונתח הנזילות הנבחר הוא לפחות 40% ופחות מ־50%, מבצעים שורט הפוך לפי כללי בחירת גל המקור.",
+        "parameters": {
+          "maxpain_timeframe": "24h",
+          "selected_liquidity_share_percent_lower_inclusive": 40,
+          "selected_liquidity_share_percent_upper_exclusive": 50,
+          "mapping_valid_required": true,
+          "raw_scorer_selected_side": "SHORT",
+          "source_base_direction": "LONG",
+          "execution_direction": "SHORT",
+          "stop_from_entry_fraction": 0.02,
+          "take_from_entry_fraction": 0.02,
+          "holding_time_limit_minutes": 1440,
+          "adverse_entry_wait_used": false,
+          "additional_oi_or_cvd_thresholds": false,
+          "max_concurrent_positions_per_formula_symbol": 1
+        },
+        "price_geometry": {
+          "entry": "OPEN of next full minute strictly after max(source usable time, source sample ready time)",
+          "stop": "SL = E*1.02",
+          "take_profit": "TP = E*0.98",
+          "timeout": "OPEN at entry time + 1440 minutes if no earlier barrier exit"
+        },
+        "mapping_note_he": "כיוון SHORT בשדה הפנימי של מודל המאקספאיין מציין כאן יעד עליון; כיוון תנועת המקור LONG נגזר ממיפוי תקף. אין לבדוק raw_selected_side=LONG ואין להחליף זאת בתנאי הנזילות 60% של XRP.",
+        "verified_capture_and_replay_contract": {
+          "research_catalog_record": {
+            "candidate_key": "captured-question-search-v3-experimental-binding:INVERSE:captured-question-search-v3-experimental-binding:LIQUIDITY_40_50",
+            "definition": {
+              "base_candidate_key": "captured-question-search-v3-experimental-binding:LIQUIDITY_40_50",
+              "catalog_version": "captured-question-search-v3-experimental-binding",
+              "conditions": [
+                {
+                  "feature": "event.direction_mapping_valid",
+                  "operator": "==",
+                  "value": true
+                },
+                {
+                  "feature": "liquidity.selected_share_pct",
+                  "operator": ">=",
+                  "value": 40
+                },
+                {
+                  "feature": "liquidity.selected_share_pct",
+                  "operator": "<",
+                  "value": 50
+                }
+              ],
+              "discovery_only": true,
+              "formula_id": "captured-question-search-v3-experimental-binding:INVERSE:captured-question-search-v3-experimental-binding:LIQUIDITY_40_50",
+              "justification": "User-requested disjoint ranges; not presumed monotonic",
+              "overlap_group": "LIQUIDITY",
+              "question_ids": [
+                "Q02",
+                "Q43",
+                "Q59"
+              ],
+              "repeat_count": 1,
+              "research_orientation": "INVERSE"
+            },
+            "definition_sha256": "a7db087e3b0b6db4f30b13e5e53df5cf91143e8351cf83695581f0e1d5a2dfc2",
+            "entry_version": "watch-next-full-minute-route-open-v1",
+            "evaluation_version": "watch-scan-timeframe-formulas-v1",
+            "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+            "measurement_version": "watch-scan-measurements-v1",
+            "orientation": "INVERSE",
+            "outcome_method_version": "ordered-first-touch-v7",
+            "parent_policy_version": "btc-parent-close-reversal-200bps-v1",
+            "population_version": "watch-all-scan-observations-v1",
+            "registered_at_utc": "2026-09-14T06:20:30.538294+00:00",
+            "selection_version": "watch-selected-timeframe-first-arm-unknown-blocks-v1",
+            "supported": true,
+            "unsupported_features": []
+          },
+          "research_context_id": 416,
+          "direction_mapping": {
+            "selected_raw_maxpain_source_side": "SHORT",
+            "raw_target_field": "short_max_pain",
+            "raw_target_location": "ABOVE_CURRENT_PRICE",
+            "captured_base_direction": "LONG",
+            "research_orientation": "INVERSE",
+            "trade_direction": "SHORT",
+            "mapping_he": "צד המקור הגולמי SHORT מציין יעד מעל המחיר; הוא ממופה לכיוון בסיס LONG, והנוסחה ההופכית סוחרת SHORT. אין להחליף בין שלושת השדות.",
+            "required_mapping_valid": true,
+            "scorer_selection": {
+              "eligible_sides": "valid active scored target slots only",
+              "winner_tuple_max": [
+                "score",
+                "negative_absolute_target_distance_pct",
+                "1_if_raw_side_LONG_else_0"
+              ],
+              "captured_selected_flag_must_match_winner": true
+            }
+          },
+          "liquidity_condition": {
+            "feature": "liquidity.selected_share_pct",
+            "field_from_selected_slot": "near_share_pct",
+            "lower_inclusive_percent": 40,
+            "upper_exclusive_percent": 50,
+            "expression": "40 <= near_share_pct < 50",
+            "raw_numerator": "short_liquidation_amount",
+            "raw_opposite_amount": "long_liquidation_amount",
+            "source_ratio_check": "near_share_pct approximately equals 100 * short_liquidation_amount / (short_liquidation_amount + long_liquidation_amount)",
+            "ratio_abs_tolerance_percentage_points": 0.05,
+            "ratio_math_isclose_default_relative_tolerance": 1e-09,
+            "amount_requirements": "Captured near/far finite nonnegative amounts equal the corresponding raw amounts; denominator positive.",
+            "missing_zero_or_unverified_behavior": "UNKNOWN; no zero-default substitution",
+            "additional_oi_condition": null,
+            "additional_futures_cvd_condition": null,
+            "additional_spot_cvd_condition": null,
+            "additional_score_threshold": null,
+            "scorer_score_and_components_validation_required": true
+          },
+          "capture_contract": {
+            "consumer_version": "watch-all-scan-intake-v1",
+            "measurement_version": "watch-scan-measurements-v1",
+            "timeframe_evaluation_version": "watch-scan-timeframe-formulas-v1",
+            "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+            "selection_version": "watch-selected-timeframe-first-arm-unknown-blocks-v1",
+            "parent_policy_version": "btc-parent-close-reversal-200bps-v1",
+            "require_intake_status": "ACCEPTED",
+            "require_tf_sample_status": "READY",
+            "require_membership_status": "LIVE",
+            "required_hash_bindings": [
+              "Timeframe and measurement payload bundle_sha256 match intake.bundle_sha256.",
+              "Timeframe and measurement payload parent_payload_sha256 match intake.parent_payload_sha256."
+            ],
+            "required_identity_bindings": [
+              "consumer_version",
+              "measurement_version",
+              "population_version",
+              "snapshot_set_id",
+              "symbol",
+              "price_route",
+              "entry_time_utc",
+              "entry_version",
+              "outcome_method_version",
+              "membership.episode_policy_version"
+            ],
+            "required_clock_bindings": [
+              "tf.usable_from_utc == measurement.usable_from_utc",
+              "measurement.usable_from_utc == intake.usable_from_utc",
+              "membership.decision_time_utc == measurement.usable_from_utc"
+            ],
+            "source_time_validation": "Selected-source observed and price-fetched times cannot be in the future relative to the captured observation.",
+            "failed_guard_behavior": "UNKNOWN",
+            "exact_validation_source": "hype_new/source_export.sql and legacy/code/research_watch_scan_formula_timeframe.py"
+          },
+          "wave_selection": {
+            "group_key": "membership.btc_parent_movement_id",
+            "group_scope": [
+              "candidate_key",
+              "HYPE",
+              "24h",
+              "base_direction_LONG"
+            ],
+            "reuse_existing_parent_identifier": true,
+            "parent_policy_version": "btc-parent-close-reversal-200bps-v1",
+            "arm_required": "MATCH",
+            "representative": "First MATCH in the BTC parent wave, ordered by usable_from_utc then snapshot_set_id.",
+            "unknown_block": "Reject if any UNKNOWN record in the same wave has usable_from_utc <= representative.usable_from_utc.",
+            "later_unknown_blocks_prior_match": false,
+            "not_selected_status": "NOT_APPLICABLE, not a NO_MATCH control",
+            "no_match_control_arm_is_not_a_trading_rule": true,
+            "rescan_after_capacity_rejection_in_same_wave": false,
+            "missing_parent_id_behavior": "UNKNOWN and unusable for grouping; never invent a parent identifier."
+          },
+          "entry_and_exit": {
+            "execution_venue": "HYPERLIQUID_PERPETUAL",
+            "price_timeframe": "1m",
+            "adverse_entry_wait_used": false,
+            "sample_ready_utc": "max(tf_sample.created_at_utc,tf_sample.updated_at_utc)",
+            "entry_clock": "floor(max(usable_from_utc,sample_ready_utc)/60000)*60000+60000",
+            "entry_price": "OPEN of the exact next full minute; no Binance substitution.",
+            "entry_type_research": "Market-at-next-full-minute-open model; actual exchange fill not verified.",
+            "stop_fraction": 0.02,
+            "take_profit_fraction": 0.02,
+            "stop_price": "entry_price*1.02",
+            "take_profit_price": "entry_price*0.98",
+            "max_holding_minutes": 1440,
+            "timeout_price": "OPEN at entry_ms + 1440*60000 if neither barrier was first touched.",
+            "target_is_maxpain_target": false,
+            "gap_open_policy": "If a bar opens beyond either boundary, use that OPEN as the modeled exit.",
+            "same_minute_both_boundaries": "AMBIGUOUS unless the OPEN establishes a first boundary; excluded from closed PNL.",
+            "missing_price_path": "DATA_MISSING/UNKNOWN; not counted as profit or loss.",
+            "capacity": {
+              "max_positions_per_formula_symbol": 1,
+              "full_history_continuous": true,
+              "reject_if": "entry_ms < previous_release_ms",
+              "entry_equal_release_is_allowed": true,
+              "barrier_release": "exit_bar_open_ms+60000",
+              "timeout_release": "entry_ms+1440*60000",
+              "unknown_path_capacity": "A data-missing trade blocks until its modeled deadline; rejected events during uncertain occupancy can extend busy time to their modeled release."
+            }
+          }
+        },
+        "catalog_metadata_note_he": "discovery_only הוא שדה מקורי בקטלוג המחקר; החלטת ההפעלה המעודכנת נמצאת בשדה decision ולא נגזרת משדה היסטורי זה.",
+        "take_target_note_he": "יעד העסקה הוא 2% ממחיר הכניסה, ולא יעד המאקספאיין עצמו."
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ.",
+        "new_formula_allocation_defined": false
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 32,
+          "wins016": 24,
+          "win_pct016": 75.0,
+          "net016": 63.38509911934233,
+          "net030": 52.185099119342325,
+          "wins030": 24,
+          "open": 0,
+          "pf030": 2.1974051437937048,
+          "cap_excluded": 2,
+          "native_mean_return016_pct": 0.7923137389917791,
+          "native_mean_return030_pct": 0.652313738991779,
+          "native_return_sum030_pctpoints": 20.87403964773693
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 0,
+          "net016": 0,
+          "net030": 0
+        },
+        "prior_cutoff_utc": "2026-11-13T09:39:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 3,
+            "wins016": 3,
+            "win_pct016": 100.0,
+            "net016": 13.80000000000001,
+            "net030": 12.75000000000001,
+            "open": 0
+          },
+          "30": {
+            "closed": 13,
+            "wins016": 12,
+            "win_pct016": 92.3076923076923,
+            "net016": 45.950762538253365,
+            "net030": 41.40076253825336,
+            "open": 0
+          }
+        },
+        "recent_window_clock": "source_time",
+        "first_admitted_trade_utc": "2026-09-14T06:25:00+00:00",
+        "basis_he": "אירועי Watch שנשמרו והורחבו; בדיקת מחיר Hyperliquid; נוסחה שונה מ־ROW71205",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "hype_new/delivery_summary.json"
+      },
+      "limitations_he": [
+        "לא נוספה אף עסקה תקפה מאז חיתוך המחקר הקודם ב־13.11 או מאז פרסומו ב־14.11.",
+        "שני גלי מקור מתאימים חדשים נחסמו כי רשומה מוקדמת באותו גל הכילה מידע לא ידוע. אין לספור אותם כעסקאות.",
+        "מתוך 40 גלים מתאימים: 6 נחסמו בשל מידע לא ידוע, 2 בשל פוזיציה קיימת, ו־32 נבדקו.",
+        "בחירת הנוסחה נעשתה לאחר סריקה רחבה; נדרשת ראיה עתידית נפרדת. אין בדיקת תיק משולב עם שש האחרות."
+      ],
+      "installation_requirements_he": [
+        "להתקין מנגנון אותות עם אותם כללי מיפוי כיוון, נזילות, גלי מקור, חסימת UNKNOWN ומועד זמינות שהופעלו במחקר.",
+        "לאמת התאמה ליומן 32 העסקאות, לששת גלי המקור החסומים ולשתי חסימות הקיבולת בחיתוך המחקר.",
+        "לחבר למנגנון הביצוע וההגנות הקיים עם מזהה חדש; לא להשתמש במזהה HYPE_ROW71205_SHORT.",
+        "להגדיר במפורש הקצאת סיכון חיה במסגרת תקציב התיק הקיים; הקובץ אינו קובע סכום חדש."
+      ]
+    },
+    {
+      "id": "CT009_FROZEN_3D",
+      "name_he": "CT009 — ששת המטבעות המותרים",
+      "operational_rule_id": "CT009_FROZEN_3D",
+      "decision": {
+        "action": "PAUSE_NEW_ENTRIES",
+        "description_he": "להשהות כניסות חדשות",
+        "desired_final_new_entries": "DISABLED",
+        "implementation_status": "INSTALLED_AS_OF_SNAPSHOT",
+        "evidence_grade": 4.5,
+        "previous_evidence_grade": 6.0,
+        "grade_scale": 10,
+        "automatic_reenable_after_fix": false
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "CT009__3d__0.1814560294151306__0.9365681871771814__0.0040077843998312",
+        "description_he": "שורט חוזר על יעד קרוב; ממוצע ציוני ההתראות הקודמות לפחות 72.8; ממתינים לעלייה לפני הכניסה.",
+        "conditions_he": "התראת שורט רגילה בטווח מאקספאיין 48 שעות או 3 ימים. ב־24 השעות שקדמו לה הופיעה התראה באותו מטבע, כיוון וטווח, על יעד שמרחקו עד 0.4% מהיעד הנוכחי. ממוצע ציוני המאקספאיין בהתראות הקודמות הללו לפחות 72.8. ההתראה הנוכחית אינה חלק מהממוצע.",
+        "parameters": {
+          "source_population": "OBSERVED_DELIVERED_ORDINARY_ALERTS",
+          "maxpain_timeframes": [
+            "48h",
+            "3d"
+          ],
+          "previous_alert_lookback_hours": 24,
+          "same_target_max_min_ratio": 1.004,
+          "same_target_ratio_numeric_tolerance": 1e-12,
+          "minimum_previous_matching_alerts": 1,
+          "previous_scores_mean_min": 72.8,
+          "exclude_current_alert_from_mean": true,
+          "adverse_distance_fraction": 0.1814560294151306,
+          "take_remaining_distance_fraction": 0.9365681871771814,
+          "stop_from_entry_fraction": 0.0040077843998312,
+          "pending_expiry_hours": 24,
+          "holding_time_limit_hours": null
+        },
+        "price_geometry": {
+          "variables": {
+            "P": "פתיחת הדקה המלאה הבאה אחרי זמינות האות",
+            "T": "יעד המקור, נמוך מ־P",
+            "E": "מחיר הכניסה המתוכנן"
+          },
+          "entry": "E = P + 0.1814560294151306*(P - T)",
+          "stop": "SL = E*(1 + 0.0040077843998312)",
+          "take_profit": "TP = E + 0.9365681871771814*(T - E)",
+          "cancel_before_fill_if": "original target T reached",
+          "same_bar_policy_he": "מחקר המקור שומר נתיבי נר חלופיים; התוצאה הראשית היא path0. סדר מילוי אמיתי מחייב נתוני ביצוע ואינו מוכח מנר דקה בלבד."
+        },
+        "entry_description_he": "ממתינים לעלייה נגד השורט בגודל 18.15% מהמרחק המקורי ליעד. ההזמנה פגה אחרי 24 שעות או מתבטלת אם היעד המקורי הושג לפני המילוי.",
+        "exit_description_he": "טייק אחרי 93.66% מהדרך מהכניסה החדשה ליעד; סטופ 0.4008%. אין מגבלת החזקה לאחר מילוי.",
+        "deduplication_he": "פוזיציה/הזמנה אחת למטבע בתוך הנוסחה; זהות אירוע לפי המקור ואפיזודת יעד. אפיזודות ההתראות הופרדו גם בפער מעל 90 דקות או טווח יעדים מצטבר מעל 0.4%. חישוב ממוצע 24 השעות נפרד מהאפיזודה.",
+        "signal_data_source_he": "התראות רגילות שנמסרו ונשמרו; ממוצע של אירועי ההתראה הקודמים ולא חישוב רציף מכל מצבי הבוט.",
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "BTC",
+          "DOGE",
+          "ETH",
+          "HYPE",
+          "SOL",
+          "XRP"
+        ],
+        "historical_broader_research_symbols": [
+          "BTC",
+          "ETH",
+          "SOL",
+          "XRP",
+          "DOGE",
+          "HYPE",
+          "BNB",
+          "ZEC"
+        ],
+        "symbol_scope_note_he": "רשימת התצורה הנבחנת היא BTC, ETH, SOL, XRP, DOGE, HYPE בלבד. BNB ו־ZEC נכללו במחקר רחב יותר ואינם ברשימת ההפעלה הזאת."
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 103,
+          "wins016": 45,
+          "win_pct016": 43.689320388349515,
+          "net016": 190.71907306548607,
+          "net030": 10.819176247092539,
+          "wins030": 45,
+          "open": 0,
+          "pending": 0,
+          "pf016": 1.4700122441159693,
+          "pf030": 1.0213363347387021,
+          "cap_excluded": 203,
+          "target_before_fill": 28
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 15,
+          "wins016": 3,
+          "win_pct016": 20.0,
+          "net016": -46.43600606346962,
+          "net030": -72.63502016323568,
+          "wins030": 3,
+          "open": 0,
+          "pending": 0,
+          "pf016": 0.44688345276718344,
+          "pf030": 0.30766158488301165,
+          "cap_excluded": 13,
+          "target_before_fill": 7,
+          "source_window_label": "NEW_SINCE_BASELINE"
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 25,
+            "wins016": 7,
+            "win_pct016": 28.0,
+            "net016": -30.517206386921234,
+            "net030": -74.18222988653133,
+            "wins030": 7,
+            "open": 0,
+            "pending": 0,
+            "pf016": 0.7576654661061389,
+            "pf030": 0.5286093186265292,
+            "cap_excluded": 26,
+            "target_before_fill": 10
+          },
+          "30": {
+            "closed": 62,
+            "wins016": 22,
+            "win_pct016": 35.483870967741936,
+            "net016": 32.31305812494635,
+            "net030": -75.97620015408668,
+            "wins030": 22,
+            "open": 0,
+            "pending": 0,
+            "pf016": 1.115467857740659,
+            "pf030": 0.7827442938003796,
+            "cap_excluded": 114,
+            "target_before_fill": 24
+          }
+        },
+        "recent_window_clock": "entry_ms",
+        "first_admitted_trade_utc": "2026-09-07T19:32:00+00:00",
+        "basis_he": "התראות רגילות שנמסרו בפועל; כלל קפוא; מחיר ביצוע Hyperliquid",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "combined/CT009_FROZEN_3D_comparison_complete.json"
+      },
+      "limitations_he": [
+        "CT009 אינה מופעלת על כל המטבעות. BNB ו־ZEC מחוץ לרשימת ששת המטבעות המותרת.",
+        "נתוני כל שמונת מטבעות המחקר טובים יותר בתקופה החדשה בזכות שלוש הצלחות ב־ZEC; הם אינם נתוני התצורה הפעילה.",
+        "סטופ 0.40077844% מצריך פוזיציה נומינלית של כ־$1,247.57 לסיכון מחיר $5. הפסד סטופ כולל עלות הוא כ־$7.00 ב־0.16% או $8.74 ב־0.30%.",
+        "במחקר שמונת המטבעות יש אירוע BNB היסטורי ללא מחיר מספיק; תוצאתו לא ידועה והוא חוסם אירועים מאוחרים. אינו חלק מנתוני LIVE6."
+      ],
+      "application_transition": {
+        "block_new_signals_from_order_execution": true,
+        "unfilled_entry_orders": "CANCEL_UNFILLED_ENTRY_ORDERS_WHEN_CHANGE_IS_APPLIED",
+        "open_positions": "PRESERVE_EXISTING_PROTECTION_AND_EXIT_MANAGEMENT",
+        "force_close_existing_positions": false,
+        "continue_source_data_collection": true
+      }
+    },
+    {
+      "id": "OCONF0034_13",
+      "name_he": "OCONF0034_13",
+      "operational_rule_id": "OCONF0034_13",
+      "decision": {
+        "action": "PAUSE_NEW_ENTRIES",
+        "description_he": "להשהות כניסות במימוש הנוכחי עד התאמה למחקר",
+        "desired_final_new_entries": "DISABLED",
+        "implementation_status": "RESEARCH_PARITY_MISMATCH",
+        "evidence_grade": 6.0,
+        "previous_evidence_grade": 6.5,
+        "grade_scale": 10,
+        "automatic_reenable_after_fix": false
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "OCONF0034_13",
+        "predicate_key": "MP_-1_ALL6_repeat24h_ge2_core40_spot_support",
+        "description_he": "אישור מאקספאיין יורד שחזר, עם תמיכת מודלי הנגזרים; ממתינים לעלייה ואז נכנסים לשורט אל היעד המקורי.",
+        "conditions_he": [
+          "אישור מאקספאיין עם יעד מתחת למחיר. זו נוסחת אישור מאקספאיין, לא נוסחת אישור מגנט.",
+          "לפחות שתי הופעות ב־24 שעות, כולל הצילום הנוכחי, באותו מטבע, סוג אישור וכיוון יעד; נספרים צילומי החלטה נפרדים. כמה טווחים באותו צילום אינם כמה חזרות.",
+          "כל יעד קודם מושווה ליעד הנוכחי: max(previous_target,current_target)/min(previous_target,current_target) <= 1.004.",
+          "ציון OI מהיר המיושר לירידה לפחות 40; ציון CVD חוזים מהיר המיושר לירידה לפחות 40; ציון CVD ספוט מהיר המיושר לירידה לפחות 0.",
+          "הציון המהיר מחושב ממשפחות המודל: (0.35*now + 0.30*short)/0.65. now היא משפחת 30 דקות; short כוללת שעה וארבע שעות. אין להחליף זאת בממוצע חדש של נתוני OI או CVD גולמיים.",
+          "שדה חסר או מיושן אינו עובר את תנאי הסף. אין דרישת ציון מאקספאיין 65 או 75 בגרסה זו."
+        ],
+        "parameters": {
+          "confirmation_type": "MP",
+          "repeat_lookback_hours": 24,
+          "minimum_distinct_snapshots_including_current": 2,
+          "same_target_max_min_ratio": 1.004,
+          "oi_fast_aligned_min": 40,
+          "futures_cvd_fast_aligned_min": 40,
+          "spot_cvd_fast_aligned_min": 0,
+          "now_weight": 0.35,
+          "short_weight": 0.3,
+          "normalization_weight": 0.65,
+          "adverse_distance_fraction": 0.2,
+          "stop_from_entry_fraction": 0.012,
+          "pending_expiry_hours": 24,
+          "holding_time_limit_hours": null
+        },
+        "price_geometry": {
+          "variables": {
+            "P": "מחיר הייחוס במועד יצירת ההזדמנות",
+            "T": "יעד המאקספאיין המקורי, T < P",
+            "E": "מחיר הכניסה המתוכנן"
+          },
+          "entry": "E = P + 0.2*(P - T)",
+          "stop": "SL = E*1.012",
+          "take_profit": "TP = T",
+          "example": {
+            "P": 100,
+            "T": 98,
+            "E": 100.4,
+            "SL": 101.6048,
+            "TP": 98
+          }
+        },
+        "entry_and_exit_he": "פקודת הכניסה פגה לאחר 24 שעות. אם היעד המקורי הושג לפני המילוי, מבטלים. אחרי מילוי אין מגבלת זמן להחזקה; היציאה בטייק או בסטופ.",
+        "deduplication_he": "איחוד לאפיזודת יעד לצורך מניעת כניסות כפולות הוא כלל נפרד מספירת חזרות: כל טווח היעדים המצטבר באפיזודה נדרש להישאר בתוך 0.4%. פוזיציה או פקודת כניסה ממתינה חוסמת אות נוסף באותו מטבע בתוך הנוסחה.",
+        "signal_data_source_he": "ציוני הבוט והחלטות האישור המקוריים שנשמרו בזמן התצפית. צילום אינו הוכחה למסירת הודעה בטלגרם.",
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "BTC",
+          "DOGE",
+          "ETH",
+          "HYPE",
+          "SOL",
+          "XRP"
+        ],
+        "reference_selection": {
+          "choose_one_confirmed_item_per": [
+            "coin",
+            "snapshot",
+            "target_direction"
+          ],
+          "ranking": "highest maxpain score; original timeframe order then item_id for ties",
+          "timeframe_tie_order": [
+            "12h",
+            "24h",
+            "48h",
+            "3d",
+            "1w",
+            "2w",
+            "1m"
+          ]
+        },
+        "reference_episode": {
+          "reset_when_gap_minutes_strictly_greater_than": 90,
+          "maximum_cumulative_target_max_min_ratio": 1.004,
+          "separate_from_repeat_lookback": true,
+          "numeric_tolerance": 1e-12,
+          "episode_history_before_final_derivatives_filter": true
+        }
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 55,
+          "wins016": 40,
+          "win_pct016": 72.72727272727273,
+          "net016": 88.88690463663059,
+          "net030": 56.80357130329721,
+          "wins030": 40,
+          "open": 0,
+          "pending": 0,
+          "pf030": 1.6059047605685037,
+          "native_net016_R": 17.777380927326117,
+          "native_net030_R": 11.360714260659442,
+          "cap_excluded": 6
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 7,
+          "wins016": 4,
+          "win_pct016": 57.14285714285714,
+          "net016": -1.9404824541523702,
+          "net030": -6.023815787485704,
+          "wins030": 4,
+          "open": 0,
+          "pending": 0,
+          "pf030": 0.6787298246674294,
+          "native_net016_R": -0.38809649083047404,
+          "native_net030_R": -1.204763157497141
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {
+          "7": {
+            "closed": 13,
+            "wins016": 9,
+            "win_pct016": 69.23076923076923,
+            "net016": 10.624356865993953,
+            "net030": 3.0410235326606205,
+            "wins030": 9,
+            "open": 0,
+            "pending": 0,
+            "pf030": 1.1216409413064248,
+            "native_net016_R": 2.1248713731987907,
+            "native_net030_R": 0.6082047065321241
+          },
+          "14": {
+            "closed": 20,
+            "wins016": 14,
+            "win_pct016": 70.0,
+            "net016": 24.252741432774336,
+            "net030": 12.586074766107668,
+            "wins030": 14,
+            "open": 0,
+            "pending": 0,
+            "pf030": 1.3356286604295375,
+            "native_net016_R": 4.850548286554867,
+            "native_net030_R": 2.5172149532215338
+          },
+          "30": {
+            "closed": 41,
+            "wins016": 29,
+            "win_pct016": 70.73170731707317,
+            "net016": 58.06868913870029,
+            "net030": 34.152022472033615,
+            "wins030": 29,
+            "open": 0,
+            "pending": 0,
+            "pf030": 1.4553602996271149,
+            "native_net016_R": 11.613737827740058,
+            "native_net030_R": 6.830404494406722
+          }
+        },
+        "recent_window_clock": "order_ms",
+        "first_admitted_trade_utc": "2026-10-03T06:53:00+00:00",
+        "basis_he": "החלטות ואישורי Watch מקוריים, קשורים לגיבובי הציונים שנשמרו; ביצוע Hyperliquid",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "oconf/OCONF0034_13_update_summary.json"
+      },
+      "limitations_he": [
+        "המחקר בוחר אישור אחד בעל הציון הגבוה ביותר לכל צילום וכיוון; המימוש הפעיל יוצר מועמדים מכל הטווחים המאושרים.",
+        "המחקר מתחיל אירוע חדש אחרי הפסקה של יותר מ־90 דקות; כלל זה אינו מופעל עבור OCONF בקוד המותקן.",
+        "הקשחת טריות OI ל־10 דקות אינה משנה את 85 האותות הנוכחיים. הפערים האחרים נשארים.",
+        "הציון מתייחס לנוסחה שנחקרה, לא לאיכות ההתאמה של המימוש המותקן."
+      ],
+      "application_transition": {
+        "block_new_signals_from_order_execution": true,
+        "unfilled_entry_orders": "CANCEL_UNFILLED_ENTRY_ORDERS_WHEN_CHANGE_IS_APPLIED",
+        "open_positions": "PRESERVE_EXISTING_PROTECTION_AND_EXIT_MANAGEMENT",
+        "force_close_existing_positions": false,
+        "continue_source_data_collection": true
+      },
+      "before_reconsidering_activation_he": [
+        "להתאים בחירת יעד יחיד בעל הציון הגבוה ביותר בכל צילום/מטבע/כיוון, לרבות סדר שובר השוויון המקורי.",
+        "להחיל איפוס אירוע אחרי פער גדול מ־90 דקות, בנוסף לכלל טווח היעדים המצטבר.",
+        "לאמת זהות אותות, כפילויות וקבלת עסקאות מול יומן המחקר הקפוא. בדיקת טריות OI לבדה אינה מאמתת התאמה."
+      ],
+      "required_implementation_alignment": {
+        "rule_id": "OCONF0034_13",
+        "recommendation": "PAUSE_NEW_ENTRIES_IN_CURRENT_IMPLEMENTATION",
+        "original_candidate_selection": {
+          "group": [
+            "snapshot_set_id",
+            "coin",
+            "target_direction"
+          ],
+          "eligible": "Native MP confirmation is CONFIRMED or STRONG_CONFIRMED; no validation errors; usable current and target prices.",
+          "sort_ascending": [
+            "negative_score",
+            "timeframe_order",
+            "item_id"
+          ],
+          "timeframe_order": [
+            "12h",
+            "24h",
+            "48h",
+            "3d",
+            "1w",
+            "2w",
+            "1m"
+          ],
+          "unlisted_timeframe_sort_rank": 99,
+          "select_n": 1
+        },
+        "repeat_counting": "Count distinct chosen snapshots, not all confirmed timeframes in one snapshot; choose the representative before constructing repeats and episodes.",
+        "episode": {
+          "group": [
+            "coin",
+            "target_direction",
+            "confirmation_kind_MP"
+          ],
+          "reset_gap_ms_strictly_greater_than": 5400000,
+          "gap_equal_90_minutes_resets": false,
+          "reset_cumulative_target_ratio_strictly_greater_than": 1.004,
+          "numeric_tolerance": 1e-12,
+          "clock": "available_ms",
+          "sort": [
+            "available_ms",
+            "coin",
+            "confirmation_kind",
+            "event_id"
+          ],
+          "eligibility_stage": "Episode history is created from selected original confirmations before final OI/Futures/Spot filtering, not only from admitted trades."
+        },
+        "live_mismatches": [
+          "Emits all confirmed timeframe items instead of one highest-scored item.",
+          "Does not apply the 90-minute gap reset to OCONF."
+        ],
+        "oi_10m_sensitivity": "85/85 signals and 55/55 fills are unchanged; this does not resolve the other mismatches.",
+        "resume_condition": "Reconcile selection and episode rules; verify parity against frozen events and the admission ledger before treating the installed version as the validated formula."
+      }
+    },
+    {
+      "id": "HYPE_ROW71205_ALL_HYPERLIQUID_SOURCE_VARIANT_V2",
+      "name_he": "HYPE הישנה — ROW71205",
+      "operational_rule_id": "HYPE_ROW71205_SHORT",
+      "decision": {
+        "action": "REMOVE_FROM_NEW_ENTRY_ROSTER",
+        "description_he": "איני ממליץ על הפעלה על סמך הנתונים",
+        "desired_final_new_entries": "DISABLED",
+        "implementation_status": "INSTALLED_AS_OF_SNAPSHOT",
+        "evidence_grade": 3.5,
+        "previous_evidence_grade": 3.5,
+        "grade_scale": 10
+      },
+      "observed_runtime": {
+        "as_of_utc": "2026-11-15T08:05:03.732000+00:00",
+        "enabled_in_manager_roster": true,
+        "exchange_fills_verified": false
+      },
+      "formula_definition": {
+        "exact_research_id": "DOGE_GRAMMAR_HYPE_F3_ROW71205_FULL_SOURCE_HISTORY_RETROSPECTIVE",
+        "operational_formula_id": "HYPE_ROW71205_ALL_HYPERLIQUID_SOURCE_VARIANT_V2",
+        "formula_version": "hype-row71205-all-hyperliquid-short-sl005-tp02-cap1-v2",
+        "description_he": "שורט HYPE כאשר ביטקוין עולה מעט ב־12 שעות, טווח HYPE היומי מוגבל וחלק ניכר ממנו התרחש בארבע השעות האחרונות, ו־HYPE אינו חזק מביטקוין בארבע שעות.",
+        "conditions_he": [
+          "0 < תשואת BTC ב־12 שעות באחוזים < 0.25.",
+          "0 < טווח HYPE ב־24 שעות באחוזים <= 5.1000000000000005.",
+          "טווח HYPE בארבע שעות חלקי הטווח ב־24 שעות גדול מ־0.5.",
+          "תשואת HYPE בארבע שעות פחות תשואת BTC בארבע שעות קטנה או שווה לאפס."
+        ],
+        "parameters": {
+          "decision_grid_minutes_utc": 30,
+          "btc_return_12h_percent_lower_exclusive": 0,
+          "btc_return_12h_percent_upper_exclusive": 0.25,
+          "hype_range_24h_percent_lower_exclusive": 0,
+          "hype_range_24h_percent_upper_inclusive": 5.1000000000000005,
+          "hype_range_4h_to_24h_lower_exclusive": 0.5,
+          "relative_return_4h_upper_inclusive": 0,
+          "stop_from_entry_fraction": 0.005,
+          "take_from_entry_fraction": 0.02,
+          "profit_lock": false,
+          "holding_time_limit_hours": null,
+          "max_positions_per_formula": 1
+        },
+        "price_geometry": {
+          "entry": "D+1 minute OPEN after UTC half-hour decision D",
+          "stop": "SL = E*1.005",
+          "take_profit": "TP = E*0.98"
+        },
+        "feature_definitions": {
+          "return_fraction": "last_closed_close/open_at_window_start - 1",
+          "return_percent": "100*return_fraction",
+          "range_percent": "100*(maximum_high - minimum_low)/open_at_window_start",
+          "relative_return_4h": "HYPE_return_4h_fraction - BTC_return_4h_fraction",
+          "required_history_hours": {
+            "HYPE": 24,
+            "BTC": 12
+          },
+          "closed_contiguous_minutes_required": true
+        },
+        "signal_data_source_he": "נרות דקה סגורים של חוזי HYPE וגם BTC תמידיים ב־Hyperliquid. גרסת V2 ללא החלפה ל־Binance.",
+        "context_symbols": [
+          "BTC"
+        ],
+        "execution_direction": "SHORT",
+        "execution_price_venue": "HYPERLIQUID_PERPETUAL",
+        "symbols": [
+          "HYPE"
+        ]
+      },
+      "risk": {
+        "change_existing_live_allocation": false,
+        "new_live_risk_usd": null,
+        "new_live_risk_equity_fraction": null,
+        "research_initial_price_stop_risk_usd": 5,
+        "note_he": "אין כאן קביעה של סיכון חי. $5 משמשים להשוואת תוצאות המחקר בלבד; הקצאה קיימת של נוסחה נשמרת, והקצאת HYPE החדשה לא נקבעה בקובץ."
+      },
+      "latest_research": {
+        "as_of_utc": "2026-11-15T08:01:00Z",
+        "metrics": {
+          "closed": 14,
+          "wins016": 4,
+          "win_pct016": 28.571428571428573,
+          "net016": 7.6,
+          "net030": -12.0,
+          "wins030": 4,
+          "open": 0,
+          "cap_excluded": null
+        },
+        "new_entries_since_prior_cutoff": {
+          "closed": 0,
+          "net016": 0,
+          "net030": 0
+        },
+        "prior_cutoff_utc": "2026-11-12T13:40:00Z",
+        "recent_windows": {},
+        "recent_window_clock": "entry_ms",
+        "first_admitted_trade_utc": "2026-10-06T16:01:00+00:00",
+        "basis_he": "ספר מעקב תפעולי של 14 עסקאות; אינו שחזור מלא של כל ההיסטוריה ואינו יומן מילויי הבורסה",
+        "funding_included": false,
+        "actual_account_profit": false,
+        "source_file_in_evidence_archive": "runtime/operational_metrics.json"
+      },
+      "limitations_he": [
+        "אין עסקאות חדשות; 14 העסקאות נותרו ללא שינוי. עלות 0.30% מוחקת את הרווח.",
+        "היא עדיין ברשימת ההפעלה בהתאם לבחירה הקודמת של המשתמש. ההמלצה האנליטית אינה תמיכה בהפעלתה.",
+        "לא הושלם שחזור עצמאי של כל אותות המקור לגרסה הזאת; היקף אירועים שנפסלו בגלל תקרה אינו ידוע מתוך הספר."
+      ],
+      "application_transition": {
+        "block_new_signals_from_order_execution": true,
+        "unfilled_entry_orders": "CANCEL_UNFILLED_ENTRY_ORDERS_WHEN_CHANGE_IS_APPLIED",
+        "open_positions": "PRESERVE_EXISTING_PROTECTION_AND_EXIT_MANAGEMENT",
+        "force_close_existing_positions": false,
+        "continue_source_data_collection": true
+      }
+    }
+  ],
+  "sources": [
+    {
+      "id": "update_json",
+      "name": "Seven_Formulas_Update_20261115.json",
+      "library_file_id": "libfile_fde3_f-42e97eb67d74819181d319c8c110a32f_1623c09b413c8191b1a406dfd2a0be73",
+      "version_id": "0",
+      "url": "https://chatgpt.com/library?file_id=libfile_fde3_f-42e97eb67d74819181d319c8c110a32f_1623c09b413c8191b1a406dfd2a0be73&account_id=personal",
+      "original_file_sha256": "9a8741108340e91ff5bd1e8197909f97ba916260ce06bd83af09c6fb675c462e"
+    },
+    {
+      "id": "update_evidence",
+      "name": "Seven_Formulas_Update_20261115_Evidence.zip",
+      "library_file_id": "libfile_fde3_f-228c6539d8a8819196d15e8a7202afdf_1623c09b413c8191b1a406dfd2a0be73",
+      "url": "https://chatgpt.com/library?file_id=libfile_fde3_f-228c6539d8a8819196d15e8a7202afdf_1623c09b413c8191b1a406dfd2a0be73&account_id=personal",
+      "sha256": "3276a674055df16ad8cb1442c84553968eab7aceb1d4754e3269fc328150612b",
+      "self_contained": false,
+      "note_he": "ארכיון העדכון כולל יומני עסקאות, קוד, נתוני מקור ואימות, ורשימת ארכיוני הבסיס הדרושים עם חתימותיהם."
+    },
+    {
+      "id": "baseline_complete_evidence",
+      "name": "Formula_Research_Complete_Evidence_20261114.zip",
+      "library_file_id": "libfile_fde3_f-f8568249d7788191bcae1d7f0b881033_1623c09b413c8191b1a406dfd2a0be73",
+      "url": "https://chatgpt.com/library?file_id=libfile_fde3_f-f8568249d7788191bcae1d7f0b881033_1623c09b413c8191b1a406dfd2a0be73&account_id=personal",
+      "role_he": "כולל את קוד המאמת המקורי, קטלוג הנוסחאות, מדיניות גלי המקור ומנוע המחיר המוזכרים בנספח ההגדרות."
+    }
+  ],
+  "interpretation_he": [
+    "המצב הרצוי והמצב שנצפה במערכת הם שדות נפרדים; אין כאן טענה שהשינויים כבר יושמו.",
+    "הנתונים מסתיימים בחיתוך הדוח, ולא בזמן יצירת קובץ ההעברה.",
+    "כל הנוסחאות שורט. לא חושב תיק משולב או תקציב סיכון כולל.",
+    "null מציין שלא נקבע או לא אומת; אין לפרשו כאפס.",
+    "ספים שמסתיימים ב־fraction הם שברים: 0.02 הוא 2%. ספים שמסתיימים ב־percent הם אחוזים.",
+    "הסרת HYPE הישנה היא חלק מהרשימה המוצעת לפי ההחלטה האחרונה, אף שבבדיקה היא עדיין הופעלה בהתאם לבחירה קודמת."
+  ],
+  "verified_definition_source_files": [
+    {
+      "path_from_update_root": "hype_new/replay.py",
+      "sha256": "d7d77d845f997c923cd45d8a9518b0953a1d687b1c39ed9e39674850ce146447"
+    },
+    {
+      "path_from_update_root": "hype_new/update.py",
+      "sha256": "a5f49100184fdd36c76d21b6bbc68ae0254cded82b7c758d8d9331c30838f868"
+    },
+    {
+      "path_from_update_root": "hype_new/source_export.sql",
+      "sha256": "6e656af0cc0cf66ec9dcda1f61ae6e8c4b7b7654cea750cef0c0f8bcc5191f33"
+    },
+    {
+      "path_from_update_root": "hype_new/baseline/method/barrier_core.cpp",
+      "sha256": "49123762806f7e03a56b98fd039baab6cad790ea7989eefa1ecfe3ed3a75148d"
+    },
+    {
+      "path_from_update_root": "baselines/evidence/research/legacy/watch_catalog.json",
+      "sha256": "c617b8ca0c06e6e209e6616cf37e6e655feaf5aa6384d689e795710dc625e6a6"
+    },
+    {
+      "path_from_update_root": "baselines/evidence/research/legacy/code/research_watch_scan_formula_timeframe.py",
+      "sha256": "135e96e317cccf57d2a8a6397a244032a5e78db8b98d1b88b6fb92586d454953"
+    },
+    {
+      "path_from_update_root": "oconf/baseline/watch_research_20261112/confirmations/build_actual_decisions.py",
+      "sha256": "e742bc67b7fb6bc234d77f83b874425410ff3c2592a0a56224d6535185cbcc78"
+    },
+    {
+      "path_from_update_root": "runtime/code/selected_six_formula_source.py",
+      "sha256": "ae9fa8421e3cd6e645e4b40826c341cad064f39465f560800a6a4e549ed59965"
+    },
+    {
+      "path_from_update_root": "oconf/oi10m_sensitivity.json",
+      "sha256": "4366492b9db34efcf806ed944a81ad563d827d49b34d6255e416ae59d87d8701"
+    }
+  ],
+  "validation": {
+    "seven_unique_formula_ids": true,
+    "unchanged_six_frozen_numeric_parameter_sets": true,
+    "new_hype_contract_independently_checked_against_source_code": true,
+    "research_metrics_copied_without_recalculation": true,
+    "all_recommendation_groups_disjoint": true,
+    "json_parsed_successfully": true,
+    "live_import_or_deployment_tested": false
+  }
+}

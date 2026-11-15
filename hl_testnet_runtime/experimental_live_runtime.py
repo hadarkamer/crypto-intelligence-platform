@@ -392,6 +392,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         # protection in another lane whose full ownership is proven.
         if context.get('basis_revision') != state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+        self._retire_suspended_sources(state, now)
         from . import experimental_external_activity as external
         external.apply(state,context.get('external_observation'))
         accounts = context.get('inventory_accounts')

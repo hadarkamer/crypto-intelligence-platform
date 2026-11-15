@@ -63,6 +63,22 @@ def source_digest(message):
     return digest(value)
 
 
+def retire_suspended_entry(state, *, now):
+    """Latch the current operational pause without rewriting historical terms.
+
+    This retires admission and working entry permission, not position ownership,
+    fills, exits, cancellation evidence or an unresolved exchange request.
+    """
+    from approved_alert_contract import entry_retirement_required
+    if (not entry_retirement_required(state['source'])
+            or state['entry_permission'] == 'RETIRED'):
+        return False
+    state.update(entry_permission='RETIRED',
+                 terminal_reason='FORMULA_NEW_ENTRIES_SUSPENDED',
+                 revision=state['revision'] + 1, updated_at=now.isoformat())
+    return True
+
+
 def _reduce_approved(previous, message, *, now, not_before, domain):
     """One approved occurrence, with no renewable lease or pending-order TTL.
 
@@ -91,6 +107,7 @@ def _reduce_approved(previous, message, *, now, not_before, domain):
         elif now >= moment(message['expires_at']):
             state.update(entry_permission='RETIRED',
                          terminal_reason='APPROVED_ALERT_EXPIRED_BEFORE_ACCEPTANCE')
+        retire_suspended_entry(state, now=now)
         return state, True
 
     state = deepcopy(previous)
@@ -104,7 +121,7 @@ def _reduce_approved(previous, message, *, now, not_before, domain):
         # Different recipients may observe/deliver the same approved alert at
         # different times. Neither a later receipt nor its expiry refreshes or
         # revokes the original permission; immutable fields were checked above.
-        return state, False
+        return state, retire_suspended_entry(state, now=now)
     state.update(entry_permission='RETIRED', terminal_reason=message['cancel_reason'],
                  cancellation=deepcopy(message))
     if message['source_sequence'] > state['source_sequence']:
@@ -170,6 +187,7 @@ def reduce_source(previous, message, *, now, not_before, domain):
             # retry (including an older sequence after a lost COMMIT reply)
             # cannot manufacture revisions or change its recorded reason.
             return state, False
+        suspended = retire_suspended_entry(state, now=now)
         lease_retired = False
         if (state['entry_permission'] == 'WAITING'
                 and now >= moment(state['source']['valid_until'])):
@@ -182,12 +200,12 @@ def reduce_source(previous, message, *, now, not_before, domain):
             if lease_retired:
                 state['revision'] += 1
                 state['updated_at'] = now.isoformat()
-            return state, lease_retired
+            return state, lease_retired or suspended
         if sequence < state['source_sequence'] and message['kind'] != 'CANCEL':
             if lease_retired:
                 state['revision'] += 1
                 state['updated_at'] = now.isoformat()
-            return state, lease_retired
+            return state, lease_retired or suspended
         # Permission is not restored after a lease gap. Restoring an original
         # source plan needs a separately audited protocol, not a fresh receipt.
         if sequence > state['source_sequence']:
@@ -206,6 +224,7 @@ def reduce_source(previous, message, *, now, not_before, domain):
         state['terminal_reason'] = 'SOURCE_LEASE_EXPIRED'
     state['revision'] += 1
     state['updated_at'] = now.isoformat()
+    retire_suspended_entry(state, now=now)
     return state, True
 
 
