@@ -69,9 +69,24 @@ def _approved_intent(intent, state, current, *, now_ms, fence_ms):
     if state.get('version') == SELECTED_VERSION:
         import alert_delivery_policy
         value = contract.validate(intent['payload'])
+        expected_config = state['config_sha256']
+        if contract.is_hype_watch(value):
+            # The new identity has separate provenance; the enclosing source
+            # state keeps its original configuration so historical contracts
+            # remain readable. This exception cannot bless another formula.
+            import selected_six_formula_store as selected
+            decision = intent['decision']
+            if (expected_config != selected.CONFIG_SHA256
+                    or decision.get('formula_id') != contract.HYPE_WATCH_RULE
+                    or decision.get('formula_version') != selected.rules.HYPE_FORMULA_VERSION
+                    or decision.get('spec_source_id') != selected.rules.HYPE_SPEC_SOURCE_ID
+                    or decision.get('symbol') != 'HYPE'
+                    or decision.get('direction') != 'SHORT'):
+                raise contract.ContractError('APPROVED_SOURCE_IDENTITY')
+            expected_config = selected.HYPE_CONFIG_SHA256
         if (intent['position_id'] != intent['intent_id']
                 or intent['decision']['event_id'] != intent['intent_id']
-                or value['proof']['source_config_sha256'] != state['config_sha256']):
+                or value['proof']['source_config_sha256'] != expected_config):
             raise contract.ContractError('APPROVED_SOURCE_IDENTITY')
         approved = contract.moment_ms(value['approved_at'])
         if approved < fence_ms or contract.moment_ms(value['source_as_of']) > now_ms:

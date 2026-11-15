@@ -17,14 +17,21 @@ VERSION = 'selected-six-approved-source-v1'
 SPEC_SHA256 = hashlib.sha256((Path(__file__).parent / 'docs/selected-six-20261114/Selected_Six_Formulas_20261113.json').read_bytes()).hexdigest()
 CONFIG_SHA256 = hashlib.sha256(json.dumps([VERSION, rules.FORMULA_VERSION, SPEC_SHA256,
     sorted(rules.CT009_SYMBOLS)], separators=(',', ':')).encode()).hexdigest()
+# New identity provenance is separate: existing state/config and historical
+# approvals keep their original hash and must remain readable after upgrade.
+HYPE_SPEC_SHA256 = hashlib.sha256((Path(__file__).parent / 'docs/formula-activation-20261115/Formula_Activation_Handoff_20261115.json').read_bytes()).hexdigest()
+HYPE_CONFIG_SHA256 = hashlib.sha256(json.dumps([rules.HYPE_FORMULA_VERSION,HYPE_SPEC_SHA256,
+    'NEXT_FULL_MINUTE_IOC','FIRST_ACTUAL_FILL_PLUS_1440_MINUTES'],separators=(',',':')).encode()).hexdigest()
 MAX_BYTES = 1024 * 1024
 MAX_INTENTS = 1024
 MAX_CANDIDATES = 256
 DAY_MS = 86_400_000
 FORMULA_FAMILIES = {rules.SFF1361: 'sol_sff1361', rules.OCONF0034_13: 'oconf0034_13',
-    rules.CT009: 'ct009', rules.XRP_LIQUIDITY_INVERSE: 'xrp_liquidity_inverse'}
+    rules.CT009: 'ct009', rules.XRP_LIQUIDITY_INVERSE: 'xrp_liquidity_inverse',
+    rules.HYPE_WATCH_INVERSE: 'hype_watch_liq4050'}
 FORMULA_NAMES = {rules.SFF1361: 'SOL SFF1361', rules.OCONF0034_13: 'OCONF0034_13',
-    rules.CT009: 'CT009', rules.XRP_LIQUIDITY_INVERSE: 'XRP Liquidity inverse'}
+    rules.CT009: 'CT009', rules.XRP_LIQUIDITY_INVERSE: 'XRP Liquidity inverse',
+    rules.HYPE_WATCH_INVERSE: 'HYPE Watch liquidity 40–50% inverse'}
 
 
 def key_for(scope):
@@ -36,7 +43,7 @@ def key_for(scope):
 def _initial(now_ms):
     return dict(version=VERSION, config_sha256=CONFIG_SHA256, activated_ms=now_ms,
         candidates={}, observed={}, confirmations=[], delivered_alerts=[], episodes={},
-        active=[], history=[], intents=[], counters={})
+        active=[], history=[], intents=[], counters={}, hype_activated_ms=None)
 
 
 def _encode(state):
@@ -50,7 +57,22 @@ def initialize(conn, scope, now_ms):
     key = key_for(scope)
     conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING',
                  (key, _encode(_initial(now_ms))))
-    return load(conn, scope)
+    state = load(conn, scope, locked=True)
+    if ensure_hype_activation(state, now_ms):
+        save(conn, scope, state)
+    return state
+
+
+def ensure_hype_activation(state, now_ms):
+    """A new identity gets its own durable fence only when explicitly enabled."""
+    import alert_delivery_policy
+    if (state.get('hype_activated_ms') is None
+            and alert_delivery_policy.selected_rule_enabled(rules.HYPE_WATCH_INVERSE)
+            and contract.new_entry_allowed(dict(family='hype_watch_liq4050',
+                rule_id=rules.HYPE_WATCH_INVERSE, symbol='HYPE'))):
+        state['hype_activated_ms'] = now_ms
+        return True
+    return False
 
 
 def load(conn, scope, *, locked=False):
@@ -133,17 +155,24 @@ def envelope(decision, metadata, approved_ms):
         raise ValueError('approval must retain actual frozen evaluation time')
     policy = dict(name=p['formula_id'] + '_V1', entry_kind='LIMIT_AFTER_ALERT',
         source_price=f"HYPERLIQUID_{p['symbol']}_PERPETUAL_TRADE_1M")
-    if p['pending_entry_expires_at_ms'] is not None:
+    if p['formula_id'] == rules.HYPE_WATCH_INVERSE:
+        policy.update(entry_kind='NEXT_FULL_MINUTE_IOC',
+            entry_expires_at=contract.iso_ms(reference + rules.MINUTE_MS),
+            holding_time_limit_ms=rules.DAY_MS)
+    elif p['pending_entry_expires_at_ms'] is not None:
         policy.update(pending_expires_at=contract.iso_ms(p['pending_entry_expires_at_ms']),
                       cancel_before_fill_price=p['cancel_target_price'])
     value = dict(version=contract.VERSION, kind='ALERT', family=family, rule_id=p['formula_id'],
         symbol=p['symbol'], side='SHORT', source_environment='mainnet', execution_environment='mainnet',
         source_price_kind='TRADE_1M', source_at=contract.iso_ms(reference),
         created_at=contract.iso_ms(approved_ms), approved_at=contract.iso_ms(approved_ms),
-        arm_at=contract.iso_ms(approved_ms), expires_at=contract.iso_ms(approved_ms + contract.LEASE_MS),
+        arm_at=contract.iso_ms(approved_ms), expires_at=contract.iso_ms(
+            min(approved_ms + contract.LEASE_MS, reference + rules.MINUTE_MS)
+            if p['formula_id'] == rules.HYPE_WATCH_INVERSE else approved_ms + contract.LEASE_MS),
         entry=p['entry_price'], stop=p['stop_loss'], take_profit=p['take_profit'],
         original_target=p['cancel_target_price'], policy=policy,
-        proof=dict(source_contract_version=contract.SOURCE_CONTRACT, source_config_sha256=CONFIG_SHA256,
+        proof=dict(source_contract_version=contract.SOURCE_CONTRACT, source_config_sha256=(
+            HYPE_CONFIG_SHA256 if p['formula_id'] == rules.HYPE_WATCH_INVERSE else CONFIG_SHA256),
             cycle_id=metadata['cycle_id'], episode_key=metadata['episode_key'], timeframe=metadata['timeframe'],
             decision_at=contract.iso_ms(p['source_observed_at_ms']),
             data_available_at=contract.iso_ms(p['data_available_at_ms']),
@@ -184,7 +213,8 @@ def approve_state(state, decision, metadata, now_ms):
         if any(frozen[k] != p[k] for k in p if k != 'decision_ms'):
             raise ValueError('selected formula decision revision')
         return dict(created=False, envelope=deepcopy(existing['payload']), intent=deepcopy(existing))
-    if p['source_received_at_ms'] <= state['activated_ms']:
+    activation = state.get('hype_activated_ms') if p['formula_id'] == rules.HYPE_WATCH_INVERSE else state['activated_ms']
+    if activation is None or p['source_received_at_ms'] <= activation:
         return dict(created=False, reason='BEFORE_ACTIVATION')
     value = envelope(p, metadata, now_ms)
     position = dict(position_id=p['event_id'], rule_id=p['formula_id'], symbol=p['symbol'],
@@ -193,7 +223,7 @@ def approve_state(state, decision, metadata, now_ms):
         cancel_target_price=p['cancel_target_price'], pending_expires_ms=p['pending_entry_expires_at_ms'])
     intent = dict(intent_id=p['event_id'], position_id=p['event_id'], decision=p,
         payload=value, text=render(value), status='PENDING', created_ms=now_ms,
-        expires_ms=now_ms + contract.LEASE_MS, attempted_ms=None, attempt_token=None)
+        expires_ms=contract.moment_ms(value['expires_at']), attempted_ms=None, attempt_token=None)
     state['active'].append(position)
     state['intents'].append(intent)
     count(state, 'approved')

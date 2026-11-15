@@ -23,6 +23,179 @@ NATIVE_KEYS = ('watch_scan_id', 'inverse_analysis', 'archive_import', 'archive_r
     'source_scope', 'data_mode', 'state', 'mode', 'record_mode')
 ARCHIVE_KEYS = frozenset(NATIVE_KEYS[2:8])
 _SYMBOL_OFFSET = 0
+HYPE_CANDIDATE_KEY = ('captured-question-search-v3-experimental-binding:INVERSE:'
+    'captured-question-search-v3-experimental-binding:LIQUIDITY_40_50')
+HYPE_CONSUMER = 'watch-all-scan-intake-v1'
+HYPE_MEASUREMENT = 'watch-scan-measurements-v1'
+HYPE_EVALUATION = 'watch-scan-timeframe-formulas-v1'
+HYPE_POPULATION = 'watch-all-scan-observations-v1'
+HYPE_PARENT_POLICY = 'btc-parent-close-reversal-200bps-v1'
+
+
+def map_hype_watch_row(row, now_ms):
+    """Verify a joined existing intake/timeframe/measurement observation.
+
+    The immediate Watch bundle lacks BTC membership. Only the persisted
+    measurement's actual parent identity is usable; no substitute is made.
+    UNKNOWN retains a valid parent so it can block an earlier/same-time arm.
+    """
+    import research_watch_scan_formula_timeframe as capture
+    result = dict(arm='UNKNOWN', reason='unverified_capture', wave=None,
+                  usable_ms=None, snapshot_set_id=None, candidate=None)
+    try:
+        intake, tf, measurement, observation = (row[k] for k in
+            ('intake', 'timeframe', 'measurement', 'observation'))
+        membership = measurement['payload']['membership']
+        wave = membership['btc_parent_movement_id']
+        if not isinstance(wave, str) or not wave or len(wave) > 200:
+            raise ValueError('missing_existing_btc_parent')
+        if (membership['membership_status'] != 'LIVE'
+                or membership['episode_policy_version'] != HYPE_PARENT_POLICY):
+            raise ValueError('unverified_existing_btc_parent')
+        usable, snapshot_id = ms(intake['usable_from_utc']), intake['snapshot_set_id']
+        if type(snapshot_id) is not int or snapshot_id <= 0:
+            raise ValueError('invalid_snapshot_identity')
+        if ms(membership['decision_time_utc']) != usable:
+            raise ValueError('membership_clock_mismatch')
+        result.update(wave=wave, usable_ms=usable, snapshot_set_id=snapshot_id)
+        fp, mp = tf['payload'], measurement['payload']
+        if (intake['consumer_version'] != HYPE_CONSUMER or intake['intake_status'] != 'ACCEPTED'
+                or tf['status'] != 'READY' or tf['evaluation_version'] != HYPE_EVALUATION
+                or measurement['measurement_version'] != HYPE_MEASUREMENT):
+            raise ValueError('capture_not_accepted_ready')
+        for payload in (fp, mp, observation):
+            for key, expected in (('consumer_version', HYPE_CONSUMER),
+                    ('population_version', HYPE_POPULATION), ('snapshot_set_id', snapshot_id),
+                    ('symbol', 'HYPE')):
+                if payload[key] != expected:
+                    raise ValueError('capture_identity_mismatch:' + key)
+            for key in ('bundle_sha256', 'parent_payload_sha256'):
+                digest = intake[key]
+                if (not isinstance(digest, str) or len(digest) != 64
+                        or any(c not in '0123456789abcdef' for c in digest)
+                        or payload[key] != digest):
+                    raise ValueError('capture_hash_binding_mismatch:' + key)
+            if ms(payload['usable_from_utc']) != usable:
+                raise ValueError('capture_clock_mismatch')
+        for sample in (tf, measurement):
+            if (sample['consumer_version'] != HYPE_CONSUMER
+                    or sample['snapshot_set_id'] != snapshot_id or sample['symbol'] != 'HYPE'
+                    or ms(sample['usable_from_utc']) != usable):
+                raise ValueError('capture_row_identity_mismatch')
+        if (fp['version'] != HYPE_EVALUATION
+                or fp['feature_version'] != capture.FEATURE_VERSION
+                or fp['selection_version'] != capture.SELECTION_VERSION
+                or mp['version'] != HYPE_MEASUREMENT
+                or mp['entry_version'] != 'watch-next-full-minute-route-open-v1'
+                or mp['outcome_method_version'] != 'ordered-first-touch-v7'
+                or mp['price_route'] != 'HYPERLIQUID_HYPE_PERP_TRADE_1M'
+                or measurement['price_route'] != mp['price_route']):
+            raise ValueError('capture_version_or_route_mismatch')
+        original_entry = rules.next_full_minute_ms(usable)
+        if (ms(mp['entry_time_utc']) != original_entry
+                or ms(measurement['entry_time_utc']) != original_entry):
+            raise ValueError('measurement_entry_clock_mismatch')
+        observed = ms(intake['observed_at_utc'])
+        if (usable != max(observed, ms(intake['source_available_at_utc']),
+                           ms(intake['source_created_at_utc']))
+                or observed > ms(intake['source_available_at_utc'])
+                or ms(observation['observed_at_utc']) != observed):
+            raise ValueError('source_availability_mismatch')
+        available = max(usable, ms(tf['created_at_utc']), ms(tf['updated_at_utc']))
+        if available > now_ms:
+            raise ValueError('future_capture_availability')
+        raw, slots, errors = capture._source_for_timeframe(observation, '24h')
+        selected, selection, reasons = capture._selection(observation, raw, slots, errors)
+        provenance = fp['timeframe_provenance']['24h']
+        if (provenance['source_row'] != raw or provenance['slots_by_source_side'] != slots
+                or provenance['selection_status'] != selection
+                or provenance['selected_source_side'] != selected
+                or provenance['selected_base_direction'] !=
+                    ('LONG' if selected == 'SHORT' else 'SHORT' if selected == 'LONG' else None)):
+            raise ValueError('captured_timeframe_selection_mismatch')
+        if selection == 'UNKNOWN':
+            raise ValueError('unknown_selected_timeframe:' + ','.join(reasons))
+        if selected != 'SHORT':
+            result.update(arm='NOT_APPLICABLE', reason='source_side_not_selected')
+            return result
+        features, errors = capture._liquidity(raw, slots[selected], selected)
+        if errors:
+            raise ValueError('unknown_liquidity:' + ','.join(errors))
+        share = features[capture.SHARE]
+        expected = 'MATCH' if 40 <= share < 50 else 'NO_MATCH'
+        evaluations = [x for x in fp['evaluations'] if x['candidate_key'] == HYPE_CANDIDATE_KEY
+                       and x['timeframe'] == '24h' and x['base_direction'] == 'LONG']
+        if (len(evaluations) != 1 or evaluations[0]['match_status'] != expected
+                or evaluations[0]['selection_status'] != 'SELECTED'
+                or evaluations[0]['analysis_direction'] != 'SHORT'):
+            raise ValueError('captured_hype_predicate_mismatch')
+        result.update(arm=expected, reason=expected.lower())
+        if expected != 'MATCH':
+            return result
+        reference_ms = rules.next_full_minute_ms(available)
+        expires = min(observed + SOURCE_WINDOW_MS, reference_ms + MINUTE_MS - 1)
+        if available > expires:
+            raise ValueError('stale_capture_before_entry')
+        snapshot = dict(source_event_id=f'{HYPE_CONSUMER}:{snapshot_id}:HYPE:24h:{wave}',
+            symbol='HYPE', direction='LONG', observed_at_ms=observed,
+            received_at_ms=available, valid_until_ms=expires, inputs={})
+        for name, value in (('capture_guard_valid', True), ('raw_selected_side', 'SHORT'),
+                ('source_base_direction', 'LONG'), ('selected_share_pct', share),
+                ('btc_parent_movement_id', wave), ('timeframe', '24h')):
+            _field(snapshot, name, value)
+        snapshot['capture_identity'] = dict(snapshot_set_id=snapshot_id,
+            bundle_sha256=intake['bundle_sha256'], parent_payload_sha256=intake['parent_payload_sha256'],
+            usable_ms=usable, sample_ready_ms=available,
+            parent_policy_version=HYPE_PARENT_POLICY, raw_selected_side='SHORT')
+        snapshot['capture_guard_evidence'] = deepcopy(row)
+        result['candidate'] = dict(formula_id=rules.HYPE_WATCH_INVERSE, snapshot=snapshot,
+            metadata=dict(cycle_id=str(snapshot_id), timeframe='24h', episode_key=wave))
+        return result
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        result.update(arm='UNKNOWN', reason=str(exc), candidate=None)
+        return result
+
+
+def select_hype_wave_candidates(state, records, now_ms):
+    """First MATCH only, with early UNKNOWN; a rejection consumes the wave."""
+    if state.get('hype_activated_ms') is None:
+        return 0
+    grouped = {}
+    for row in records:
+        if row['wave'] is not None:
+            grouped.setdefault(row['wave'], []).append(row)
+    added = 0
+    for wave, rows in grouped.items():
+        key = rules.HYPE_WATCH_INVERSE + ':wave:' + wave
+        if key in state['episodes']:
+            continue
+        if sum(k.startswith(rules.HYPE_WATCH_INVERSE + ':wave:') for k in state['episodes']) >= store.MAX_CANDIDATES:
+            # Fail locally; never grow shared state until other formulas can
+            # no longer commit. A rejected input may be reconsidered only
+            # after its same original source/entry window has been checked.
+            store.count(state, 'hype_wave_state_capacity')
+            continue
+        matches = sorted((x for x in rows if x['arm'] == 'MATCH'),
+                         key=lambda x: (x['usable_ms'], x['snapshot_set_id']))
+        if not matches:
+            continue
+        first = matches[0]
+        outcome = dict(identity=wave, approved=False, representative_snapshot_set_id=first['snapshot_set_id'],
+            representative_usable_ms=first['usable_ms'], status='SELECTED')
+        state['episodes'][key] = outcome
+        if any(x['arm'] == 'UNKNOWN' and x['usable_ms'] <= first['usable_ms'] for x in rows):
+            outcome['status'] = 'UNKNOWN_BLOCKED'
+        elif first['candidate']['snapshot']['received_at_ms'] <= state['hype_activated_ms']:
+            outcome['status'] = 'BEFORE_ACTIVATION'
+        elif now_ms > first['candidate']['snapshot']['valid_until_ms']:
+            outcome['status'] = 'ORIGINAL_ENTRY_WINDOW_EXPIRED'
+        elif any(x['rule_id'] == rules.HYPE_WATCH_INVERSE and x['symbol'] == 'HYPE'
+                 for x in state['active']):
+            outcome['status'] = 'CAPACITY_REJECTED'
+        else:
+            added += _capture_candidates(state, [first['candidate']])
+        store.count(state, 'hype_wave_' + outcome['status'].lower())
+    return added
 
 
 def ms(value):
@@ -338,6 +511,108 @@ def read_delivered(conn, state, now_ms):
     return _capture_candidates(state, candidates)
 
 
+def read_hype_watch(conn, state, now_ms):
+    """Read existing durable captures once; no new collector or provider call.
+
+    All observations in each currently relevant real parent wave are read,
+    including pre-activation UNKNOWN/first MATCH rows. Oversize input fails
+    closed before selecting any partial wave. Paused HYPE performs no query.
+    """
+    import alert_delivery_policy
+    if (not alert_delivery_policy.selected_rule_enabled(rules.HYPE_WATCH_INVERSE)
+            or state.get('hype_activated_ms') is None):
+        return 0
+    prune_hype_waves(conn,state,now_ms)
+    consumed_waves = [v['identity'] for k,v in state['episodes'].items()
+                      if k.startswith(rules.HYPE_WATCH_INVERSE + ':wave:')]
+    rows = conn.execute('''WITH current_waves AS (
+        SELECT DISTINCT m.payload#>>'{membership,btc_parent_movement_id}' AS wave
+        FROM research_watch_scan_intakes i
+        JOIN research_watch_scan_measurements m USING(consumer_version,snapshot_set_id)
+        WHERE i.consumer_version=%s AND m.measurement_version=%s AND m.symbol='HYPE'
+            AND i.usable_from_utc >= %s AND i.usable_from_utc <= %s
+            AND m.payload#>>'{membership,btc_parent_movement_id}' IS NOT NULL
+            AND NOT(m.payload#>>'{membership,btc_parent_movement_id}'=ANY(%s::text[]))
+    ) SELECT
+        jsonb_build_object('consumer_version',i.consumer_version,'snapshot_set_id',i.snapshot_set_id,
+            'intake_status',i.intake_status,'bundle_sha256',i.bundle_sha256,
+            'parent_payload_sha256',i.parent_payload_sha256,'observed_at_utc',i.observed_at_utc,
+            'usable_from_utc',i.usable_from_utc,'source_available_at_utc',i.source_available_at_utc,
+            'source_created_at_utc',i.source_created_at_utc) AS intake,
+        jsonb_build_object('consumer_version',f.consumer_version,'snapshot_set_id',f.snapshot_set_id,
+            'symbol',f.symbol,'evaluation_version',f.evaluation_version,'status',f.status,
+            'created_at_utc',f.created_at_utc,'updated_at_utc',f.updated_at_utc,
+            'usable_from_utc',f.usable_from_utc,'payload',
+            (f.payload - 'timeframe_provenance' - 'evaluations') || jsonb_build_object(
+                'timeframe_provenance',jsonb_build_object('24h',f.payload#>'{timeframe_provenance,24h}'),
+                'evaluations',(SELECT COALESCE(jsonb_agg(e),'[]'::jsonb)
+                    FROM jsonb_array_elements(f.payload->'evaluations') e
+                    WHERE e->>'candidate_key'=%s AND e->>'timeframe'='24h'
+                    AND e->>'base_direction'='LONG'))) AS timeframe,
+        jsonb_build_object('consumer_version',m.consumer_version,'snapshot_set_id',m.snapshot_set_id,
+            'symbol',m.symbol,'measurement_version',m.measurement_version,'price_route',m.price_route,
+            'usable_from_utc',m.usable_from_utc,'entry_time_utc',m.entry_time_utc,
+            'payload',m.payload - 'records' - 'price_source') AS measurement,
+        jsonb_build_object('consumer_version',o.consumer_version,'snapshot_set_id',o.snapshot_set_id,
+            'population_version',o.population_version,'symbol',o.symbol,
+            'bundle_sha256',o.bundle_sha256,'parent_payload_sha256',o.parent_payload_sha256,
+            'usable_from_utc',o.usable_from_utc,'observed_at_utc',o.observed_at_utc,
+            'source_time_errors',o.source_time_errors,'sources',jsonb_build_object(
+                'maxpain_operational_rows',(SELECT COALESCE(jsonb_agg(r),'[]'::jsonb)
+                    FROM jsonb_array_elements(o.sources->'maxpain_operational_rows') r
+                    WHERE r->>'timeframe'='24h')),
+            'maxpain_slots',(SELECT COALESCE(jsonb_agg(s),'[]'::jsonb)
+                FROM jsonb_array_elements(o.maxpain_slots) s WHERE s->>'timeframe'='24h')) AS observation
+        FROM research_watch_scan_intakes i
+        JOIN research_watch_scan_measurements m USING(consumer_version,snapshot_set_id)
+        LEFT JOIN research_watch_scan_tf_formula_samples f ON
+            f.consumer_version=i.consumer_version AND f.snapshot_set_id=i.snapshot_set_id
+            AND f.symbol=m.symbol AND f.evaluation_version=%s
+        LEFT JOIN research_watch_scan_observations o ON
+            o.consumer_version=i.consumer_version AND o.snapshot_set_id=i.snapshot_set_id AND o.symbol=m.symbol
+        WHERE i.consumer_version=%s AND m.measurement_version=%s AND m.symbol='HYPE'
+            AND i.usable_from_utc <= %s
+            AND m.payload#>>'{membership,btc_parent_movement_id}' IN (SELECT wave FROM current_waves)
+        ORDER BY i.usable_from_utc,i.snapshot_set_id LIMIT %s''',
+        (HYPE_CONSUMER,HYPE_MEASUREMENT,
+         datetime.fromtimestamp((now_ms-SOURCE_WINDOW_MS)/1000,timezone.utc),
+         datetime.fromtimestamp(now_ms/1000,timezone.utc),consumed_waves,HYPE_CANDIDATE_KEY,
+         HYPE_EVALUATION,HYPE_CONSUMER,HYPE_MEASUREMENT,
+         datetime.fromtimestamp(now_ms/1000,timezone.utc),MAX_HISTORY+1)).fetchall()
+    if len(rows) > MAX_HISTORY:
+        raise ValueError('HYPE full-wave capture exceeds existing finite bound')
+    records = [map_hype_watch_row(row,now_ms) for row in rows]
+    store.count(state,'hype_capture_unknown',sum(x['arm']=='UNKNOWN' for x in records))
+    return select_hype_wave_candidates(state,records,now_ms)
+
+
+def prune_hype_waves(conn, state, now_ms):
+    """Compact only proved-ended parents beyond the unchanged source window.
+
+    An open wave survives long source gaps and restart. A closed parent older
+    than the source freshness window cannot produce a fresh observation; late
+    source updates retain their old clock and cannot re-arm an expired minute.
+    Permanent outbox receipts and approved decision history are unaffected.
+    """
+    prefix = rules.HYPE_WATCH_INVERSE + ':wave:'
+    identities = [v['identity'] for k,v in state['episodes'].items() if k.startswith(prefix)]
+    if len(identities) < 2:
+        return 0
+    rows = conn.execute('SELECT btc_parent_movement_id,end_time_utc FROM research_btc_parent_movements '
+        'WHERE episode_policy_version=%s AND btc_parent_movement_id=ANY(%s) '
+        'AND end_time_utc IS NOT NULL AND end_time_utc < %s',
+        (HYPE_PARENT_POLICY,identities,datetime.fromtimestamp((now_ms-SOURCE_WINDOW_MS)/1000,timezone.utc))).fetchall()
+    active_waves = {x['metadata']['episode_key'] for x in state['candidates'].values()
+                    if x['formula_id']==rules.HYPE_WATCH_INVERSE}
+    count = 0
+    for row in rows:
+        wave = row['btc_parent_movement_id']
+        if wave not in active_waves and prefix+wave in state['episodes']:
+            del state['episodes'][prefix+wave]
+            count += 1
+    return count
+
+
 def _confirmation_history(records):
     result = []
     for row in records:
@@ -369,6 +644,12 @@ def _episode(state, candidate):
     snapshot, formula = candidate['snapshot'], candidate['formula_id']
     if formula == rules.SFF1361:
         return snapshot['source_event_id'], False
+    if formula == rules.HYPE_WATCH_INVERSE:
+        wave = snapshot['inputs']['btc_parent_movement_id']['value']
+        previous = state['episodes'].get(_episode_scope(candidate))
+        if previous is None or previous['identity'] != wave:
+            raise ValueError('HYPE candidate has no selected captured parent')
+        return wave, previous['approved']
     key = _episode_scope(item=candidate)
     target = snapshot['inputs']['target_price']['value']
     previous = state['episodes'].get(key)
@@ -390,6 +671,8 @@ def _episode(state, candidate):
 
 
 def _episode_scope(item):
+    if item['formula_id'] == rules.HYPE_WATCH_INVERSE:
+        return rules.HYPE_WATCH_INVERSE + ':wave:' + item['snapshot']['inputs']['btc_parent_movement_id']['value']
     key = item['formula_id'] + ':' + item['snapshot']['symbol']
     if item['formula_id'] in (rules.CT009, rules.XRP_LIQUIDITY_INVERSE):
         key += ':' + item['metadata']['timeframe']
@@ -445,6 +728,8 @@ def evaluate_ready(state, rows, fetched_ms, *, conn=None, scope=None):
                 item.get('prior_confirmations', _confirmation_history(state['confirmations'])), fetched_ms)
         elif formula == rules.CT009:
             result = rules.evaluate_ct009(snapshot, _delivered_history(state['delivered_alerts']), fetched_ms)
+        elif formula == rules.HYPE_WATCH_INVERSE:
+            result = rules.evaluate_hype_watch_inverse(snapshot, fetched_ms)
         else:
             result = rules.evaluate_xrp_liquidity_inverse(snapshot, fetched_ms)
         store.count(state, 'evaluated_' + formula)
@@ -492,6 +777,8 @@ def observe_cancellations(state, rows, now_ms):
             continue
         if now_ms >= position['pending_expires_ms']:
             changed += int(store.cancel_state(state, position['position_id'], 'PENDING_ENTRY_EXPIRED', now_ms))
+            continue
+        if position['cancel_target_price'] is None:
             continue
         target = Decimal(position['cancel_target_price'])
         known_veto = any((r[0] >= position['reference_ms'] and Decimal(str(r[3])) <= target)
@@ -541,6 +828,11 @@ def tick(scopes, *, database_url=None, fetch=None, clock_ms=None, connect=None):
                         read_delivered(conn, state, now)
                 except Exception:
                     store.count(state, 'delivered_source_errors')
+                try:
+                    with conn.transaction():
+                        read_hype_watch(conn, state, now)
+                except Exception:
+                    store.count(state, 'hype_source_errors')
                 observe_cancellations(state, [], now)
                 store.save(conn, scope, state)
                 store.synchronize(conn, scope, state, now)

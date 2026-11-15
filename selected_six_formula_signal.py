@@ -21,6 +21,9 @@ SFF1361 = "SFF1361_SOL_RECENT"
 OCONF0034_13 = "OCONF0034_13"
 CT009 = "CT009_FROZEN_3D"
 XRP_LIQUIDITY_INVERSE = "XRP_LIQUIDITY_RAW_INVERSE"
+HYPE_WATCH_INVERSE = "HYPE_WATCH_LIQ4050_24H_INVERSE"
+HYPE_FORMULA_VERSION = "hype-watch-liq4050-24h-inverse-v1"
+HYPE_SPEC_SOURCE_ID = "Formula_Activation_Handoff_20261115.json"
 CT009_SYMBOLS = frozenset(("BTC", "ETH", "SOL", "XRP", "DOGE", "HYPE"))
 OCONF_SYMBOLS = CT009_SYMBOLS
 FORMULA_VERSION = "selected-six-explicit-signals-v1"
@@ -104,7 +107,9 @@ def _geometry(formula_id, reference, source_target=None):
         p = Decimal(canonical_price(reference))
         original = None if source_target is None else Decimal(canonical_price(source_target))
         target = 2 * p - original if formula_id == XRP_LIQUIDITY_INVERSE else original
-        if formula_id == SFF1361:
+        if formula_id == HYPE_WATCH_INVERSE:
+            entry, stop, take = p, p * Decimal('1.02'), p * Decimal('.98')
+        elif formula_id == SFF1361:
             entry, stop, take = p, p * Decimal('1.01'), p * Decimal('.98')
         else:
             if not 0 < target < p:
@@ -202,25 +207,64 @@ def _decision(formula_id, snapshot, now, names, used_sources, entry, stop, take,
     if not 0 < Decimal(take) < Decimal(entry) < Decimal(stop):
         raise ValueError("invalid_short_geometry")
     available = _available(snapshot, names)
-    pending = None if formula_id == SFF1361 else reference_ms + DAY_MS
+    pending = (reference_ms + MINUTE_MS if formula_id == HYPE_WATCH_INVERSE
+               else None if formula_id == SFF1361 else reference_ms + DAY_MS)
+    version = HYPE_FORMULA_VERSION if formula_id == HYPE_WATCH_INVERSE else FORMULA_VERSION
+    spec = HYPE_SPEC_SOURCE_ID if formula_id == HYPE_WATCH_INVERSE else SPEC_SOURCE_ID
     # The admission TTL is deliberately absent: it belongs to the existing
     # transport/manager contract, not this 24-hour pending-order lifetime.
-    identity = json.dumps([FORMULA_VERSION, formula_id, snapshot["symbol"],
+    identity = json.dumps([version, formula_id, snapshot["symbol"],
                            snapshot["source_event_id"]], separators=(",", ":"))
     frozen = {"source": {k: snapshot[k] for k in
                          ("source_event_id", "symbol", "direction", "observed_at_ms",
                           "received_at_ms", "valid_until_ms")},
               "inputs": {k: snapshot["inputs"][k] for k in names},
               "reference": snapshot["reference"]}
+    if formula_id == HYPE_WATCH_INVERSE:
+        frozen['capture_identity'] = snapshot['capture_identity']
+        frozen['capture_guard_evidence'] = snapshot['capture_guard_evidence']
     return FormulaDecision(
-        formula_id, FORMULA_VERSION, SPEC_SOURCE_ID,
+        formula_id, version, spec,
         hashlib.sha256(identity.encode()).hexdigest(), snapshot["source_event_id"],
         tuple(sorted(set(used_sources) | {snapshot["source_event_id"]})),
         snapshot["symbol"], "SHORT", snapshot["direction"],
         _integer(snapshot["observed_at_ms"]), _integer(snapshot["received_at_ms"]),
         available, now, reference_ms, reference_price, source_target, cancel_target,
-        entry, stop, take, pending, None, formula_id != SFF1361,
+        entry, stop, take, pending, DAY_MS if formula_id == HYPE_WATCH_INVERSE else None,
+        formula_id != SFF1361,
         json.dumps(frozen, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
+def evaluate_hype_watch_inverse(snapshot, now_ms):
+    """Fixed new identity and geometry; verified capture and wave are inputs.
+
+    A plan uses the captured next-minute OPEN, never a claimed venue fill.
+    A live attempt must fit that original minute; late data cannot renew it.
+    """
+    names = ('capture_guard_valid', 'raw_selected_side', 'source_base_direction',
+             'selected_share_pct', 'btc_parent_movement_id', 'timeframe')
+    try:
+        now = _context(snapshot, now_ms, {'HYPE'}, 'LONG')
+        values = {k: _input(snapshot, k, now) for k in names}
+        if values['capture_guard_valid'] is not True:
+            raise ValueError('unverified_watch_capture')
+        _identity(values['btc_parent_movement_id'])
+        if (values['raw_selected_side'] != 'SHORT'
+                or values['source_base_direction'] != 'LONG' or values['timeframe'] != '24h'):
+            return _result(HYPE_WATCH_INVERSE, reason='not_selected_hype_upper_target')
+        share = _number(values['selected_share_pct'])
+        if not 40 <= share < 50:
+            return _result(HYPE_WATCH_INVERSE, reason='liquidity_share_outside_40_50')
+        available = _available(snapshot, names)
+        if now >= next_full_minute_ms(available) + MINUTE_MS:
+            return _result(HYPE_WATCH_INVERSE, reason='original_entry_minute_expired')
+        p, ref_ms = _reference(snapshot, now, available, True)
+        entry, stop, take, p, _, _ = _geometry(HYPE_WATCH_INVERSE, p)
+        decision = _decision(HYPE_WATCH_INVERSE, snapshot, now, names,
+            (values['btc_parent_movement_id'],), entry, stop, take, p, ref_ms)
+        return _result(HYPE_WATCH_INVERSE, True, 'match', decision)
+    except (ValueError, TypeError, KeyError, OverflowError, InvalidOperation) as exc:
+        return _invalid(HYPE_WATCH_INVERSE, exc)
 
 
 def evaluate_sff1361(snapshot, now_ms):
