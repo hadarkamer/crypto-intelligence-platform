@@ -15,21 +15,172 @@ INITIAL_USD = '40'
 FRACTION = '0.05'
 DAY_MS = 86400000
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
-UNALLOCATED_FORMULAS = frozenset(('HYPE_WATCH_LIQ4050_24H_INVERSE',))
+HYPE_FORMULA = 'HYPE_WATCH_LIQ4050_24H_INVERSE'
+ALLOCATION_VERSION = 'existing-capital-hype-40usd-20261115-v1'
+# Preserve the prior six approved $40 entitlements even when their lazy
+# portfolio has not yet been created. Pausing entries does not release capital.
+PRIOR_FORMULAS = frozenset(('HYPE_ROW71205_SHORT', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK',
+    'SFF1361_SOL_RECENT', 'OCONF0034_13', 'CT009_FROZEN_3D', 'XRP_LIQUIDITY_RAW_INVERSE'))
+UNALLOCATED_FORMULAS = frozenset()
 
 
 class AccountingError(ValueError):
     pass
 
 
-def require_live_allocation(formula):
-    """An operationally new formula cannot inherit the historical default.
+def allocation_needed(state):
+    return HYPE_FORMULA not in state.get('formula_accounting', {}).get('allocations', {})
 
-    Historical snapshots remain valid for management/settlement. Only new
-    admission checks this gate; an explicit live allocation is still required.
+
+def require_live_allocation(formula, *, allocation=None, routes=None):
+    """New HYPE has explicit 40/5 authorization; it also needs a funded receipt.
+
+    The receipt is in the SAME locked journal as the portfolio and entries.
+    Old formula snapshots/settlements remain readable without this new gate.
     """
-    if formula in UNALLOCATED_FORMULAS:
-        raise AccountingError('FORMULA_LIVE_ALLOCATION_NOT_APPROVED')
+    if formula != HYPE_FORMULA:
+        return
+    try:
+        value = deepcopy(allocation)
+        digest = value.pop('receipt_id')
+        if (digest != life.digest(value) or value['version'] != ALLOCATION_VERSION
+                or value['formula'] != formula or value['initial_usd'] != INITIAL_USD
+                or value['fraction'] != FRACTION or value['scope'] != 'GLOBAL_EXISTING_CAPITAL'
+                or routes is not None and value['routes'] != routes
+                or len(set(value['routes'].values())) != 2
+                or life.number(value['unassigned_before_usd']) < Decimal(INITIAL_USD)
+                or life.number(value['unassigned_after_usd']) !=
+                    life.number(value['unassigned_before_usd']) - Decimal(INITIAL_USD)):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise AccountingError('FORMULA_EXISTING_CAPITAL_RECEIPT_REQUIRED') from None
+
+
+def _existing_claims(ledger):
+    portfolios = ledger.get('portfolios', {})
+    claims = {}
+    for formula in sorted(PRIOR_FORMULAS | set(portfolios)):
+        if formula == HYPE_FORMULA:
+            continue
+        value = portfolios.get(formula)
+        if value is None:
+            claims[formula] = dict(usd=INITIAL_USD, basis='PRIOR_APPROVED_INITIAL_ENTITLEMENT')
+            continue
+        balance = life.number(value['balance_usd'], signed=True)
+        if (balance != Decimal(INITIAL_USD) + life.number(value['realized_net_usd'], signed=True)
+                or type(value['revision']) is not int or value['revision'] < 0):
+            raise AccountingError('FORMULA_CAPITAL_INTEGRITY_FAILURE')
+        claims[formula] = dict(usd=life.text(max(Decimal(0), balance)),
+            basis='EXISTING_PORTFOLIO', revision=value['revision'])
+    return claims
+
+
+def _capital_obligations(state, observations):
+    """Conservative full notional bound, not a second leverage/margin model.
+
+    Venue withdrawable already excludes held collateral. Outstanding non-reduce
+    entries are additionally reserved at full frozen notional. Matching CLOIDs
+    count once across the open inventory and the durable uncertain request.
+    """
+    obligations = {}
+    for account, sample in observations.items():
+        for order in sample['open_orders']:
+            if order.get('reduceOnly') is True:
+                continue
+            if order.get('reduceOnly') is not False:
+                raise AccountingError('FORMULA_CAPITAL_OBLIGATIONS_UNRESOLVED')
+            key = account + ':' + str(order.get('cloid') or order['oid'])
+            obligations[key] = life.number(order['sz'], positive=True) * life.number(order['limitPx'], positive=True)
+    for request in state['requests'].values():
+        p = request['proposal']
+        if p['operation'] != 'ENTRY' or request['phase'] in ('OBSERVED', 'ABORTED_UNSENT'):
+            continue
+        # Unknown entries on unobserved accounts still consume global capital.
+        for order in p['action']['orders']:
+            if order['r'] is not False:
+                raise AccountingError('FORMULA_CAPITAL_OBLIGATIONS_UNRESOLVED')
+            key = p['account'] + ':' + order['c']
+            value = life.number(order['s'], positive=True) * life.number(order['p'], positive=True)
+            obligations[key] = max(obligations.get(key, Decimal(0)), value)
+    return {key: life.text(value) for key, value in sorted(obligations.items())}
+
+
+def _allocate_hype(state, context, now_ms):
+    ledger = state.setdefault('formula_accounting', dict(version=VERSION, portfolios={}))
+    existing = ledger.get('allocations', {}).get(HYPE_FORMULA)
+    if existing is not None:
+        require_live_allocation(HYPE_FORMULA, allocation=existing, routes=state['routes'])
+        if HYPE_FORMULA not in ledger['portfolios']:
+            raise AccountingError('FORMULA_CAPITAL_INTEGRITY_FAILURE')
+        return
+    if HYPE_FORMULA in ledger['portfolios']:
+        # A test seed or legacy-name migration is not funding authorization.
+        raise AccountingError('FORMULA_EXISTING_CAPITAL_RECEIPT_REQUIRED')
+    if len(set(state['routes'].values())) != 2:
+        raise AccountingError('FORMULA_CAPITAL_ROUTE_INTEGRITY_FAILURE')
+    observations = {}; observation_errors=deepcopy((context or {}).get('capital_observation_errors', {}))
+    for account, sample in (context or {}).get('capital_observations', {}).items():
+        if account not in state['routes'].values():
+            raise AccountingError('FORMULA_CAPITAL_ROUTE_INTEGRITY_FAILURE')
+        if (type(now_ms) is not int or type(sample.get('at_ms')) is not int
+                or not 0 <= now_ms-sample['at_ms'] <= 15000):
+            continue
+        if sample.get('status') != 'NATIVE_PERP_CASH_VERIFIED':
+            continue
+        # Exactly one native cash source per DISTINCT routed account. Never
+        # add a spot mirror, use future timestamps, or infer an account mode.
+        mode = sample.get('mode')
+        if mode not in ('disabled', 'default') or sample.get('mode_after') != mode:
+            continue
+        try:
+            raw = sample['account_state']; summary = raw['marginSummary']
+            cash = min(life.number(summary['totalRawUsd'], signed=True),
+                life.number(summary['accountValue'], signed=True), life.number(raw['withdrawable']))
+            if cash < 0:
+                raise AccountingError('FORMULA_CAPITAL_NEGATIVE_CASH_UNRESOLVED')
+            observations[account] = dict(at_ms=sample['at_ms'], mode=mode,
+                raw_usd=summary['totalRawUsd'], account_value_usd=summary['accountValue'],
+                withdrawable_usd=raw['withdrawable'], lower_bound_usd=life.text(cash),
+                open_orders=deepcopy(sample['open_orders']))
+        except AccountingError:
+            raise
+        except (ValueError, KeyError, TypeError):
+            observation_errors[account]='FORMULA_CAPITAL_CASH_FIELDS_UNVERIFIED'
+    if (context or {}).get('capital_legacy_pending'):
+        # Legacy journal exposes only the pending request identity here; it
+        # must not be silently treated as a zero-sized global obligation.
+        raise AccountingError('FORMULA_CAPITAL_OBLIGATIONS_UNRESOLVED')
+    claims = _existing_claims(ledger)
+    try:
+        obligations = _capital_obligations(state, observations)
+    except (ValueError, KeyError, TypeError):
+        raise AccountingError('FORMULA_CAPITAL_OBLIGATIONS_UNRESOLVED') from None
+    observed = sum((life.number(s['lower_bound_usd']) for s in observations.values()), Decimal(0))
+    reserved = sum((life.number(c['usd']) for c in claims.values()), Decimal(0))
+    pending = sum((life.number(v) for v in obligations.values()), Decimal(0))
+    free = max(Decimal(0), observed-reserved-pending)
+    diagnostic = dict(requested_usd=INITIAL_USD, observed_lower_bound_usd=life.text(observed),
+        existing_claims_usd=life.text(reserved), pending_entry_bound_usd=life.text(pending),
+        unassigned_lower_bound_usd=life.text(free), shortfall_to_verified_lower_bound_usd=
+            life.text(max(Decimal(0), Decimal(INITIAL_USD)-free)),
+        observed_accounts=sorted(observations), missing_accounts=sorted(set(state['routes'].values())-set(observations)),
+        account_errors=observation_errors)
+    # On refusal the caller copies this bounded diagnosis into the normal
+    # per-entry decision; it is not a claim of actual shortage in unseen cash.
+    if not observations or free < Decimal(INITIAL_USD):
+        error = AccountingError('FORMULA_EXISTING_CAPITAL_NOT_VERIFIED' if not observations
+                                else 'FORMULA_EXISTING_CAPITAL_LOWER_BOUND_INSUFFICIENT')
+        error.capital_diagnostic = diagnostic
+        raise error
+    receipt = dict(version=ALLOCATION_VERSION, formula=HYPE_FORMULA, initial_usd=INITIAL_USD,
+        fraction=FRACTION, scope='GLOBAL_EXISTING_CAPITAL', allocated_at_ms=now_ms,
+        routes=deepcopy(state['routes']), source_observations=observations,
+        existing_claims=claims, outstanding_entry_obligations=obligations,
+        unassigned_before_usd=life.text(free), unassigned_after_usd=life.text(free-Decimal(INITIAL_USD)),
+        funding_transfers_sent=0, prior_formula_history_transferred=False)
+    receipt['receipt_id'] = life.digest(receipt)
+    ledger.setdefault('allocations', {})[HYPE_FORMULA] = receipt
+    ledger['portfolios'][HYPE_FORMULA] = dict(balance_usd=INITIAL_USD, realized_net_usd='0', revision=0)
 
 
 def validate_risk(value, formula=None):
@@ -50,10 +201,11 @@ def validate_risk(value, formula=None):
         raise AccountingError('EXACT_FORMULA_RISK_REQUIRED') from None
 
 
-def risk_for(state, source):
+def risk_for(state, source, *, context=None, now_ms=None):
     formula = source['rule_id']
     life.ident(formula)
-    require_live_allocation(formula)
+    if formula == HYPE_FORMULA:
+        _allocate_hype(state, context, now_ms)
     for trade in state['trades'].values():
         if (trade.get('entry_risk', {}).get('formula') == formula
                 and not trade.get('settlement')

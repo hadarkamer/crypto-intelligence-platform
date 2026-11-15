@@ -28,7 +28,10 @@ MODE = 'explicit_approved_mainnet_worker_v1'
 # These are expected candidate refusals, not permission to swallow corrupt
 # state, missing fields, ownership conflicts or an arbitrary implementation bug.
 LOCAL_ENTRY_REFUSALS = frozenset((
-    'FORMULA_LIVE_ALLOCATION_NOT_APPROVED',
+    'FORMULA_LIVE_ALLOCATION_NOT_APPROVED', 'FORMULA_EXISTING_CAPITAL_NOT_VERIFIED',
+    'FORMULA_EXISTING_CAPITAL_LOWER_BOUND_INSUFFICIENT',
+    'FORMULA_EXISTING_CAPITAL_RECEIPT_REQUIRED', 'FORMULA_CAPITAL_OBLIGATIONS_UNRESOLVED',
+    'FORMULA_CAPITAL_NEGATIVE_CASH_UNRESOLVED',
     'FORMULA_NET_SETTLEMENT_PENDING', 'FORMULA_CAPITAL_EXHAUSTED',
     'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS', 'ASSET_NOT_FOUND',
     'ASSET_PRECISION_OR_LISTING_INVALID', 'ASSET_UNAVAILABLE',
@@ -191,6 +194,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if reason not in LOCAL_ENTRY_REFUSALS:
                 raise
             _entry_decision(state, cid, context, now, reason)
+            if hasattr(exc,'capital_diagnostic'):
+                state['entry_decisions'][cid]['capital_diagnostic']=deepcopy(exc.capital_diagnostic)
             return None
         if previous is not None and proposal is None:
             candidate['trades'][cid] = previous

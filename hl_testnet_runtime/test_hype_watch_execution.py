@@ -1,4 +1,4 @@
-"""Staged HYPE IOC/holding support, never an authorization for live allocation."""
+"""Authorized HYPE IOC/holding with real funded-receipt admission, isolated I/O."""
 from copy import deepcopy
 from decimal import Decimal
 import os
@@ -39,17 +39,15 @@ class HypeWatchContract:
     restart = support.RuntimeContract.restart
 
     def authorize_fixture(self, *, risk=True):
-        """Exact test-only $40/5% fixture; not a default or copied old ledger."""
-        item = ('hype_watch_liq4050', hype.RULE, 'HYPE')
-        p = patch.object(contract, 'NEW_ENTRY_IDENTITIES', contract.NEW_ENTRY_IDENTITIES | {item})
-        p.start(); self.addCleanup(p.stop)
+        """Provide controlled exchange evidence; never patch allocation policy."""
         if risk:
-            p = patch.object(accounting, 'UNALLOCATED_FORMULAS', frozenset())
-            p.start(); self.addCleanup(p.stop)
-            def seed(state):
-                ledger = state.setdefault('formula_accounting', dict(version=accounting.VERSION, portfolios={}))
-                ledger['portfolios'][hype.RULE] = dict(balance_usd='40', realized_net_usd='0', revision=0)
-            self.store.mutate(seed)
+            from .test_hype_formula_capital import capital_context
+            collect=self.provider.collect
+            def observed(state,**kwargs):
+                value=collect(state,**kwargs)
+                value.update(capital_context(state,at=self.venue.now()))
+                return value
+            self.provider.collect=observed
 
     def start_hype(self, *, risk=True):
         self.authorize_fixture(risk=risk)
@@ -60,19 +58,19 @@ class HypeWatchContract:
     def protect(self):
         for _ in range(3): self.cycle(False)
 
-    def test_default_roster_rejects_new_hype_without_ledger_creation(self):
+    def test_active_roster_without_capital_evidence_cannot_create_portfolio(self):
         msg = hype_alert(); self.worker.receive([msg]); self.cycle()
         self.assertFalse(self.venue.requests)
         self.assertNotIn(hype.RULE, self.store.load().get('formula_accounting', {}).get('portfolios', {}))
 
-    def test_roster_override_alone_cannot_authorize_risk_or_default_two_dollars(self):
+    def test_active_roster_alone_cannot_fund_capital_or_fall_back_to_two_dollars(self):
         msg, result = self.start_hype(risk=False)
         self.assertFalse(self.venue.requests)
         saved = self.store.load()
         self.assertEqual(saved['entry_decisions'][msg['occurrence_id']]['reason'],
-                         'FORMULA_LIVE_ALLOCATION_NOT_APPROVED')
+                         'FORMULA_EXISTING_CAPITAL_NOT_VERIFIED')
         self.assertNotIn(hype.RULE, saved.get('formula_accounting', {}).get('portfolios', {}))
-        with self.assertRaisesRegex(accounting.AccountingError, 'ALLOCATION_NOT_APPROVED'):
+        with self.assertRaisesRegex(accounting.AccountingError, 'EXISTING_CAPITAL_NOT_VERIFIED'):
             accounting.risk_for(saved, msg)
 
     def test_entry_is_one_ioc_at_frozen_price_then_actual_filled_protection(self):
@@ -222,7 +220,7 @@ class HypeWireTests(unittest.TestCase):
         source = hype_alert()
         self.t = T + 59990
         risk = dict(policy=accounting.VERSION, formula=hype.RULE, balance_usd='40',
-            revision=0, fraction='0.05', planned_usd='2')
+            revision=0, fraction='0.05', planned_usd='2.00')
         p = self.request['proposal']
         p.update(card_id=source['occurrence_id'], symbol='HYPE', quantity='1',
             source_at=source['source_at'], source_expires_at=source['expires_at'],
@@ -240,11 +238,14 @@ class HypeWireTests(unittest.TestCase):
         self.context['entry_account']['at_ms'] = self.t
         self.context['safety'].update(at_ms=self.t, supervisor_at_ms=self.t, not_before_ms=T - 1)
         self.release.update(not_before_ms=T - 1, entry_expires_at_ms=T + 86400000)
-        item = ('hype_watch_liq4050', hype.RULE, 'HYPE')
-        p = patch.object(contract, 'NEW_ENTRY_IDENTITIES', contract.NEW_ENTRY_IDENTITIES | {item})
-        p.start(); self.addCleanup(p.stop)
-        p = patch.object(accounting, 'UNALLOCATED_FORMULAS', frozenset())
-        p.start(); self.addCleanup(p.stop)
+        from . import two_account_execution as roles
+        from .experimental_live_state import initial
+        from .test_hype_formula_capital import capital_context
+        funded=initial({role:roles.route_for(self.env,role) for role in roles.ROLES},T-1)
+        funded_risk=accounting.risk_for(funded,source,
+            context=capital_context(funded,at=self.t),now_ms=self.t)
+        self.assertEqual(funded_risk,risk)
+        self.context['formula_allocation']=deepcopy(funded['formula_accounting']['allocations'][hype.RULE])
 
     def test_signed_exchange_expiry_cannot_extend_the_original_entry_minute(self):
         self.send()
@@ -260,9 +261,9 @@ class HypeWireTests(unittest.TestCase):
         self.assertEqual(len(self.signed), 1)
         self.assertEqual(self.http, [])
 
-    def test_missing_risk_approval_never_reaches_signing_or_http(self):
-        with patch.object(accounting, 'UNALLOCATED_FORMULAS', frozenset((hype.RULE,))):
-            with self.assertRaisesRegex(DefinitelyNotSubmitted, 'FORMULA_LIVE_ALLOCATION_NOT_APPROVED'):
-                self.send()
+    def test_missing_funded_receipt_never_reaches_signing_or_http(self):
+        self.context.pop('formula_allocation')
+        with self.assertRaisesRegex(DefinitelyNotSubmitted, 'FORMULA_EXISTING_CAPITAL_RECEIPT_REQUIRED'):
+            self.send()
         self.assertEqual(self.signed, [])
         self.assertEqual(self.http, [])

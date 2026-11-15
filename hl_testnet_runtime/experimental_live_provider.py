@@ -23,6 +23,7 @@ from .experimental_market_context import MarketSnapshot
 from .request_budget import BudgetError, fresh_entry_retry_ms, request_weight
 from . import experimental_external_activity as external
 from . import position_recovery as recovery
+from . import formula_accounting as accounting
 
 
 def _isolated_markets(state, context):
@@ -270,9 +271,15 @@ class LiveEvidenceProvider:
         return life.digest({a:[dict(bucket=s['bucket'],revision=s['revision'],pending=s['pending'])
                             for s in rows] for a,rows in legacy.items()})
 
-    def _inventory(self, account, reader=None):
+    def _inventory(self, account, reader=None, *, capital=False):
         reader=self.public if reader is None else reader
         at_ms=self.now()
+        capital_mode=None;capital_error=None
+        if capital:
+            try:
+                capital_mode=self.entry_info.read('userAbstraction',user=account)
+            except Exception as exc:
+                capital_error=_error(exc)
         orders=reader.read('frontendOpenOrders',account)
         positions=reader.read('clearinghouseState',account)
         if (not isinstance(orders,list) or len(orders)>10000 or not isinstance(positions,dict)
@@ -291,9 +298,35 @@ class LiveEvidenceProvider:
             life.ident(p.get('coin'),r'[A-Za-z0-9:@._-]{1,64}')
             life.number(p.get('szi'),signed=True);symbols.add(p['coin'])
         # Margin totals change with marks; ownership comparison uses positions.
-        return dict(orders=deepcopy(sorted(orders,key=lambda x:x['oid'])),
+        value=dict(orders=deepcopy(sorted(orders,key=lambda x:x['oid'])),
             positions=dict(assetPositions=deepcopy(sorted(positions['assetPositions'],key=lambda x:x['position']['coin']))),
             account_state=deepcopy(positions),at_ms=at_ms)
+        if capital:
+            try:
+                if capital_error is not None:
+                    raise ProviderError(capital_error)
+                if capital_mode not in ('disabled','default'):
+                    raise ProviderError('FORMULA_CAPITAL_NATIVE_CASH_SOURCE_REQUIRED')
+                if capital_mode=='default':
+                    # Reuse the existing narrow native/default account scope;
+                    # do not relabel default or count unified spot/perp twice.
+                    if account!=roles.PHANTOM:
+                        raise ProviderError('FORMULA_CAPITAL_DEFAULT_ACCOUNT_SCOPE_UNVERIFIED')
+                    spot=self.entry_info.read('spotClearinghouseState',user=account)
+                    total,_=checks.unified_usdc(spot)
+                    if total!=0 or any(checks.number(row['total'])!=0 for row in spot['balances']):
+                        raise ProviderError('FORMULA_CAPITAL_NATIVE_CASH_SOURCE_REQUIRED')
+                after=self.entry_info.read('userAbstraction',user=account)
+                if after!=capital_mode:
+                    raise ProviderError('FORMULA_CAPITAL_ACCOUNT_MODE_CHANGED')
+                value['capital_observation']=dict(status='NATIVE_PERP_CASH_VERIFIED',
+                    at_ms=at_ms,mode=capital_mode,mode_after=after,
+                    account_state=deepcopy(positions),open_orders=deepcopy(orders))
+            except Exception as exc:
+                # Capital provenance is entry-only. An unavailable mode read
+                # must never discard inventory used for existing protections.
+                value['capital_error']=_error(exc)
+        return value
 
     def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None, meter=None):
         lookups={};ids={};seen=set()
@@ -557,6 +590,9 @@ class LiveEvidenceProvider:
             ranges={},bars={},entry_accounts={},entry_blocked={},entry_retry_after_ms={},account_entry_blocked={},blocked_lanes={},
             collector_checkpoints={},ownership_revision=ownership,rejected_requests=[],
             inventory_account_errors={},account_inventory_at_ms={},
+            capital_observations={},capital_observation_errors={},
+            capital_legacy_pending=[dict(account=account,bucket=row['bucket'],request_id=row['pending'])
+                for account,rows in legacy.items() for row in rows if row.get('pending') is not None],
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
         feed=getattr(self.safety,'feed',None)
         if callable(getattr(feed,'health',None)):
@@ -647,6 +683,14 @@ class LiveEvidenceProvider:
                     and any(t['source']['family']==msg['family'] for t in peers)):
                 continue
             candidates.add(cid)
+        capital_probe=(accounting.allocation_needed(state) and not protection_lanes
+            and now>=getattr(self,'_capital_probe_after_ms',0)
+            and any(state['sources'][cid]['source']['rule_id']==accounting.HYPE_FORMULA for cid in candidates))
+        if capital_probe:
+            # An insufficient/unknown cash result never creates a per-second
+            # polling loop. A later eligible wave may retry in a minute under
+            # the unchanged background budget. No probes after durable funding.
+            self._capital_probe_after_ms=now+60000
         participating={account for account,_ in lanes}|{
             state['routes']['long_account' if state['sources'][cid]['source']['side']=='LONG'
                 else 'short_account'] for cid in candidates}
@@ -664,6 +708,10 @@ class LiveEvidenceProvider:
                     if self._market is None or not 0<=now-self._market[0]<5000:
                         planned.append('metaAndAssetCtxs')
                     planned+=['frontendOpenOrders','clearinghouseState']*len(participating)
+                    if capital_probe:
+                        # Worst case: native-default needs an empty spot check.
+                        # Each actual call still obtains the ordinary allowance.
+                        planned+=['userAbstraction','spotClearinghouseState','userAbstraction']*len(participating)
                     # Existing lanes are collected before entry. Estimate
                     # their settled recent fill pages and possible status
                     # reads. The transport still reserves the full 120 per
@@ -708,7 +756,7 @@ class LiveEvidenceProvider:
                     -set(inventories)-set(result['inventory_account_errors'])):
                 result['account_inventory_at_ms'][account]=now
                 try:
-                    inventories[account]=self._inventory(account,cache.pass_reader(0))
+                    inventories[account]=self._inventory(account,cache.pass_reader(0),capital=capital_probe)
                 except Exception as exc:
                     result['inventory_account_errors'][account]=_error(exc)
                     result['account_entry_blocked'][account]=_error(exc)
@@ -939,6 +987,11 @@ class LiveEvidenceProvider:
         entry_planner=object.__new__(TestnetExecutionRuntime)
         if callable(getattr(self.safety,'release_loader',None)):
             entry_planner.release_loader=self.safety.release_loader
+        for account,inventory in inventories.items():
+            if 'capital_observation' in inventory:
+                result['capital_observations'][account]=deepcopy(inventory['capital_observation'])
+            elif 'capital_error' in inventory:
+                result['capital_observation_errors'][account]=inventory['capital_error']
         for cid in sorted(state['sources'],key=lambda k:(state['sources'][k]['source']['source_at'],k)):
             record=state['sources'][cid]
             msg=contract.validate(record['source']);role='long_account' if msg['side']=='LONG' else 'short_account'
@@ -1222,6 +1275,11 @@ class LiveEvidenceProvider:
             result['market']={k:v for k,v in ctx['marks'][lane].items() if k!='account'}
         if entry:
             result['entry_risk']=deepcopy(trade.get('entry_risk'))
+            if trade['source']['rule_id']==accounting.HYPE_FORMULA:
+                allocation=state.get('formula_accounting',{}).get('allocations',{}).get(accounting.HYPE_FORMULA)
+                accounting.require_live_allocation(accounting.HYPE_FORMULA,
+                    allocation=allocation,routes=state['routes'])
+                result['formula_allocation']=deepcopy(allocation)
             result['entry_account']=deepcopy(ctx['entry_accounts'][cid])
             if not contract.is_approved(trade['source']):
                 result.update(source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])

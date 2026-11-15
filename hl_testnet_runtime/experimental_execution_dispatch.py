@@ -94,9 +94,6 @@ def _terms(request, source, metadata, *, formula_risk=None):
         wire.precise(o['p'],o['s'],decimals)
         levels=prepared['execution']
         if p['operation']=='ENTRY':
-            if hype_watch.is_hype(source):
-                from .formula_accounting import require_live_allocation
-                require_live_allocation(source['rule_id'])
             if (p['leg']!='ENTRY' or action['type']!='order' or o['r'] is not False
                     or o['b'] is not (source['side']=='LONG')
                     or o['p']!=levels['entry'] or o['t']!={'limit':{'tif':('Ioc' if hype_watch.is_hype(source) else
@@ -260,6 +257,10 @@ def review(request, context, *, now_ms):
         raise BoundaryError('TESTNET_HOST_REQUIRED')
     formula_risk = context.get('entry_risk') if entry else None
     if entry:
+        if hype_watch.is_hype(source):
+            from .formula_accounting import require_live_allocation
+            require_live_allocation(source['rule_id'],allocation=context.get('formula_allocation'),
+                routes={role:roles.route_for(context['env'],role)['account'] for role in roles.ROLES})
         if p.get('entry_risk') != formula_risk:
             raise BoundaryError('DURABLE_FORMULA_RISK_MISMATCH')
         if formula_risk is not None:

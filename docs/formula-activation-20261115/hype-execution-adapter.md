@@ -1,4 +1,4 @@
-# Manager transition and staged HYPE execution
+# Manager transition and approved HYPE activation candidate
 
 ## Independent deployable suspension checkpoint
 
@@ -15,13 +15,60 @@ Focused proof: manager-suspension-focused.log (12 passed, 6 real PostgreSQL).
 Broader actual HTTP/PostgreSQL transition coverage is owned by the integration
 suite and must be cited separately, not inferred from these focused tests.
 
-## Staged HYPE implementation, not live activation
+## HYPE execution and the approved separate portfolio
 
 Identity: HYPE_WATCH_LIQ4050_24H_INVERSE / hype_watch_liq4050 / HYPE.
-It remains outside NEW_ENTRY_IDENTITIES. formula_accounting additionally
-rejects a new allocation with FORMULA_LIVE_ALLOCATION_NOT_APPROVED before
-creating any ledger or inheriting the old HYPE ledger or the $2 fallback.
-Existing immutable risk snapshots remain readable for historical management.
+The final candidate includes it in NEW_ENTRY_IDENTITIES with XRP R2732,
+SOL SFF1361 and XRP Liquidity inverse. CT009 and OCONF remain paused;
+ROW71205 is retired for new entries. Historical contracts remain readable.
+
+The user's 2026-11-15 approval gives this identity an initial $40 portfolio
+and 5% of its updated realized balance per new entry. Its approval is preserved
+in HYPE_Live_Risk_Approval_20261115.json, separately from the research handoff.
+No $5 research stake, old-HYPE history, fallback risk, or other portfolio's
+balance funds the new identity.
+
+`formula_accounting` uses the existing locked PostgreSQL execution journal.
+A one-time `allocations[HYPE_WATCH_LIQ4050_24H_INVERSE]` receipt and the initial
+portfolio are committed atomically with normal admission. The receipt assigns
+$40 from GLOBAL_EXISTING_CAPITAL; it is a reservation, not an exchange transfer.
+Existing portfolios are global across both independent routed accounts. They
+are therefore reserved once globally, never attributed arbitrarily to one
+account. Every existing balance is retained, including retired/paused formulas.
+A prior approved initial $40 entitlement is conservatively reserved if one of
+the prior six portfolios was never lazily initialized; its distinct basis is
+recorded. Known non-reduce entry obligations are additionally reserved at their
+full frozen notional, matched once by account/CLOID across open inventory and
+uncertain durable requests. This conservative bound is not a new margin or
+leverage model. Unknown legacy pending obligations refuse only new-HYPE funding.
+
+Cash provenance reuses the ordinary account inventory and its original time.
+Only while funding is absent and a HYPE event is eligible, bounded
+`userAbstraction` probes bracket that existing inventory under the unchanged
+background request budget. Native `disabled` is accepted. `default` retains
+its existing narrow approved native-account scope and additionally requires
+an all-zero spot inventory; it is not renamed. Unified/portfolio cash is not
+inferred from perp summaries and refuses new-HYPE allocation. Mode/spot failure
+leaves ordinary inventory available to manage protections. A failed or
+insufficient funding observation may be retried at most once per minute by a
+later eligible event; no probes are added after the durable receipt exists.
+
+For each distinct verified native account, the observed cash bound is
+min(totalRawUsd, accountValue, withdrawable), with negative cash refusing
+allocation rather than disappearing from the sum. No spot/perp mirror is
+added and no unobserved account contributes assets. This verifies a bounded
+source of existing funds, not an assertion that all unseen account equity is
+known. After existing claims and pending obligations, at least $40 must be
+verified before initialization. Refusal records exact observed/reserved/free
+amounts, missing accounts and the gap to that verified lower bound; the gap is
+not misreported as an actual live capital shortage.
+
+Restart/retry validates the same receipt and never reinstates $40. Existing
+net settlement applies gross P/L, fees/rebates and funding once, with its same
+atomic trade receipt and ledger revision. Risk examples are $40→$2,
+$50→$2.50, $30→$1.50. The final sender requires the route-bound funding receipt.
+Position, exposure, manual ownership and unresolved-request fences are unchanged;
+the new identity cannot adopt the old manual HYPE position or bypass its lane.
 
 The operational adapter submits one IOC at the unchanged frozen reference
 price E. It does not reprice, add an adverse wait or leave a GTC order. Entry
@@ -65,7 +112,7 @@ remains. The final 25-case suite verifies this lookup and rejects substituted
 old-HYPE identity, symbol, operation or leg. Eight existing DOGE terminal
 identity tests were rerun and passed (manager-hype-identity-regression.log).
 
-## Isolated evidence and limits
+## Historical staged evidence and final-candidate limits
 
 - manager-hype-final.log: 25 passed (11 real PostgreSQL, 11 memory cases,
   3 actual LiveDispatchPort tests with key/signature/HTTPS boundaries controlled).
@@ -75,9 +122,15 @@ identity tests were rerun and passed (manager-hype-identity-regression.log).
   25-case final HYPE suite rather than repeating unrelated regressions.
 - All tests used the existing product worker and test ports. No live order,
   provider call, injected live signal, nonce, risk change or deployment.
-- The live risk allocation is intentionally undefined. The $40/5% ledger
-  in isolated fixtures is an explicit synthetic test input, not approval or a
-  transfer of the old formula's allocation.
+- The staged logs above predate the explicit risk approval. Final candidate
+  tests replace their synthetic guard overrides with the actual product
+  funding path; see manager-hype-capital-unit.log and the final PG/HMAC report.
+- The read-only live journal held eight existing portfolio balances totaling
+  $310.8782200 at the recorded inspection. All remain claims. No current cash
+  or account-mode fact was persisted, so live funding sufficiency was not
+  inferred. The old HYPE manual/unknown request remains unchanged and can
+  legitimately prevent new-HYPE admission. No new HYPE allocation or fill has
+  been observed in production.
 - Frozen research replay and the full new source-to-server integration must
   have their own evidence. These manager tests do not prove those steps or any
   exchange fill in production.

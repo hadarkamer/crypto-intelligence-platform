@@ -1,0 +1,40 @@
+{
+  "version": "hype-watch-live-risk-approval-20261115-v1",
+  "source": "Explicit user operational clarification in this task, 2026-11-15",
+  "formula_id": "HYPE_WATCH_LIQ4050_24H_INVERSE",
+  "initial_formula_balance_usd": "40",
+  "risk_fraction_of_updated_formula_balance": "0.05",
+  "funding_constraint": "Within existing capital; separate documented allocation; no double counting. No transfer of old HYPE history or changes to other formula balances.",
+  "initialization": "Exactly once; deployment, restart and retry do not reset balance.",
+  "accounting": "Existing realized P/L, fees and funding settlement; exactly-once posting.",
+  "allocation_examples": [
+    {
+      "balance_usd": "40",
+      "planned_risk_usd": "2"
+    },
+    {
+      "balance_usd": "50",
+      "planned_risk_usd": "2.5"
+    },
+    {
+      "balance_usd": "30",
+      "planned_risk_usd": "1.5"
+    }
+  ],
+  "historical_spec_preserved": true,
+  "deployment_authorization": "Not yet granted for the final four-formula pair; request after exact-commit verification.",
+  "research_archives": [
+    {
+      "filename": "HYPE_Validation_Complete_20261115.zip",
+      "sha256": "ca33d6dccee06b7c6e49f0af25be288e3648c78b723380c89cefedd1b104bfee"
+    },
+    {
+      "filename": "Seven_Formulas_Update_20261115_Evidence.zip",
+      "sha256": "3276a674055df16ad8cb1442c84553968eab7aceb1d4754e3269fc328150612b"
+    },
+    {
+      "filename": "Formula_Research_Complete_Evidence_20261114.zip",
+      "sha256": "636d44344016e80ab9b41f5890720708c89a833d6f691f24c2e5c2272a72033f"
+    }
+  ]
+}

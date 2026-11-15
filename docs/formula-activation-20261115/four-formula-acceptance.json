@@ -1,0 +1,95 @@
+{
+  "status": "TESTED_CANDIDATE_REQUIRES_EXACT_PAIR_DEPLOYMENT_APPROVAL",
+  "repo": "hadarkamer/crypto-intelligence-platform",
+  "source_parent": "a36fa603b58ce5fe2b821a827f1f63c6249fc294",
+  "manager_parent": "6d63b9d47be5a95b200b02d863b3651248cccb0c",
+  "spec_sha256": "837cbed266afbce761b3dbe2d1a494fa5e261daf170b1d6c7f5f10a4c9678c73",
+  "new_entry_rules": [
+    "R2732_XRP_SHORT_NY_WEEKDAYS_LOCK",
+    "SFF1361_SOL_RECENT",
+    "XRP_LIQUIDITY_RAW_INVERSE",
+    "HYPE_WATCH_LIQ4050_24H_INVERSE"
+  ],
+  "paused": [
+    "CT009_FROZEN_3D",
+    "OCONF0034_13"
+  ],
+  "retired": [
+    "HYPE_ROW71205_SHORT"
+  ],
+  "hype_risk": {
+    "initial_usd": "40",
+    "risk_fraction": "0.05",
+    "scope": "GLOBAL_EXISTING_CAPITAL"
+  },
+  "frozen_product_parity": {
+    "status": "PASS",
+    "manifest_files_verified": 180,
+    "snapshots": 2956,
+    "waves": 40,
+    "snapshot_mismatches": 0,
+    "wave_mismatches": 0,
+    "product_dispositions": {
+      "SELECTED": 32,
+      "CAPACITY_REJECTED": 2,
+      "UNKNOWN_BLOCKED": 6
+    },
+    "chronological_all_waves": "PASS",
+    "membership_first_persisted_at_proven": false
+  },
+  "focused_source_tests": 71,
+  "focused_manager_tests": 55,
+  "isolated_postgresql_http_suites": {
+    "activation-four-transition-results.json": {
+      "tests": 20,
+      "failures": 0,
+      "errors": 0
+    },
+    "hype-four-pipeline-results.json": {
+      "tests": 11,
+      "failures": 0,
+      "errors": 0
+    },
+    "hype-upstream-readiness-results.json": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0
+    },
+    "hype-four-final-source-results.json": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0
+    },
+    "hype-four-final-delayed-results.json": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0
+    }
+  },
+  "production_artificial_signals_orders_faults_or_deployments": 0,
+  "critical_product_sha256": {
+    "source/selected_six_formula_signal.py": "182b01849739b107187dd37e3e99823ac613a0a99261d770eb4c848a093e1ef0",
+    "source/selected_six_formula_source.py": "6219a55351b730e4902800c25f341e32b2adbd0ad14bfe04fde3d379b771f2e9",
+    "source/selected_six_formula_store.py": "adbdd791ef753574a35ea910889333574979146c7618c03c840f71d1c86a28ea",
+    "source/research_watch_scan_measurement_worker.py": "9f181d585473cb662fc09ca872313efadc1400172da3961e96f7a58972180f45",
+    "source/approved_alert_contract.py": "42e6e285b54b14479d057b07eeaa5980040031111978ace6992e509ad6bde3ba",
+    "source/alert_delivery_policy.py": "cd84702b71a5cd650c5eb7c1295cdae07537dff57e527a8456e4c6b5932e9d62",
+    "manager/hl_testnet_runtime/formula_accounting.py": "0044d75bdc92223d43417beba10bc933daec3f7e1c4791520bf761bd202eb1e7",
+    "manager/hl_testnet_runtime/experimental_live_provider.py": "7cc3c19071d28d199a44b861f17892b5ddbf9f5b7fbc3674a2b52d5b18a1fa69",
+    "manager/hl_testnet_runtime/experimental_execution_runtime.py": "03a89c9896bf8c2dd0bb158730dec6d01e5844e57d167b0a38cf6394b277439f",
+    "manager/hl_testnet_runtime/experimental_live_runtime.py": "49e5581b3ce3c8a79ce68f2dc79ede07d076a7d5616abf227b2bc0526b6bd891",
+    "manager/hl_testnet_runtime/experimental_execution_dispatch.py": "69f9dbb5965086c7b52aadaea4ab2fec0b7fcab8c25b4908151dec88d0c59c36"
+  },
+  "limits": [
+    "Historical archive does not record first membership persistence; real upstream worker readiness is separately proven in isolated PostgreSQL.",
+    "Research reference OPEN is not a live exchange fill. Manager holds from first actual fill and uses one original-minute IOC.",
+    "Live free cash has not been read or allocated. Initial allocation requires a verified existing-capital receipt; insufficient verified lower bound is not automatically an actual cash shortage.",
+    "Old manual HYPE and unresolved same-account/symbol requests continue to block new HYPE.",
+    "Isolated timings are not whole-service or multi-day production resource proof."
+  ],
+  "cutover": [
+    "Exact source commit with existing delivery/forwarding controls OFF; wait for old source instances to exit.",
+    "Exact manager commit; keep ordinary single-owner handover and existing position management. Retire only proved unfilled ENTRY remainders for paused/retired identities, excluding manual/unknown cases.",
+    "Restore original source control values on same exact source commit only after manager verification; verify live four roster and queues."
+  ]
+}

@@ -664,8 +664,12 @@ class IsolatedExecutionRuntime:
         risk_budget = budget()
         if approved and state.get('domain') == 'mainnet':
             from . import formula_accounting as accounting
-            accounting.require_live_allocation(msg['rule_id'])
-            entry_risk = deepcopy(risk_snapshot) if risk_snapshot is not None else accounting.risk_for(state, msg)
+            if risk_snapshot is not None:
+                accounting.require_live_allocation(msg['rule_id'], allocation=state.get(
+                    'formula_accounting', {}).get('allocations', {}).get(msg['rule_id']), routes=state['routes'])
+                entry_risk=deepcopy(risk_snapshot)
+            else:
+                entry_risk=accounting.risk_for(state,msg,context=context,now_ms=now)
             risk_budget = accounting.validate_risk(entry_risk, msg['rule_id'])
         if approved:
             mark = _number(self._mark(dict(account=account,symbol=msg['symbol']),context,now)['mark_price'])
