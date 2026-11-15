@@ -43,7 +43,7 @@ def enqueue(conn, *, now):
                           'WHERE consumer_version=%s ORDER BY snapshot_set_id DESC LIMIT 2',
                           (intake.VERSION,)).fetchall()
     ids = sorted({r['snapshot_set_id'] for r in page + recent})
-    rows = conn.execute('SELECT snapshot_set_id,usable_from_utc FROM research_watch_scan_intakes '
+    rows = conn.execute('SELECT * FROM research_watch_scan_intakes '
                         "WHERE consumer_version=%s AND intake_status='ACCEPTED' "
                         'AND snapshot_set_id=ANY(%s::bigint[])', (intake.VERSION, ids)).fetchall()
     written = 0
@@ -57,6 +57,18 @@ def enqueue(conn, *, now):
                 (measurement.VERSION, intake.VERSION, row['snapshot_set_id'], symbol,
                  row['usable_from_utc'], entry, measurement.route_for_symbol(symbol), entry + MINUTE))
             written += result.rowcount
+        # HYPE's live formula needs the already existing BTC membership before
+        # its entry minute ends. Price/outcome measurement remains scheduled
+        # for the closed entry candle, exactly as before.
+        if row['usable_from_utc'] <= now < entry + MINUTE:
+            try:
+                with conn.transaction():
+                    _capture_hype_membership(conn, row, now=now, entry=entry)
+            except Exception as exc:
+                # An unavailable local BTC cache cannot stop other coins or
+                # their normal due measurements. The existing recent-intake
+                # pass retries only while the original minute is still open.
+                print('[watch-scan-measurement] HYPE membership: ' + type(exc).__name__, flush=True)
     cursor = page[-1]['snapshot_set_id'] if page else high
     finished = cursor >= high or len(page) < SCAN_PAGE
     if finished:
@@ -65,6 +77,70 @@ def enqueue(conn, *, now):
         scan_high_water=%s,completed_laps=completed_laps+%s,updated_at_utc=%s
         WHERE measurement_version=%s''', (cursor, high, int(finished), now, measurement.VERSION))
     return written
+
+
+def _capture_hype_membership(conn, observation, *, now, entry):
+    """Persist the real pre-entry result, without prices or outcome calls."""
+    job = conn.execute('''SELECT status,attempts,payload FROM research_watch_scan_measurements
+        WHERE measurement_version=%s AND consumer_version=%s AND snapshot_set_id=%s
+          AND symbol='HYPE' FOR UPDATE''',
+        (measurement.VERSION,intake.VERSION,observation['snapshot_set_id'])).fetchone()
+    if (job is None or job['status'] != 'WAITING' or job['attempts'] != 0
+            or (job['payload'].get('membership') or {}).get('membership_status') in
+                {'LIVE','BOUNDARY_UNVERIFIED'}):
+        return False
+    previous = job['payload']
+    if previous:
+        # Only our same-receipt, outcome-free missing-BTC context is retryable.
+        # An anomalous historical payload is evidence, not an empty slot.
+        try:
+            member = previous['membership']
+            if (previous['status'] != 'NOT_YET_ENTRY' or previous['records'] != []
+                    or previous['reference_price'] is not None or previous['price_source'] is not None
+                    or previous['version'] != measurement.VERSION or previous['symbol'] != 'HYPE'
+                    or any(previous[key] != observation[key] for key in
+                        ('consumer_version','snapshot_set_id','bundle_sha256','parent_payload_sha256'))
+                    or intake._utc(previous['usable_from_utc']) != observation['usable_from_utc']
+                    or intake._utc(previous['entry_time_utc']) != entry
+                    or member['membership_status'] != 'BTC_DATA_MISSING'
+                    or member['episode_policy_version'] != btc_policy.POLICY_VERSION
+                    or intake._utc(member['decision_time_utc']) != observation['usable_from_utc']):
+                return False
+        except (ValueError,TypeError,KeyError):
+            return False
+    parent, bar = _membership_source(conn, observation['usable_from_utc'])
+    # measure() validates the original receipt/identity and derives membership.
+    # With this actual clock it returns before touching the supplied empty
+    # price path; no entry price, result or earlier timestamp is invented.
+    result = measurement.measure(dict(observation,symbol='HYPE',population_version=intake.POPULATION),
+        {},observed_at=now,parent=parent,btc_bar=bar)
+    if (result['status'] != 'NOT_YET_ENTRY' or result['records']
+            or result['reference_price'] is not None or result['price_source'] is not None):
+        return False
+    conn.execute('''UPDATE research_watch_scan_measurements SET payload=%s::jsonb,updated_at_utc=%s
+        WHERE measurement_version=%s AND consumer_version=%s AND snapshot_set_id=%s AND symbol='HYPE'
+          AND status='WAITING' AND attempts=0 AND next_attempt_at_utc=%s''',
+        (json.dumps(result,default=str,allow_nan=False,separators=(',',':')),now,
+         measurement.VERSION,intake.VERSION,observation['snapshot_set_id'],entry+MINUTE))
+    return True
+
+
+def _confirmed_hype_membership(job):
+    """Reuse only the same HYPE receipt's already frozen membership."""
+    payload = job.get('payload') or {}
+    member = payload.get('membership') or {}
+    try:
+        if (job['symbol'] == 'HYPE' and member.get('membership_status') in {'LIVE','BOUNDARY_UNVERIFIED'}
+                and member.get('episode_policy_version') == btc_policy.POLICY_VERSION
+                and all(payload.get(key) == job[key] for key in
+                    ('consumer_version','snapshot_set_id','symbol','bundle_sha256','parent_payload_sha256'))
+                and payload.get('version') == measurement.VERSION
+                and intake._utc(payload['usable_from_utc']) == job['usable_from_utc']
+                and intake._utc(member['decision_time_utc']) == job['usable_from_utc']):
+            return dict(member)
+    except (ValueError,TypeError,KeyError):
+        pass
+    return None
 
 
 def _membership_source(conn, decision):
@@ -130,9 +206,13 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
                 entry = job['entry_time_utc']
                 end = min(now.replace(second=0, microsecond=0), entry + timedelta(minutes=1440))
                 path = prices.read_path(job['price_route'], job['symbol'], entry, end, connection=conn)
-                parent, bar = _membership_source(conn, job['usable_from_utc'])
+                saved_membership = _confirmed_hype_membership(job)
+                parent, bar = ((None,None) if saved_membership is not None else
+                               _membership_source(conn, job['usable_from_utc']))
                 observation = dict(job, population_version=intake.POPULATION)
                 result = measurement.measure(observation, path, observed_at=now, parent=parent, btc_bar=bar)
+                if saved_membership is not None:
+                    result['membership'] = saved_membership
                 write_result(conn, job, result, now=now)
             status = result['status']
             counts['ready' if status == 'READY' else 'open' if status == 'OPEN'

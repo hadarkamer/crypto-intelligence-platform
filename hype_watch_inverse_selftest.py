@@ -1,8 +1,10 @@
-"""Synthetic product-shaped captures; NOT the unavailable 32/6/2 archive cases."""
+"""Synthetic boundary cases; frozen research parity is tested separately."""
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 import json
+import os
 import unittest
 
 import alert_delivery_policy as policy
@@ -138,6 +140,94 @@ class HypeSourceTests(unittest.TestCase):
         late['reference']['valid_until_ms']=AT+999_000
         self.assertEqual(rules.evaluate_hype_watch_inverse(late,AT+120_000)['reason'],'original_entry_minute_expired')
 
+    def test_late_ready_match_uses_original_ready_minute_without_reselection(self):
+        now=AT+source.SOURCE_WINDOW_MS+65_000
+        first=mapped(joined_capture(snapshot=7,ready=now-1000),now)
+        self.assertEqual(first['arm'],'MATCH')
+        snapshot=first['candidate']['snapshot']
+        original_reference=rules.next_full_minute_ms(now-1000)
+        self.assertEqual(snapshot['received_at_ms'],now-1000)
+        self.assertEqual(snapshot['valid_until_ms'],original_reference+60_000-1)
+        state=store._initial(AT-1); state['hype_activated_ms']=AT-1
+        self.assertEqual(source.select_hype_wave_candidates(state,[first],now),0)
+        self.assertEqual(state['episodes'],{})
+        self.assertEqual(source.select_hype_wave_candidates(state,[first],original_reference+5000),1)
+        # Arriving after that original minute cannot move the first entry to
+        # a later capture in the same source wave, including after restart.
+        expired=original_reference+60_000
+        later=mapped(joined_capture(snapshot=9,usable=expired-2000,ready=expired-1000),expired)
+        self.assertEqual(later['arm'],'MATCH')
+        state=store._initial(AT-1); state['hype_activated_ms']=AT-1
+        self.assertEqual(source.select_hype_wave_candidates(state,[later,first],expired),0)
+        outcome=next(iter(state['episodes'].values()))
+        self.assertEqual(outcome['representative_snapshot_set_id'],7)
+        self.assertEqual(outcome['status'],'ORIGINAL_ENTRY_WINDOW_EXPIRED')
+        self.assertEqual(state['candidates'],{})
+        restarted=json.loads(json.dumps(state))
+        self.assertEqual(source.select_hype_wave_candidates(restarted,[later],expired+1),0)
+        self.assertEqual(restarted['episodes'],state['episodes'])
+        self.assertEqual(restarted['intents'],[])
+
+    def test_frozen_snapshot_1294_keeps_actual_delayed_availability_and_prices(self):
+        fixture=json.loads((Path(__file__).parent/'docs/formula-activation-20261115/fixtures/hype_snapshot_1294.json').read_text())
+        row,expected=fixture['joined_capture'],fixture['expected']
+        reference=source.ms(expected['reference_at_utc']); now=reference+5000
+        record=source.map_hype_watch_row(row,now)
+        self.assertEqual((record['arm'],record['snapshot_set_id']),('MATCH',1294))
+        snapshot=record['candidate']['snapshot']
+        actual_available=max(source.ms(row['intake']['usable_from_utc']),
+            source.ms(row['timeframe']['created_at_utc']),source.ms(row['timeframe']['updated_at_utc']))
+        self.assertEqual(snapshot['received_at_ms'],actual_available)
+        self.assertGreater(actual_available-snapshot['observed_at_ms'],source.SOURCE_WINDOW_MS)
+        self.assertEqual(rules.next_full_minute_ms(actual_available),reference)
+        self.assertEqual(snapshot['valid_until_ms'],reference+60_000-1)
+        snapshot['reference']=source.dated(expected['entry'],reference,now,snapshot['valid_until_ms'],
+            venue='HYPERLIQUID_PERPETUAL',reference_kind='NEXT_FULL_MINUTE_OPEN')
+        result=rules.evaluate_hype_watch_inverse(snapshot,now)
+        self.assertTrue(result['signal'],result)
+        decision=result['decision']
+        self.assertEqual((decision.entry_price,decision.stop_loss,decision.take_profit),
+            (expected['entry'],expected['stop'],expected['take_profit']))
+        self.assertEqual(decision.holding_time_limit_ms,expected['holding_time_limit_ms'])
+        self.assertEqual(decision.reference_at_ms,reference)
+        self.assertFalse(rules.evaluate_hype_watch_inverse(snapshot,reference+60_000)['signal'])
+
+    def test_pending_earlier_capture_can_finish_before_original_entry_minute(self):
+        first=joined_capture(snapshot=7,ready=AT+50_000)
+        later=joined_capture(snapshot=9,usable=AT+3000,ready=AT+18_000)
+        state=store._initial(AT-1); state['hype_activated_ms']=AT-1
+        early=[source.map_hype_watch_row(row,AT+20_000) for row in (first,later)]
+        self.assertEqual([r['arm'] for r in early],['UNKNOWN','MATCH'])
+        self.assertEqual(source.select_hype_wave_candidates(state,early,AT+20_000),0)
+        self.assertEqual(state['episodes'],{})
+        ready=[source.map_hype_watch_row(row,AT+60_000) for row in (first,later)]
+        self.assertEqual(source.select_hype_wave_candidates(state,ready,AT+60_000),1)
+        outcome=next(iter(state['episodes'].values()))
+        self.assertEqual(outcome['representative_snapshot_set_id'],7)
+        self.assertEqual(outcome['status'],'SELECTED')
+
+    def test_ended_parent_keeps_capacity_decision_through_original_entry_window(self):
+        class EndedParent:
+            def execute(self,*args):
+                class Rows:
+                    def fetchall(self):
+                        return [dict(btc_parent_movement_id='existing-btc-parent-17',
+                                     end_time_utc=stamp(AT-86_400_000))]
+                return Rows()
+        state=store._initial(AT-1); state['hype_activated_ms']=AT-1
+        state['active']=[dict(rule_id=rules.HYPE_WATCH_INVERSE,symbol='HYPE')]
+        self.assertEqual(source.select_hype_wave_candidates(state,[mapped()],AT+65_000),0)
+        self.assertEqual(next(iter(state['episodes'].values()))['status'],'CAPACITY_REJECTED')
+        state['active']=[]
+        self.assertEqual(source.prune_hype_waves(EndedParent(),state,AT+70_000),0)
+        restarted=json.loads(json.dumps(state))
+        self.assertEqual(source.select_hype_wave_candidates(restarted,[mapped()],AT+70_000),0)
+        # prune_hype_waves avoids a query for a single wave. Add a second,
+        # unrelated record so the expiry proof is exercised here.
+        restarted['episodes'][rules.HYPE_WATCH_INVERSE+':wave:other']=dict(identity='other')
+        self.assertEqual(source.prune_hype_waves(EndedParent(),restarted,AT+70_000),0)
+        self.assertEqual(source.prune_hype_waves(EndedParent(),restarted,AT+120_000),1)
+
     def test_early_or_equal_unknown_blocks_but_later_unknown_does_not(self):
         for delta,blocked in [(-1,True),(0,True),(1,False)]:
             state=store._initial(AT-1); state['hype_activated_ms']=AT-1; match=mapped()
@@ -169,15 +259,31 @@ class HypeSourceTests(unittest.TestCase):
             self.assertEqual(source.select_hype_wave_candidates(state,records,AT+65_000),0)
         self.assertEqual(next(iter(state['episodes'].values()))['status'],'BEFORE_ACTIVATION')
 
+    def test_pre_activation_intake_is_not_renewed_by_later_timeframe_readiness(self):
+        row=joined_capture(snapshot=7,usable=AT+1000,ready=AT+50_000)
+        state=store._initial(AT-86_400_000); state['hype_activated_ms']=AT+10_000
+        record=mapped(row)
+        self.assertEqual(record['arm'],'MATCH')
+        self.assertGreater(record['candidate']['snapshot']['received_at_ms'],state['hype_activated_ms'])
+        self.assertEqual(source.select_hype_wave_candidates(state,[record],AT+65_000),0)
+        self.assertEqual(next(iter(state['episodes'].values()))['status'],'BEFORE_ACTIVATION')
+        decision=rules.evaluate_hype_watch_inverse(calculation_snapshot(row),AT+65_000)['decision']
+        self.assertEqual(store.approve_state(state,decision,
+            dict(cycle_id='7',episode_key='existing-btc-parent-17',timeframe='24h'),AT+65_000),
+            dict(created=False,reason='BEFORE_ACTIVATION'))
+        self.assertEqual(state['intents'],[])
+
     def test_disabled_hype_issues_no_source_query(self):
         class NoQuery:
             def execute(self,*a):raise AssertionError('HYPE not active')
-        self.assertEqual(source.read_hype_watch(NoQuery(),store._initial(AT),AT),0)
+        state=store._initial(AT); state['hype_activated_ms']=AT
+        with patch.dict(os.environ,{'ALERT_DELIVERY_PROFILE':'OFF'}):
+            self.assertEqual(source.read_hype_watch(NoQuery(),state,AT),0)
         self.assertEqual(store.CONFIG_SHA256,'63a7a1478c5d800f99ba21b8ae939ac33d19fbb53c57b0d1d7d42c05c7b18988')
 
     def test_product_calculation_approval_and_notification_share_exact_plan(self):
         state=store._initial(AT-1); state['hype_activated_ms']=AT-1
-        with patch.object(policy,'selected_rule_enabled',return_value=True),patch.object(contract,'new_entry_allowed',return_value=True):
+        with patch.dict(os.environ,{'ALERT_DELIVERY_PROFILE':'ALL'}):
             self.assertEqual(source.select_hype_wave_candidates(state,[mapped()],AT+65_000),1)
             rows=[(AT+60_000,100,101,99,100)]
             self.assertEqual(source.evaluate_ready(state,rows,AT+65_000),1)
@@ -200,9 +306,10 @@ class HypeSourceTests(unittest.TestCase):
 
     def test_new_identity_activation_is_once_and_preserves_existing_state(self):
         state=store._initial(AT-86_400_000)
-        self.assertFalse(store.ensure_hype_activation(state,AT+3000))
-        self.assertIsNone(state['hype_activated_ms'])
-        with patch.object(policy,'selected_rule_enabled',return_value=True),patch.object(contract,'new_entry_allowed',return_value=True):
+        with patch.dict(os.environ,{'ALERT_DELIVERY_PROFILE':'OFF'}):
+            self.assertFalse(store.ensure_hype_activation(state,AT+3000))
+            self.assertIsNone(state['hype_activated_ms'])
+        with patch.dict(os.environ,{'ALERT_DELIVERY_PROFILE':'ALL'}):
             self.assertTrue(store.ensure_hype_activation(state,AT+3000))
             self.assertFalse(store.ensure_hype_activation(state,AT+4000))
             before=deepcopy(state)

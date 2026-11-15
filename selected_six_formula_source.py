@@ -133,9 +133,11 @@ def map_hype_watch_row(row, now_ms):
         if expected != 'MATCH':
             return result
         reference_ms = rules.next_full_minute_ms(available)
-        expires = min(observed + SOURCE_WINDOW_MS, reference_ms + MINUTE_MS - 1)
-        if available > expires:
-            raise ValueError('stale_capture_before_entry')
+        # HYPE's original entry minute starts after both captured components
+        # became available. The ordinary-alert observed+10m window belongs to
+        # other formulas; imposing it here rejects a valid late-ready capture.
+        # This deadline never moves to a later polling or retry time.
+        expires = reference_ms + MINUTE_MS - 1
         snapshot = dict(source_event_id=f'{HYPE_CONSUMER}:{snapshot_id}:HYPE:24h:{wave}',
             symbol='HYPE', direction='LONG', observed_at_ms=observed,
             received_at_ms=available, valid_until_ms=expires, inputs={})
@@ -180,12 +182,19 @@ def select_hype_wave_candidates(state, records, now_ms):
         if not matches:
             continue
         first = matches[0]
+        first_snapshot = first['candidate']['snapshot']
+        # The reference OPEN does not exist before this minute. Do not freeze
+        # a temporary UNKNOWN while earlier captured rows are still becoming
+        # ready for that same minute; the existing cycle will revisit them.
+        if now_ms < rules.next_full_minute_ms(first_snapshot['received_at_ms']):
+            continue
         outcome = dict(identity=wave, approved=False, representative_snapshot_set_id=first['snapshot_set_id'],
-            representative_usable_ms=first['usable_ms'], status='SELECTED')
+            representative_usable_ms=first['usable_ms'],
+            representative_entry_expires_ms=first_snapshot['valid_until_ms'], status='SELECTED')
         state['episodes'][key] = outcome
         if any(x['arm'] == 'UNKNOWN' and x['usable_ms'] <= first['usable_ms'] for x in rows):
             outcome['status'] = 'UNKNOWN_BLOCKED'
-        elif first['candidate']['snapshot']['received_at_ms'] <= state['hype_activated_ms']:
+        elif first['usable_ms'] <= state['hype_activated_ms']:
             outcome['status'] = 'BEFORE_ACTIVATION'
         elif now_ms > first['candidate']['snapshot']['valid_until_ms']:
             outcome['status'] = 'ORIGINAL_ENTRY_WINDOW_EXPIRED'
@@ -527,10 +536,13 @@ def read_hype_watch(conn, state, now_ms):
                       if k.startswith(rules.HYPE_WATCH_INVERSE + ':wave:')]
     rows = conn.execute('''WITH current_waves AS (
         SELECT DISTINCT m.payload#>>'{membership,btc_parent_movement_id}' AS wave
-        FROM research_watch_scan_intakes i
+        FROM research_watch_scan_tf_formula_samples f
+        JOIN research_watch_scan_intakes i USING(consumer_version,snapshot_set_id)
         JOIN research_watch_scan_measurements m USING(consumer_version,snapshot_set_id)
         WHERE i.consumer_version=%s AND m.measurement_version=%s AND m.symbol='HYPE'
-            AND i.usable_from_utc >= %s AND i.usable_from_utc <= %s
+            AND f.evaluation_version=%s AND f.symbol='HYPE' AND f.status='READY'
+            AND GREATEST(f.usable_from_utc,f.created_at_utc,f.updated_at_utc) >= %s
+            AND GREATEST(f.usable_from_utc,f.created_at_utc,f.updated_at_utc) <= %s
             AND m.payload#>>'{membership,btc_parent_movement_id}' IS NOT NULL
             AND NOT(m.payload#>>'{membership,btc_parent_movement_id}'=ANY(%s::text[]))
     ) SELECT
@@ -574,7 +586,7 @@ def read_hype_watch(conn, state, now_ms):
             AND i.usable_from_utc <= %s
             AND m.payload#>>'{membership,btc_parent_movement_id}' IN (SELECT wave FROM current_waves)
         ORDER BY i.usable_from_utc,i.snapshot_set_id LIMIT %s''',
-        (HYPE_CONSUMER,HYPE_MEASUREMENT,
+        (HYPE_CONSUMER,HYPE_MEASUREMENT,HYPE_EVALUATION,
          datetime.fromtimestamp((now_ms-SOURCE_WINDOW_MS)/1000,timezone.utc),
          datetime.fromtimestamp(now_ms/1000,timezone.utc),consumed_waves,HYPE_CANDIDATE_KEY,
          HYPE_EVALUATION,HYPE_CONSUMER,HYPE_MEASUREMENT,
@@ -587,11 +599,12 @@ def read_hype_watch(conn, state, now_ms):
 
 
 def prune_hype_waves(conn, state, now_ms):
-    """Compact only proved-ended parents beyond the unchanged source window.
+    """Compact only ended parents after their selected original entry window.
 
-    An open wave survives long source gaps and restart. A closed parent older
-    than the source freshness window cannot produce a fresh observation; late
-    source updates retain their old clock and cannot re-arm an expired minute.
+    An open wave survives long source gaps and restart. Late readiness can
+    place the original entry minute after the parent ended; that consumed
+    wave must survive through its own deadline so capacity cannot re-arm it.
+    Unknown deadlines are retained until their expiry can be proved.
     Permanent outbox receipts and approved decision history are unaffected.
     """
     prefix = rules.HYPE_WATCH_INVERSE + ':wave:'
@@ -607,7 +620,10 @@ def prune_hype_waves(conn, state, now_ms):
     count = 0
     for row in rows:
         wave = row['btc_parent_movement_id']
-        if wave not in active_waves and prefix+wave in state['episodes']:
+        outcome = state['episodes'].get(prefix+wave)
+        expires = outcome.get('representative_entry_expires_ms') if outcome else None
+        if (wave not in active_waves and outcome is not None
+                and type(expires) is int and expires < now_ms):
             del state['episodes'][prefix+wave]
             count += 1
     return count

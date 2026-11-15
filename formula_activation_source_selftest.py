@@ -49,8 +49,9 @@ class SourceActivationTests(unittest.IsolatedAsyncioTestCase):
     def state(self):
         return store.snapshot(self.scope)
 
-    async def test_three_roster_all_profiles_pause_is_not_a_symbol_ban(self):
-        wanted = {'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK','SFF1361_SOL_RECENT','XRP_LIQUIDITY_RAW_INVERSE'}
+    async def test_four_roster_all_profiles_pause_is_not_a_symbol_ban(self):
+        wanted = {'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK','SFF1361_SOL_RECENT','XRP_LIQUIDITY_RAW_INVERSE',
+                  'HYPE_WATCH_LIQ4050_24H_INVERSE'}
         for profile in ('ALL','SELECTED_EXPERIMENTAL_ONLY','ORDINARY_AND_SELECTED_EXPERIMENTAL'):
             with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE':profile}):
                 self.assertEqual(set(policy.status()['selected_experimental_rule_ids']), wanted)
@@ -58,7 +59,7 @@ class SourceActivationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('HYPE_ROW71205_SHORT', policy.status()['retired_experimental_rule_ids'])
                 self.assertFalse(policy.hype_row71205_experimental_enabled())
                 self.assertEqual(policy.ordinary_alerts_enabled(), profile!='SELECTED_EXPERIMENTAL_ONLY')
-        self.assertNotIn('HYPE_WATCH_LIQ4050_24H_INVERSE', policy.SELECTED_EXPERIMENTAL_RULES)
+        self.assertIn('HYPE_WATCH_LIQ4050_24H_INVERSE', policy.SELECTED_EXPERIMENTAL_RULES)
 
     async def test_retired_restart_never_creates_scope_or_collects_signal_history(self):
         with patch.object(store, 'initialize_scope') as initialize, patch.object(worker.signal, 'evaluate_signal') as evaluate:

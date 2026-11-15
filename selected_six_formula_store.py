@@ -214,7 +214,9 @@ def approve_state(state, decision, metadata, now_ms):
             raise ValueError('selected formula decision revision')
         return dict(created=False, envelope=deepcopy(existing['payload']), intent=deepcopy(existing))
     activation = state.get('hype_activated_ms') if p['formula_id'] == rules.HYPE_WATCH_INVERSE else state['activated_ms']
-    if activation is None or p['source_received_at_ms'] <= activation:
+    activation_source_ms = (json.loads(p['frozen_inputs_json'])['capture_identity']['usable_ms']
+        if p['formula_id'] == rules.HYPE_WATCH_INVERSE else p['source_received_at_ms'])
+    if activation is None or activation_source_ms <= activation:
         return dict(created=False, reason='BEFORE_ACTIVATION')
     value = envelope(p, metadata, now_ms)
     position = dict(position_id=p['event_id'], rule_id=p['formula_id'], symbol=p['symbol'],

@@ -13,7 +13,7 @@ from manual_formula_alert_store_selftest import BASE, c1274_bundle, c1274_refere
 _STRICT_MANUAL_RULE_ENABLED = policy.manual_rule_enabled
 _EXPECTED = {
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'SFF1361_SOL_RECENT',
-    'XRP_LIQUIDITY_RAW_INVERSE',
+    'XRP_LIQUIDITY_RAW_INVERSE', 'HYPE_WATCH_LIQ4050_24H_INVERSE',
 }
 
 
@@ -47,7 +47,7 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.u21_experimental_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['roster_version'], 'owner-selected-three-20261115-v7')
+            self.assertEqual(policy.status()['roster_version'], 'owner-selected-four-20261115-v8')
             self.assertTrue(policy.ordinary_alerts_enabled())
 
     def test_unknown_profile_fails_closed(self):

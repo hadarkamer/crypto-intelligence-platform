@@ -38,7 +38,7 @@ FORMULAS = {'r2732': ('R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     'hype_row71205': ('HYPE_ROW71205_SHORT', 'HYPE'),
     'sol_g65': ('SOL_G65_K49_PROFIT_LOCK', 'SOL')}
 # Explicit source adapters, not a configurable formula interpreter. Historical
-# CT009 research symbols remain readable; operational admission is six only.
+# CT009 research symbols remain readable; its new entries stay paused.
 CT009_SYMBOLS = frozenset(('BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'HYPE'))
 HYPE_WATCH_RULE = 'HYPE_WATCH_LIQ4050_24H_INVERSE'
 HYPE_WATCH_FAMILY = 'hype_watch_liq4050'
@@ -56,12 +56,13 @@ SELECTED_PENDING_POLICY_FIELDS = POLICY_FIELDS | frozenset((
     'pending_expires_at', 'cancel_before_fill_price'))
 HYPE_WATCH_POLICY_FIELDS = POLICY_FIELDS | frozenset((
     'entry_expires_at', 'holding_time_limit_ms'))
-# New HYPE is parseable for isolated acceptance only. It is intentionally absent
-# from admission until its live allocation and activation are explicitly approved.
+# The user approved the new HYPE 40 USD / 5% formula allocation on 2026-11-15.
+# Capital attribution is enforced separately by the existing manager journal.
 
 # Operational activation decision 2026-11-15. Historical contracts stay readable;
 # pausing admission does not revoke management of already filled positions.
 NEW_ENTRY_IDENTITIES = frozenset((
+    (HYPE_WATCH_FAMILY, HYPE_WATCH_RULE, 'HYPE'),
     ('r2732', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'XRP'),
     ('sol_sff1361', 'SFF1361_SOL_RECENT', 'SOL'),
     ('xrp_liquidity_inverse', 'XRP_LIQUIDITY_RAW_INVERSE', 'XRP'),

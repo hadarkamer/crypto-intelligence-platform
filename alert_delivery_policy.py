@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import os
 
-ROSTER_VERSION = "owner-selected-three-20261115-v7"
+ROSTER_VERSION = "owner-selected-four-20261115-v8"
 SELECTED_MANUAL_RULES = frozenset()
 MAXPAIN_COMPONENT_RULES = frozenset()
 SELECTED_EXPERIMENTAL_RULES = frozenset((
     'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK',
     'SFF1361_SOL_RECENT',
     'XRP_LIQUIDITY_RAW_INVERSE',
+    'HYPE_WATCH_LIQ4050_24H_INVERSE',
 )) | MAXPAIN_COMPONENT_RULES
 # A later repair does not resume a paused rule; only a reviewed roster change can.
 PAUSED_EXPERIMENTAL_RULES = frozenset(('CT009_FROZEN_3D', 'OCONF0034_13'))

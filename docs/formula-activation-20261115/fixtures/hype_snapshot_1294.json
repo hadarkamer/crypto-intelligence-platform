@@ -1,0 +1,379 @@
+{
+  "archive_member": "inputs/recovered/page_0025.json",
+  "archive_member_sha256": "99334792d89d46b579a24ff9bba24f3c3f6b835c4b739626236bfb94b4449258",
+  "evidence_archive": "HYPE_Validation_Complete_20261115.zip",
+  "evidence_archive_sha256": "ca33d6dccee06b7c6e49f0af25be288e3648c78b723380c89cefedd1b104bfee",
+  "expected": {
+    "entry": "79.838",
+    "holding_time_limit_ms": 86400000,
+    "reference_at_utc": "2026-09-14T06:25:00+00:00",
+    "stop": "81.43476",
+    "take_profit": "78.24124"
+  },
+  "joined_capture": {
+    "intake": {
+      "below_65_slots": 108,
+      "bundle_sha256": "334bde244d671c337383b2704e7223c0d32224702071e24099a2914857e5cd15",
+      "capture_phase": "FORWARD_CAPTURE",
+      "capture_status": "COMPLETE",
+      "coin_count": 8,
+      "consumer_version": "watch-all-scan-intake-v1",
+      "ingested_at_utc": "2026-09-14T03:35:56.376941+00:00",
+      "intake_status": "ACCEPTED",
+      "observed_at_utc": "2026-09-14T03:35:35.62772+00:00",
+      "parent_payload_sha256": "9452f217d884bbd1e3ca5ec99cacfd93a49d6db429410bdf4effda7d271a5f26",
+      "rejection_reason": null,
+      "score_slot_count": 112,
+      "scored_slots": 112,
+      "snapshot_key": "a49fabbebebb684205aaf04febe4b887a26a039e47f3a87840887871572751ad",
+      "snapshot_set_id": 1294,
+      "source_available_at_utc": "2026-09-14T03:35:35.671147+00:00",
+      "source_created_at_utc": "2026-09-14T03:35:35.799597+00:00",
+      "source_time_error_count": 0,
+      "source_version": "watch-operational-scores-v2",
+      "unavailable_models": 0,
+      "usable_from_utc": "2026-09-14T03:35:35.799597+00:00",
+      "watch_scan_id": "shared-watch:2026-09-14T03:32:15.018941+00:00"
+    },
+    "measurement": {
+      "consumer_version": "watch-all-scan-intake-v1",
+      "entry_time_utc": "2026-09-14T03:36:00Z",
+      "measurement_version": "watch-scan-measurements-v1",
+      "payload": {
+        "bundle_sha256": "334bde244d671c337383b2704e7223c0d32224702071e24099a2914857e5cd15",
+        "candle_interval_seconds": 60,
+        "capture_phase": "FORWARD_CAPTURE",
+        "consumer_version": "watch-all-scan-intake-v1",
+        "entry_delay_seconds": 24.200403,
+        "entry_time_utc": "2026-09-14 03:36:00+00:00",
+        "entry_version": "watch-next-full-minute-route-open-v1",
+        "error_reason": null,
+        "membership": {
+          "btc_observed_close_utc": "2026-09-14 03:34:59.999000+00:00",
+          "btc_parent_movement_id": "55ff44247c45b7fce896a8be83acddf00622a6a005da1bf535f9cf70acf3dc9e",
+          "decision_time_utc": "2026-09-14 03:35:35.799597+00:00",
+          "episode_policy_version": "btc-parent-close-reversal-200bps-v1",
+          "membership_status": "LIVE"
+        },
+        "observed_at_utc": "2026-09-15 04:07:37.563922+00:00",
+        "outcome_method_version": "ordered-first-touch-v7",
+        "parent_payload_sha256": "9452f217d884bbd1e3ca5ec99cacfd93a49d6db429410bdf4effda7d271a5f26",
+        "population_version": "watch-all-scan-observations-v1",
+        "price_route": "HYPERLIQUID_HYPE_PERP_TRADE_1M",
+        "reference_price": 79.733,
+        "snapshot_set_id": 1294,
+        "source_observed_at_utc": "2026-09-14 03:35:35.627720+00:00",
+        "source_version": "watch-operational-scores-v2",
+        "status": "READY",
+        "symbol": "HYPE",
+        "usable_from_utc": "2026-09-14 03:35:35.799597+00:00",
+        "version": "watch-scan-measurements-v1"
+      },
+      "price_route": "HYPERLIQUID_HYPE_PERP_TRADE_1M",
+      "snapshot_set_id": 1294,
+      "symbol": "HYPE",
+      "usable_from_utc": "2026-09-14T03:35:35.799597Z"
+    },
+    "observation": {
+      "bundle_sha256": "334bde244d671c337383b2704e7223c0d32224702071e24099a2914857e5cd15",
+      "consumer_version": "watch-all-scan-intake-v1",
+      "maxpain_slots": [
+        {
+          "allowed_distance_pct": 3,
+          "cluster_count": 2,
+          "cluster_growth_transition_scores": {
+            "1w->2w": 0
+          },
+          "cluster_mean_deviation_pct": 0.006734620306067064,
+          "cluster_members": [
+            "1w",
+            "2w"
+          ],
+          "cluster_spread_pct": 0.013469240612134128,
+          "components": {
+            "cluster_confidence": 0,
+            "cluster_coverage": 1.67,
+            "cluster_density": 9.87,
+            "cluster_liquidity_growth": 0,
+            "cluster_liquidity_multiplier": 0,
+            "consensus": 9.13,
+            "consensus_max": 30,
+            "directional_alignment": 9.13,
+            "relative_gap": 0,
+            "target_clustering": 0,
+            "target_proximity": 0
+          },
+          "consensus_hits": 3,
+          "consensus_total": 7,
+          "distance_pct": 3.941198643045619,
+          "far_amount": 730960,
+          "gap_consensus_supporting": 3,
+          "gap_consensus_total": 6,
+          "missing_fields": [],
+          "near_amount": 930360,
+          "near_share_pct": 56.001252016468825,
+          "relative_gap_advantage": 0,
+          "score": 9.13,
+          "selected": false,
+          "source_side": "LONG",
+          "status": "SCORED",
+          "target_price": 76.4532,
+          "timeframe": "24h"
+        },
+        {
+          "allowed_distance_pct": 3,
+          "cluster_count": 2,
+          "cluster_growth_transition_scores": {
+            "12h->24h": 1
+          },
+          "cluster_mean_deviation_pct": 0.002988881361337714,
+          "cluster_members": [
+            "12h",
+            "24h"
+          ],
+          "cluster_spread_pct": 0.005977762722675428,
+          "components": {
+            "cluster_confidence": 17.41,
+            "cluster_coverage": 1.67,
+            "cluster_density": 9.94,
+            "cluster_liquidity_growth": 10,
+            "cluster_liquidity_multiplier": 1.5,
+            "consensus": 12.27,
+            "consensus_max": 30,
+            "directional_alignment": 12.27,
+            "relative_gap": 11.6,
+            "target_clustering": 17.41,
+            "target_proximity": 25
+          },
+          "consensus_hits": 4,
+          "consensus_total": 7,
+          "distance_pct": 0.8920718683251586,
+          "far_amount": 930360,
+          "gap_consensus_supporting": 3,
+          "gap_consensus_total": 6,
+          "missing_fields": [],
+          "near_amount": 730960,
+          "near_share_pct": 43.99874798353117,
+          "relative_gap_advantage": 0.7736546799285923,
+          "score": 66.28,
+          "selected": true,
+          "source_side": "SHORT",
+          "status": "SCORED",
+          "target_price": 80.3,
+          "timeframe": "24h"
+        }
+      ],
+      "observed_at_utc": "2026-09-14T03:35:35.62772+00:00",
+      "parent_payload_sha256": "9452f217d884bbd1e3ca5ec99cacfd93a49d6db429410bdf4effda7d271a5f26",
+      "population_version": "watch-all-scan-observations-v1",
+      "snapshot_set_id": 1294,
+      "source_time_errors": [],
+      "sources": {
+        "maxpain_operational_rows": [
+          {
+            "current_price": 79.59,
+            "long_liquidation_amount": 930360,
+            "long_max_pain": 76.4532,
+            "price_fetched_at_utc": "2026-09-14T03:34:25.677269+00:00",
+            "price_pair": "HYPEUSDT",
+            "price_source": "hyperliquid",
+            "rank": 4,
+            "short_liquidation_amount": 730960,
+            "short_max_pain": 80.3,
+            "source_observed_at_utc": "2026-09-14T03:32:35.573776+00:00",
+            "timeframe": "24h"
+          }
+        ]
+      },
+      "symbol": "HYPE",
+      "usable_from_utc": "2026-09-14T03:35:35.799597+00:00"
+    },
+    "timeframe": {
+      "consumer_version": "watch-all-scan-intake-v1",
+      "created_at_utc": "2026-09-14T06:21:05.217222Z",
+      "evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "payload": {
+        "bundle_sha256": "334bde244d671c337383b2704e7223c0d32224702071e24099a2914857e5cd15",
+        "consumer_version": "watch-all-scan-intake-v1",
+        "evaluations": [
+          {
+            "analysis_direction": "SHORT",
+            "base_direction": "LONG",
+            "candidate_key": "captured-question-search-v3-experimental-binding:INVERSE:captured-question-search-v3-experimental-binding:LIQUIDITY_40_50",
+            "match_status": "MATCH",
+            "missing_features": [],
+            "selection_status": "SELECTED",
+            "timeframe": "24h"
+          }
+        ],
+        "feature_sha256": "42308f96cf8b32109b53cdc3570152e1b05ef15bd9cd38843ed5e747face5a12",
+        "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+        "parent_payload_sha256": "9452f217d884bbd1e3ca5ec99cacfd93a49d6db429410bdf4effda7d271a5f26",
+        "population_version": "watch-all-scan-observations-v1",
+        "selection_version": "watch-selected-timeframe-first-arm-unknown-blocks-v1",
+        "snapshot_set_id": 1294,
+        "source_observed_at_utc": "2026-09-14T03:35:35.627720+00:00",
+        "source_version": "watch-operational-scores-v2",
+        "symbol": "HYPE",
+        "timeframe_provenance": {
+          "24h": {
+            "features_by_direction": {
+              "LONG": {
+                "features": {
+                  "event.direction_mapping_valid": true,
+                  "futures_cvd.aligned_score": 9.191,
+                  "liquidity.alignment": "BALANCED",
+                  "liquidity.capture_status": "VALID",
+                  "liquidity.opposite_amount": 930360,
+                  "liquidity.selected_amount": 730960,
+                  "liquidity.selected_share_pct": 43.99874798353117,
+                  "liquidity.source_contract": "MAX_PAIN_CAPTURED_AMOUNTS_V1",
+                  "max_pain.selected_opposite_difference": 57.15,
+                  "price_oi.aligned_score": 55.1291,
+                  "spot_cvd.aligned_score": -21.678,
+                  "time.weekend": false
+                },
+                "selection_status": "SELECTED",
+                "unavailable_features": {}
+              },
+              "SHORT": {
+                "features": {
+                  "futures_cvd.aligned_score": -9.191,
+                  "price_oi.aligned_score": -55.1291,
+                  "spot_cvd.aligned_score": 21.678,
+                  "time.weekend": false
+                },
+                "selection_status": "NOT_SELECTED",
+                "unavailable_features": {
+                  "event.direction_mapping_valid": [
+                    "SOURCE_SIDE_NOT_SELECTED"
+                  ],
+                  "liquidity.alignment": [
+                    "SOURCE_SIDE_NOT_SELECTED"
+                  ],
+                  "liquidity.selected_share_pct": [
+                    "SOURCE_SIDE_NOT_SELECTED"
+                  ],
+                  "max_pain.selected_opposite_difference": [
+                    "SOURCE_SIDE_NOT_SELECTED"
+                  ]
+                }
+              }
+            },
+            "selected_base_direction": "LONG",
+            "selected_source_side": "SHORT",
+            "selection_status": "SELECTED",
+            "slots_by_source_side": {
+              "LONG": {
+                "allowed_distance_pct": 3,
+                "cluster_count": 2,
+                "cluster_growth_transition_scores": {
+                  "1w->2w": 0
+                },
+                "cluster_mean_deviation_pct": 0.006734620306067064,
+                "cluster_members": [
+                  "1w",
+                  "2w"
+                ],
+                "cluster_spread_pct": 0.013469240612134128,
+                "components": {
+                  "cluster_confidence": 0,
+                  "cluster_coverage": 1.67,
+                  "cluster_density": 9.87,
+                  "cluster_liquidity_growth": 0,
+                  "cluster_liquidity_multiplier": 0,
+                  "consensus": 9.13,
+                  "consensus_max": 30,
+                  "directional_alignment": 9.13,
+                  "relative_gap": 0,
+                  "target_clustering": 0,
+                  "target_proximity": 0
+                },
+                "consensus_hits": 3,
+                "consensus_total": 7,
+                "distance_pct": 3.941198643045619,
+                "far_amount": 730960,
+                "gap_consensus_supporting": 3,
+                "gap_consensus_total": 6,
+                "missing_fields": [],
+                "near_amount": 930360,
+                "near_share_pct": 56.001252016468825,
+                "relative_gap_advantage": 0,
+                "score": 9.13,
+                "selected": false,
+                "source_side": "LONG",
+                "status": "SCORED",
+                "target_price": 76.4532,
+                "timeframe": "24h"
+              },
+              "SHORT": {
+                "allowed_distance_pct": 3,
+                "cluster_count": 2,
+                "cluster_growth_transition_scores": {
+                  "12h->24h": 1
+                },
+                "cluster_mean_deviation_pct": 0.002988881361337714,
+                "cluster_members": [
+                  "12h",
+                  "24h"
+                ],
+                "cluster_spread_pct": 0.005977762722675428,
+                "components": {
+                  "cluster_confidence": 17.41,
+                  "cluster_coverage": 1.67,
+                  "cluster_density": 9.94,
+                  "cluster_liquidity_growth": 10,
+                  "cluster_liquidity_multiplier": 1.5,
+                  "consensus": 12.27,
+                  "consensus_max": 30,
+                  "directional_alignment": 12.27,
+                  "relative_gap": 11.6,
+                  "target_clustering": 17.41,
+                  "target_proximity": 25
+                },
+                "consensus_hits": 4,
+                "consensus_total": 7,
+                "distance_pct": 0.8920718683251586,
+                "far_amount": 930360,
+                "gap_consensus_supporting": 3,
+                "gap_consensus_total": 6,
+                "missing_fields": [],
+                "near_amount": 730960,
+                "near_share_pct": 43.99874798353117,
+                "relative_gap_advantage": 0.7736546799285923,
+                "score": 66.28,
+                "selected": true,
+                "source_side": "SHORT",
+                "status": "SCORED",
+                "target_price": 80.3,
+                "timeframe": "24h"
+              }
+            },
+            "source_row": {
+              "current_price": 79.59,
+              "long_liquidation_amount": 930360,
+              "long_max_pain": 76.4532,
+              "price_fetched_at_utc": "2026-09-14T03:34:25.677269+00:00",
+              "price_pair": "HYPEUSDT",
+              "price_source": "hyperliquid",
+              "rank": 4,
+              "short_liquidation_amount": 730960,
+              "short_max_pain": 80.3,
+              "source_observed_at_utc": "2026-09-14T03:32:35.573776+00:00",
+              "timeframe": "24h"
+            },
+            "validation_reasons": []
+          }
+        },
+        "usable_from_utc": "2026-09-14T03:35:35.799597+00:00",
+        "version": "watch-scan-timeframe-formulas-v1"
+      },
+      "snapshot_set_id": 1294,
+      "status": "READY",
+      "symbol": "HYPE",
+      "updated_at_utc": "2026-09-14T06:24:50.642046Z",
+      "usable_from_utc": "2026-09-14T03:35:35.799597Z"
+    }
+  },
+  "projection": "Exact read_hype_watch SQL projection of archived captured fields; no changed timestamps or prices."
+}
