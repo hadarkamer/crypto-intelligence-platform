@@ -82,4 +82,29 @@ class TransitionTests(unittest.TestCase):
         store.apply_entry_policy(state,fixture.AT+1)
         self.assertEqual(state,before)
 
+    def test_quiet_delivery_profile_preserves_retained_approval_and_candidate(self):
+        state=store._initial(fixture.AT-1000)
+        snapshot=fixture.make_sff()
+        decision=rules.evaluate_sff1361(snapshot,fixture.AT+70_000)['decision']
+        store.approve_state(state,decision,dict(cycle_id='kept',episode_key='kept',timeframe='30m'),fixture.AT+70_000)
+        state['candidates']['kept']={'formula_id':rules.SFF1361,'snapshot':deepcopy(snapshot)}
+        retained=deepcopy(state)
+        with patch.object(policy,'selected_rule_enabled',return_value=False):
+            store.apply_entry_policy(state,fixture.AT+80_000)
+            self.assertEqual(state,retained)
+            self.assertEqual(source.evaluate_ready(state,[],fixture.AT+80_000),0)
+            self.assertEqual(state,retained)
+            with patch.object(store,'load',return_value=state),patch.object(store,'save'):
+                self.assertIsNone(store.claim(object(),'general-watch:test',fixture.AT+80_000))
+        self.assertEqual(state['intents'][0]['status'],'PENDING')
+        self.assertEqual(state['active'],retained['active'])
+        self.assertEqual(state['candidates'],retained['candidates'])
+
+    def test_quiet_profile_still_retires_only_explicit_paused_identities(self):
+        state,_,now=legacy_state(rules.CT009)
+        with patch.object(policy,'selected_rule_enabled',return_value=False):
+            store.apply_entry_policy(state,now+1)
+        self.assertEqual(state['history'][0]['rule_id'],rules.CT009)
+        self.assertEqual(state['intents'][0]['payload']['kind'],'CANCEL')
+
 if __name__=='__main__': unittest.main()

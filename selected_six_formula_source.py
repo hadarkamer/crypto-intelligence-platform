@@ -405,7 +405,8 @@ def evaluate_ready(state, rows, fetched_ms, *, conn=None, scope=None):
     for identity, item in list(state['candidates'].items()):
         snapshot, formula = item['snapshot'], item['formula_id']
         if not alert_delivery_policy.selected_rule_enabled(formula):
-            del state['candidates'][identity]
+            if store.entry_policy_retired(formula):
+                del state['candidates'][identity]
             continue
         if snapshot['valid_until_ms'] < fetched_ms:
             continue

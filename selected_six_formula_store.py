@@ -243,12 +243,14 @@ def cancel_state(state, identity, reason, now_ms):
 
 
 def claim(conn, scope, now_ms):
+    import alert_delivery_policy
     state = load(conn, scope, locked=True)
     if state is None:
         return None
     apply_entry_policy(state, now_ms)
     prune(state, now_ms)
-    pending = next((x for x in state['intents'] if x['status'] == 'PENDING'), None)
+    pending = next((x for x in state['intents'] if x['status'] == 'PENDING'
+                    and alert_delivery_policy.selected_rule_enabled(x['payload']['rule_id'])), None)
     if pending is not None:
         pending.update(status='IN_FLIGHT', attempted_ms=now_ms, attempt_token=uuid4().hex)
     save(conn, scope, state)
@@ -261,19 +263,25 @@ def apply_entry_policy(state, now_ms):
     Historical decisions and outbox identities are retained. A source CANCEL
     never asserts an exchange cancellation or changes a filled position.
     """
-    import alert_delivery_policy
     for identity, item in list(state['candidates'].items()):
-        if not alert_delivery_policy.selected_rule_enabled(item['formula_id']):
+        if entry_policy_retired(item['formula_id']):
             del state['candidates'][identity]
             count(state, 'policy_retired_candidates')
     for position in list(state['active']):
-        if not alert_delivery_policy.selected_rule_enabled(position['rule_id']):
+        if entry_policy_retired(position['rule_id']):
             cancel_state(state, position['position_id'], 'FORMULA_NEW_ENTRIES_DISABLED', now_ms)
     for intent in state['intents']:
         if (intent['status'] == 'PENDING'
-                and not alert_delivery_policy.selected_rule_enabled(intent['payload']['rule_id'])):
+                and entry_policy_retired(intent['payload']['rule_id'])):
             intent.update(status='CANCELED', acknowledged_ms=now_ms)
             count(state, 'policy_retired_notifications')
+
+
+def entry_policy_retired(rule_id):
+    """Business retirement is independent of the temporary delivery profile."""
+    import alert_delivery_policy
+    return rule_id in (alert_delivery_policy.PAUSED_EXPERIMENTAL_RULES
+                       | alert_delivery_policy.RETIRED_EXPERIMENTAL_RULES)
 
 
 def finish(conn, scope, intent_id, attempt_token, status, now_ms):
