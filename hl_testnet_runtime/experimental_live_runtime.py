@@ -10,6 +10,7 @@ from copy import deepcopy
 import threading
 
 from . import card_lifecycle as life, filled_quantity_dispatch as wire, request_budget
+from . import experimental_external_activity as external
 from .experimental_execution_runtime import (
     IsolatedExecutionRuntime, RuntimeError, _lane, _source_active, _remaining,
     _merge_order_fills, FINAL, TERMINAL,
@@ -252,6 +253,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     or type(fact['at_ms']) is not int or not 0 <= now-fact['at_ms'] <= 15000):
                 raise RuntimeError('EXACT_REJECTED_NO_ORDER_EVIDENCE_REQUIRED')
             request = state['requests'].get(fact['request_id'])
+            if request is not None and external.request_retired(state,request):
+                continue  # Historical outcome remains separate from operational release.
             if (request is None or request['phase'] != 'OUTCOME_UNKNOWN'
                     or request['observed_oid'] is not None
                     or (request.get('reply') or {}).get('state') != 'REJECTED'
@@ -356,7 +359,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if trigger and trigger['reason']=='STOP_VERIFICATION_DEADLINE':
                 trade['emergency_reason']=trigger['reason']
                 pending=[r for r in state['requests'].values() if r['proposal']['card_id']==trade['cid']
-                    and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')]
+                    and external.request_pending(state, r)]
                 if any(r['proposal']['operation'] not in ('CREATE_EXIT','AMEND_EXIT')
                         or r['proposal']['leg'] not in ('STOP','TAKE_PROFIT')
                         or r['proposal']['action']['type'] not in ('order','batchModify')
@@ -369,7 +372,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     closes=[r for r in state['requests'].values() if r['proposal']['card_id']==trade['cid']
                         and r['proposal']['operation']=='EMERGENCY_CLOSE']
                     if len(closes)>=emergency_close.MAX_REQUESTS: continue
-                    if any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in closes):continue
+                    if any(external.request_pending(state, r) for r in closes):continue
                     if any(r['phase']=='OBSERVED' and r.get('terminal_state')!='REJECTED_NO_ORDER'
                             and trade['orders'].get(r['observed_oid'],{}).get('status') not in TERMINAL for r in closes):continue
                     sample=self._mark(trade,context,now,max_age=5000)
@@ -403,8 +406,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         self._retire_suspended_sources(state, now)
         for cid in state['sources']:
             self._retire_hype_capacity(state, cid, now)
-        from . import experimental_external_activity as external
-        external.apply(state,context.get('external_observation'))
+        external.apply(state,context.get('external_observation'),now_ms=now)
         accounts = context.get('inventory_accounts')
         account_errors = context.get('inventory_account_errors', {})
         if (context.get('inventory_complete') is not True or not isinstance(accounts, list)
@@ -469,7 +471,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         accounting.retain_fees(state, context)
         accounting.settle(state, now)
         unavailable = {_lane(r['proposal']['account'], r['proposal']['symbol']) for r in state['requests'].values()
-            if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
+            if external.request_pending(state, r)}
         emergency_lanes = {_lane(t['account'], t['symbol']) for t in state['trades'].values()
             if t['phase'] not in FINAL and t.get('emergency_reason')
             and not external.managed(state,t['account'],t['symbol'])}
@@ -532,7 +534,6 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         Unbound/ambiguous fills remain account observations for REST attribution.
         No exchange I/O or feed locks are held inside the state transaction.
         """
-        from . import experimental_external_activity as external
         feed = getattr(getattr(self.venue, 'safety', None), 'feed', None)
         pending = getattr(feed, 'pending_fills', None)
         if not callable(pending):
@@ -748,6 +749,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 current = state['requests'][request['request_id']]
                 if current != request:
                     raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
+                if 'operational_retirement' in current:
+                    raise RuntimeError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
                 if (request['proposal']['operation'] == 'ENTRY'
                         and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
                             or latest_release != release
@@ -806,7 +809,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             history=deepcopy(state.get('history', {})),
             history_maintenance_error=getattr(self,'_history_maintenance_error',None),
             shared_market=assess(state),
-            unresolved_attempts=sum(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
+            unresolved_attempts=sum(external.request_pending(state, r)
                 for r in state['requests'].values()),
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
             entry_decisions=deepcopy(state.get('entry_decisions', {})),

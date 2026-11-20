@@ -11,6 +11,7 @@ from copy import deepcopy
 from decimal import Decimal
 
 from . import card_lifecycle as life, filled_quantity_dispatch as wire
+from . import experimental_external_activity as external
 
 
 class EvidenceError(ValueError):
@@ -47,7 +48,8 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_termi
     for request in state['requests'].values():
         p=request['proposal']
         if (p['account']!=snapshot['account'] or p['symbol']!=snapshot['symbol']
-                or p['action']['type']=='cancel' or request['phase']=='ABORTED_UNSENT'):
+                or p['action']['type']=='cancel' or request['phase']=='ABORTED_UNSENT'
+                or external.request_retired(state,request)):
             continue
         order=wire.requested_order(p['action']);raw=lookups.get(order['c'])
         if raw is None and reuse_verified_terminals and request['phase']=='OBSERVED':

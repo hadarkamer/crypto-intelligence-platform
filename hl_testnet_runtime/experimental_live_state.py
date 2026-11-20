@@ -158,6 +158,8 @@ class TestnetExecutionState(HistoryMixin):
         Only a successful committed return may authorize signing. A lost COMMIT
         reply leaves the claim set and prevents re-use of this attempt forever.
         """
+        if 'operational_retirement' in request:
+            raise StateError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
         life.ident(claim_token, r'[0-9a-f]{32}')
         if request.get('domain') != 'mainnet' or 'transport_claim' in request:
             raise StateError('UNCLAIMED_TESTNET_ATTEMPT_REQUIRED')

@@ -9,6 +9,7 @@ from copy import deepcopy
 from decimal import Decimal, localcontext
 
 from . import card_lifecycle as life
+from . import experimental_external_activity as external
 
 VERSION = 'formula-realized-risk-5pct-v1'
 INITIAL_USD = '40'
@@ -93,7 +94,7 @@ def _capital_obligations(state, observations):
             obligations[key] = life.number(order['sz'], positive=True) * life.number(order['limitPx'], positive=True)
     for request in state['requests'].values():
         p = request['proposal']
-        if p['operation'] != 'ENTRY' or request['phase'] in ('OBSERVED', 'ABORTED_UNSENT'):
+        if p['operation'] != 'ENTRY' or not external.request_pending(state, request):
             continue
         # Unknown entries on unobserved accounts still consume global capital.
         for order in p['action']['orders']:
@@ -209,6 +210,7 @@ def risk_for(state, source, *, context=None, now_ms=None):
     for trade in state['trades'].values():
         if (trade.get('entry_risk', {}).get('formula') == formula
                 and not trade.get('settlement')
+                and not external.operationally_closed(trade)
                 and (trade['phase'] in FINAL or trade.get('manual_management'))):
             raise AccountingError('FORMULA_NET_SETTLEMENT_PENDING')
     ledger = state.setdefault('formula_accounting', dict(version=VERSION, portfolios={}))

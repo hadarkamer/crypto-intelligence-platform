@@ -90,7 +90,7 @@ class RawTestnetFixture:
             context=self.exchange.collect(self.state_loader())
             values=[dict(position=dict(coin=s['symbol'],szi=s['position_quantity']))
                 for s in context['snapshots'] if s['account']==account and Decimal(s['position_quantity'])]
-            return dict(assetPositions=values+deepcopy(self.extra_positions),withdrawable='50000',
+            return dict(time=self.exchange.now(),assetPositions=values+deepcopy(self.extra_positions),withdrawable='50000',
                 marginSummary=dict(accountValue='50000',totalRawUsd='50000',totalMarginUsed='0',totalNtlPos='0'))
         if kind=='orderStatus':return self.status(oid)
         if kind=='userFunding':

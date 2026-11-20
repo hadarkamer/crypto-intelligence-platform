@@ -121,6 +121,8 @@ class LiveDispatchPort:
         return admission
 
     def _durable(self, request):
+        if 'operational_retirement' in request:
+            raise LiveDispatchError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
         if request.get('domain') != 'mainnet':
             raise LiveDispatchError('DURABLE_TESTNET_REQUEST_REQUIRED')
         wire.DefinitelyUnsent.identity(request)

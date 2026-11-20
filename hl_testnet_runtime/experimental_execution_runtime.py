@@ -14,6 +14,7 @@ from decimal import Decimal, ROUND_DOWN, localcontext
 
 import approved_alert_contract as contract
 from . import card_lifecycle as life, price_precision, request_budget
+from . import experimental_external_activity as external
 from . import filled_quantity_dispatch as wire, r2732_entry, r2732_conditional_stop
 from . import maxpain_execution, experimental_allocations, two_account_execution as roles
 from .experimental_plan_store import reduce_source, retire_suspended_entry, moment
@@ -194,7 +195,6 @@ class IsolatedExecutionRuntime:
                 or source['entry_permission'] != 'WAITING' or cid in state['trades']):
             return False
         account = state['routes']['short_account']
-        from . import experimental_external_activity as external
         occupied = (occupancy_reason in (shared_market.ENTRY_BLOCK, external.HUMAN,
                 external.OCCUPIED, 'LEGACY_PREDECESSOR_NOT_FINAL', 'MARKET_OUTCOME_UNKNOWN')
             or external.managed(state, account, msg['symbol'])
@@ -202,7 +202,7 @@ class IsolatedExecutionRuntime:
                    and t['phase'] not in FINAL for t in state['trades'].values())
             or any(r['proposal']['card_id'] != cid and r['proposal']['account'] == account
                    and r['proposal']['symbol'] == msg['symbol']
-                   and r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
+                   and external.request_pending(state, r)
                    for r in state['requests'].values()))
         if not occupied:
             return False
@@ -251,10 +251,10 @@ class IsolatedExecutionRuntime:
         requests = {r['proposal']['action'].get('orders', [{}])[0].get('c'): r
             for r in state['requests'].values()
             if r['proposal']['action']['type'] == 'order' and r['proposal']['account'] == snapshot['account']
-            and r['proposal']['symbol'] == snapshot['symbol']}
+            and r['proposal']['symbol'] == snapshot['symbol'] and not external.request_retired(state,r)}
         for r in state['requests'].values():
             p = r['proposal']
-            if p['action']['type'] == 'batchModify' and p['account'] == snapshot['account'] and p['symbol'] == snapshot['symbol']:
+            if not external.request_retired(state,r) and p['action']['type'] == 'batchModify' and p['account'] == snapshot['account'] and p['symbol'] == snapshot['symbol']:
                 requests[p['action']['modifies'][0]['order']['c']] = r
         seen, fills_seen = set(), set()
         for row in snapshot['orders']:
@@ -304,7 +304,7 @@ class IsolatedExecutionRuntime:
             if _remaining(trade) < 0:
                 raise RuntimeError('EXIT_EXCEEDED_OWNED_QUANTITY_PEER_RISK')
             pending = [r for r in state['requests'].values() if r['proposal']['card_id'] == trade['cid']
-                and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')]
+                and external.request_pending(state, r)]
             if _remaining(trade) == 0 and trade['orders'] and not pending and all(o['status'] in TERMINAL for o in trade['orders'].values()):
                 phase = 'CLOSED' if trade['entry_fills'] else 'CANCELED_WITHOUT_FILL'
                 if trade['phase'] != phase:
@@ -315,7 +315,7 @@ class IsolatedExecutionRuntime:
         # Cancellation replies never prove terminality; only the exact original OID does.
         for request in state['requests'].values():
             p = request['proposal']
-            if p['action']['type'] == 'cancel' and p['account'] == snapshot['account'] and p['symbol'] == snapshot['symbol']:
+            if not external.request_retired(state,request) and p['action']['type'] == 'cancel' and p['account'] == snapshot['account'] and p['symbol'] == snapshot['symbol']:
                 oid = str(p['action']['cancels'][0]['o'])
                 observed = next((o for o in snapshot['orders'] if o['oid'] == oid), None)
                 if observed and observed['status'] in TERMINAL and snapshot['at_ms'] >= request['attempt_at_ms']:
@@ -433,7 +433,7 @@ class IsolatedExecutionRuntime:
         for trade in sorted(state['trades'].values(),key=lambda t:t['cid']):
             if trade['phase'] in FINAL:
                 continue
-            if any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') and r['proposal']['card_id']==trade['cid'] for r in state['requests'].values()):
+            if any(external.request_pending(state, r) and r['proposal']['card_id']==trade['cid'] for r in state['requests'].values()):
                 continue
             if doge.is_doge(trade['source']):
                 proposal = self._maintain_doge(state, trade, context, now)
@@ -642,7 +642,6 @@ class IsolatedExecutionRuntime:
                     or condition['status'] in ('PRICE_GAP','AMBIGUOUS','EXIT_RECONCILIATION_REQUIRED')):
                 return None
         role = 'long_account' if msg['side']=='LONG' else 'short_account'; account=state['routes'][role]
-        from . import experimental_external_activity as external
         release_reason = external.entry_reason(state, account, msg)
         if release_reason:
             state.setdefault('entry_blocked', {})[cid] = release_reason
@@ -862,7 +861,7 @@ class IsolatedExecutionRuntime:
             state['formula_states'][cid]=condition
             if cid in state['trades']:state['trades'][cid]['condition']=deepcopy(condition)
         proposal=self._maintain(state,context,now)
-        unknown=any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in state['requests'].values())
+        unknown=any(external.request_pending(state, r) for r in state['requests'].values())
         if proposal is None and entries_enabled and not unknown:
             for cid in sorted(state['sources'],key=lambda k:(state['sources'][k]['source']['source_at'],k)):
                 proposal=self._admit(state,cid,context,now)
@@ -887,6 +886,7 @@ class IsolatedExecutionRuntime:
         def final_check(state):
             current=state['requests'][request['request_id']]
             if current!=request:raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
+            if 'operational_retirement' in current:raise RuntimeError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
             if (request['proposal']['operation']=='ENTRY' and not _source_active(state['sources'][request['proposal']['card_id']],self.venue.now())):
                 current['phase']='ABORTED_UNSENT'
                 state['trades'][request['proposal']['card_id']]['phase']='CANCELED_WITHOUT_FILL'

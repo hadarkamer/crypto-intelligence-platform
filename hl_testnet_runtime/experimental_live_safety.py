@@ -15,6 +15,7 @@ import time
 import uuid
 
 from . import card_lifecycle as life
+from . import experimental_external_activity as external
 from . import doge_partial_execution as doge
 from . import experimental_live_release as releases
 from .experimental_execution_runtime import FINAL, _lane, _remaining, _working_entry_active
@@ -207,14 +208,13 @@ class LiveSafetyProvider:
         return True
 
     def _peers_protected(self, state, *, request_id=None, account=None):
-        if any(rid != request_id and r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
+        if any(rid != request_id and external.request_pending(state, r)
                and (account is None or r.get('proposal', {}).get('account') in (None, account))
                for rid, r in state['requests'].items()):
             return False
         for trade in state['trades'].values():
             if trade['phase'] in FINAL or (account is not None and trade['account'] != account):
                 continue
-            from . import experimental_external_activity as external
             if external.managed(state,trade['account'],trade['symbol']):
                 # The operator explicitly owns this coin's further management;
                 # the bot has no authority to resize/cancel/reopen its orders.
@@ -442,7 +442,7 @@ class IndependentProtectionSupervisor:
                 'TESTNET_OBSERVATION_BATCH_EXPIRED')
                 and type(decision.get('retry_after_ms')) is int and now < decision['retry_after_ms'])
             return _source_active(row, now) and not deferred
-        if (any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values())
+        if (any(external.request_pending(state, r) for r in state['requests'].values())
                 or any(ready(cid, row) for cid, row in state['sources'].items())):
             return None
         receipt = self.safety._receipt(state, max_age_ms=EMPTY_RECHECK_MS)

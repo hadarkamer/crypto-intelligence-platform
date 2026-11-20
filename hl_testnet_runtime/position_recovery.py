@@ -8,6 +8,7 @@ from copy import deepcopy
 from decimal import Decimal
 
 from . import card_lifecycle as life, doge_partial_execution as doge
+from . import experimental_external_activity as external
 from .experimental_execution_runtime import _lane
 
 WINDOW_MS = 60000
@@ -32,7 +33,7 @@ def records(state):
 
 def pending(state, cid):
     return [r for r in state['requests'].values()
-            if r['proposal']['card_id'] == cid and r['phase'] not in DONE]
+            if r['proposal']['card_id'] == cid and external.request_pending(state, r)]
 
 
 def paused(state, cid):
@@ -174,7 +175,7 @@ def advance(state, context, now):
         failed = [r for r in own if r['proposal']['operation'] in EXITS
             and r['attempt_at_ms'] > after and (
                 r['phase'] == 'ABORTED_UNSENT' or (r.get('reply') or {}).get('state') == 'REJECTED'
-                or r['phase'] not in DONE and now-r['attempt_at_ms'] >= 5000)]
+                or external.request_pending(state, r) and now-r['attempt_at_ms'] >= 5000)]
         unresolved_exposure = Decimal(facts['quantity']) != 0 and not facts['complete']
         healthy = facts['closed'] or all(v == 'PRESENT' for v in facts['exits'].values())
         if row is None or row['phase'] == 'RESOLVED':
@@ -215,6 +216,7 @@ def permit_proposal(state, proposal, now):
 
 def transport_allowed(state, request, now):
     cid=request['proposal']['card_id']
+    if 'operational_retirement' in request:return False
     if paused(state,cid): return False
     row=state.get('position_recovery',{}).get(cid)
     if row is None or row['phase']=='RESOLVED': return True
@@ -267,7 +269,6 @@ def choose(state, *, token, round_number, choice, actor, allowed_users, now):
             if notice['delivery'] not in ('SENDING','UNKNOWN'):
                 notice.update(delivery='PENDING',retry_at_ms=now)
     if choice == 'manual':
-        from . import experimental_external_activity as external
         value = state.setdefault('external_activity', dict(version=external.VERSION,
             accounts={}, human_managed={}, events=[], evicted_events=0))
         value['human_managed'][external.lane(trade['account'], trade['symbol'])] = dict(

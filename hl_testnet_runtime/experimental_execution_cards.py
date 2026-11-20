@@ -51,6 +51,9 @@ def _card(state, cid):
             unsent_reason=row.get('unsent_reason'),
             certified_unsent=row.get('certified_unsent') is True,
             proposal=deepcopy(proposal), exchange_reply=deepcopy(row.get('reply'))))
+        from .experimental_external_activity import request_retired
+        if request_retired(state, row):
+            attempts[-1]['operational_retirement'] = deepcopy(row['operational_retirement'])
     events = [deepcopy(event) for event in state['events']
               if event.get('occurrence_id') == cid or event.get('request_id') in requests]
     events.sort(key=lambda event: event['at_ms'])  # Stable ties retain journal order.

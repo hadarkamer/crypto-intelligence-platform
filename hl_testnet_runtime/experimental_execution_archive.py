@@ -13,6 +13,7 @@ import sqlite3
 
 import approved_alert_contract as contract
 from . import card_lifecycle as life
+from . import experimental_external_activity as external
 
 VERSION = 'execution-history-v1'
 INTERVAL_MS = 60000
@@ -85,8 +86,6 @@ def _eligible(state, cid, now, *, require_settlement=True):
     if any(state.get(k) for k in ('pending_actions', 'pending_notifications', 'notification_outbox', 'outbox')):
         return False
     trade = state['trades'].get(cid)
-    if require_settlement and trade and trade.get('entry_risk') and not trade.get('settlement'):
-        return False  # Keep exact economic evidence until the balance commits.
     requests = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
     if trade is None:
         if requests:
@@ -100,7 +99,14 @@ def _eligible(state, cid, now, *, require_settlement=True):
         return False
     if trade['phase']=='MANUALLY_CLOSED':
         from .experimental_external_activity import closure_verified
-        return closure_verified(trade) and all(r['phase'] in ('OBSERVED','ABORTED_UNSENT') for r in requests)
+        operational = external.operationally_closed(trade)
+        if require_settlement and trade.get('entry_risk') and not trade.get('settlement') and not operational:
+            return False
+        # Archive the full audit bundle; operational finality is not a fabricated
+        # monetary settlement or a complete historical order outcome.
+        return closure_verified(trade) and not any(external.request_pending(state,r) for r in requests)
+    if require_settlement and trade.get('entry_risk') and not trade.get('settlement'):
+        return False  # Keep exact economic evidence until the balance commits.
     lane = _lane(trade['account'], trade['symbol'])
     if state.get('blocked_lanes', {}).get(lane):
         return False
@@ -209,7 +215,10 @@ class _SQL:
         self.execute(f'INSERT INTO {self.table("history")} VALUES(?,?,?,?,?)',
             (bundle['occurrence_id'], life.encoded(bundle), life.digest(bundle), life.encoded(source), life.digest(source)))
         trade = bundle['trade']
-        if trade:
+        # Operational flatness does not certify immutable historical order
+        # outcomes. Preserve these rows in the full checksummed bundle, without
+        # advertising them as terminal collector evidence on future cycles.
+        if trade and not external.operationally_closed(trade):
             for oid, row in trade['orders'].items():
                 checkpoint = bundle['snapshots'].get('collector_checkpoints', {})
                 evidence = dict(order=row,

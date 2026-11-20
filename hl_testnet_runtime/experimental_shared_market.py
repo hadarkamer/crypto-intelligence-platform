@@ -9,6 +9,7 @@ No network, exchange capabilities, policy changes, or synthetic TP are added.
 from decimal import Decimal
 
 from . import card_lifecycle as life
+from . import experimental_external_activity as external
 
 VERSION = 'experimental-shared-market-safety-v1'
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'MANUALLY_CLOSED'))
@@ -59,7 +60,7 @@ def assess(state):
             raise SharedMarketError('EXACT_SHARED_TRADE_IDENTITY_REQUIRED')
         if trade['phase']=='MANUALLY_CLOSED':
             from .experimental_external_activity import closure_verified
-            if not closure_verified(trade) or any(r['phase'] not in SETTLED for r in requests.get(cid,[])):
+            if not closure_verified(trade) or any(external.request_pending(state, r) for r in requests.get(cid,[])):
                 raise SharedMarketError('MANUAL_CLOSURE_NOT_VERIFIED')
             continue
         entered, exited = (_sum(trade[key].values()) for key in ('entry_fills', 'exit_fills'))
@@ -89,7 +90,7 @@ def assess(state):
                 capacity += outstanding
         unresolved = []
         for request in requests.get(cid, []):
-            if request['phase'] in SETTLED:
+            if not external.request_pending(state, request):
                 continue
             unresolved.append(request['request_id'])
             proposal = request['proposal']

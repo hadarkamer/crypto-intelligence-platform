@@ -240,6 +240,8 @@ def review(request, context, *, now_ms):
     """
     if request.get('domain') not in ('software','mainnet'):
         raise BoundaryError('EXPLICIT_REQUEST_DOMAIN_REQUIRED')
+    if 'operational_retirement' in request:
+        raise BoundaryError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
     DefinitelyUnsent.identity(request)
     p=request['proposal']; entry=p['operation']=='ENTRY'
     _fresh(request['attempt_at_ms'],now_ms,5000,'DURABLE_ATTEMPT_EXPIRED')

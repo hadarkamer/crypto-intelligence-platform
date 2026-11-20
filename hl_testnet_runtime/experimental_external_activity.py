@@ -18,6 +18,96 @@ HISTORY_INTERVAL_MS = 30000
 MAX_EVENTS = 512
 MAX_RECENT_FILLS = 4096
 MAX_ORDERS = 10000
+OPERATIONAL_CLOSURE = 'manual-operational-flat-v1'
+SIGNED_REQUEST_WINDOW_MS = 15000
+
+
+def _request_identity(request):
+    """Immutable attempt identity; a later reply never rewrites the audit fact."""
+    fields = ('request_id','domain','bucket','proposal','nonce','attempt_at_ms',
+              'prepared_at_ms','attempts')
+    return life.digest({key:request[key] for key in fields})
+
+
+def request_retired(state, request):
+    """One shared operational-final predicate, independent of historical outcome."""
+    try:
+        marker=request.get('operational_retirement',{})
+        p=request['proposal']; trade=state['trades'].get(p['card_id'])
+        proof=trade.get('manual_closure',{}) if trade is not None else marker.get('closure',{})
+        return (marker.get('version')==OPERATIONAL_CLOSURE
+            and marker.get('request_id')==request['request_id']
+            and marker.get('request_digest')==_request_identity(request)
+            and marker.get('account')==p['account'] and marker.get('symbol')==p['symbol']
+            and marker.get('card_id')==p['card_id']
+            and (trade is None or operationally_closed(trade))
+            and _operational_proof_verified(proof,p['account'],p['symbol'],p['card_id'])
+            and proof.get('retired_requests',{}).get(request['request_id'])==marker['request_digest']
+            and marker.get('closure_digest')==life.digest(proof)
+            and marker.get('expires_after_ms')==request['nonce']+SIGNED_REQUEST_WINDOW_MS
+            and proof['first_observation_ms']>marker['expires_after_ms']
+            and proof['first_venue_ms']>marker['expires_after_ms'])
+    except (ValueError,KeyError,TypeError):
+        return False
+
+
+def request_pending(state, request):
+    return request.get('phase') not in ('OBSERVED','ABORTED_UNSENT') and not request_retired(state,request)
+
+
+def _operational_proof_verified(proof, account, symbol, cid):
+    if (proof.get('version')!=OPERATIONAL_CLOSURE or proof.get('account')!=account
+            or proof.get('symbol')!=symbol or cid not in proof.get('card_ids',[])
+            or proof.get('actual_position_quantity')!='0' or proof.get('open_order_count')!=0
+            or proof.get('pending_bot_requests')!=0 or proof.get('legacy_actions_pending')!=0
+            or not isinstance(proof.get('retired_requests'),dict)):
+        return False
+    keys=('first_observation_ms','second_observation_ms','first_venue_ms',
+          'second_venue_ms','confirmed_at_ms')
+    if any(type(proof.get(k)) is not int for k in keys):return False
+    now=proof['confirmed_at_ms']
+    return (0<proof['first_observation_ms']<proof['second_observation_ms']<=now
+        and 0<proof['first_venue_ms']<proof['second_venue_ms']<=now
+        and now-proof['second_observation_ms']<=SIGNED_REQUEST_WINDOW_MS
+        and now-proof['second_venue_ms']<=SIGNED_REQUEST_WINDOW_MS
+        and all(isinstance(proof.get(k),str) and len(proof[k])==64
+                for k in ('first_observation_digest','observation_digest')))
+
+
+def _quiescent_request(request, first_at, first_venue):
+    """The existing signer expires every action by nonce+15s; never replay it."""
+    try:
+        if request['phase'] in ('OBSERVED','ABORTED_UNSENT'):return True
+        if (request['phase']!='OUTCOME_UNKNOWN' or request.get('attempts')!=1
+                or request.get('domain') not in ('mainnet','software')):return False
+        for key in ('nonce','attempt_at_ms','prepared_at_ms'):life.moment(request[key])
+        _request_identity(request)
+        expiry=request['nonce']+SIGNED_REQUEST_WINDOW_MS
+        return (request['attempt_at_ms']<=request['nonce']<=request['attempt_at_ms']+1000
+                and request['prepared_at_ms']==request['attempt_at_ms']
+                and first_at>expiry and first_venue>expiry)
+    except (ValueError,KeyError,TypeError):return False
+
+
+def _operational_current(current, symbol, now_ms):
+    if (type(now_ms) is not int or current.get('orders_complete') is not True
+            or current.get('positions_complete') is not True
+            or not isinstance(current.get('current_action_symbols'),list)
+            or symbol in current['current_action_symbols']):return False
+    for key in ('inventory_at_ms','venue_at_ms'):
+        at=current.get(key)
+        if type(at) is not int or not 0<=now_ms-at<=SIGNED_REQUEST_WINDOW_MS:return False
+    return (Decimal(current['positions'].get(symbol,'0'))==0
+            and not any(o['symbol']==symbol for o in current['orders']))
+
+
+def _manual_retention_cursor(state, account, cursor):
+    cards={cid for h in state.get('external_activity',{}).get('human_managed',{}).values()
+           if h['account']==account for cid in h.get('card_ids',[])}
+    starts=[r['attempt_at_ms'] for r in state['requests'].values()
+            if r['proposal']['account']==account and r['proposal']['card_id'] in cards
+            and r['proposal']['leg']=='ENTRY' and r['phase']!='ABORTED_UNSENT']
+    return min([cursor]+starts) if starts else cursor
 
 
 class ExternalActivityError(ValueError):
@@ -151,7 +241,7 @@ def owned_request_evidence(state, account, samples, observed, *, now_ms):
     result={}
     for rid,request in state['requests'].items():
         p=request['proposal']
-        if p['account']!=account or request['phase'] in ('OBSERVED','ABORTED_UNSENT'):
+        if p['account']!=account or not request_pending(state,request):
             continue
         cancel=p['action']['type']=='cancel'
         if p['action']['type'] not in ('order','batchModify','cancel'):
@@ -232,7 +322,7 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
             review=life.review(bucket['bindings'],evidence['snapshot'],now_ms=now_ms)
             if bucket.get('pending') or review['bucket_issues'] or any(c['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or c['issues'] for c in review['cards']):
                 legacy_active.add(bucket['symbol'])
-        uncertain = any(r['proposal']['account'] == account and r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
+        uncertain = any(r['proposal']['account'] == account and request_pending(state,r)
                         for r in state['requests'].values())
         orders = []
         for raw in inventory['orders']:
@@ -263,7 +353,7 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                         or (trigger is not None and not activated and 'triggerPx' in raw
                             and Decimal(raw['triggerPx']) != Decimal(trigger['triggerPx'])))
                     planned = any(r['proposal']['account']==account and r['proposal']['symbol']==row['symbol']
-                        and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+                        and request_pending(state,r)
                         and r['proposal']['action']['type']=='batchModify' for r in state['requests'].values())
                     if changed and not planned:
                         result['human_managed'][lane(account,row['symbol'])] = dict(
@@ -323,8 +413,13 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
             except (ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, sync.SyncError) and str(exc) in (
                         'FILL_FACT_CHANGED', 'PREVIOUS_FILL_MISSING_IN_OVERLAP'):
-                    raise ExternalActivityError('EXTERNAL_'+str(exc)) from None
-                observed['history_error'] = 'EXTERNAL_FILL_FACTS_REQUIRE_REVIEW'
+                    if not any(h['account']==account for h in state.get('external_activity',{}).get('human_managed',{}).values()):
+                        raise ExternalActivityError('EXTERNAL_'+str(exc)) from None
+                    # A historical mismatch is retained as documentation debt;
+                    # it cannot erase separately validated current inventory.
+                    observed['history_error']='EXTERNAL_'+str(exc)
+                else:
+                    observed['history_error'] = 'EXTERNAL_FILL_FACTS_REQUIRE_REVIEW'
         result['accounts'][account] = observed
         prior_fills={f['fill_id']:f for f in before.get('fills',[])}
         for f in observed['fills']:
@@ -333,7 +428,7 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                 raise ExternalActivityError('EXTERNAL_FILL_FACT_CHANGED')
         proofs=owned_request_evidence(state,account,all_samples,observed,now_ms=now_ms)
         result['owned_request_observations'].update(proofs)
-        remaining_uncertain=any(r['proposal']['account']==account and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+        remaining_uncertain=any(r['proposal']['account']==account and request_pending(state,r)
                                 and rid not in proofs for rid,r in state['requests'].items())
         if uncertain and not remaining_uncertain:
             # Known bot outcome resolved from exact independent exchange facts;
@@ -458,8 +553,9 @@ def record_fill_deltas(state, rows, *, now_ms):
                 # A later delivery can precede the first uncompleted interval.
                 saved['history_started_at_ms'] = min(saved.get('history_started_at_ms', now_ms),
                                                        min(f['at_ms'] for f in fills))
+        cursor=saved.get('history_cursor_ms') or 0
         saved['fills'] = _merge_recent_fills(saved.get('fills', []), fills,
-            saved.get('history_cursor_ms'), preserve_origin=True)
+            _manual_retention_cursor(state,account,cursor), preserve_origin=True)
         updates[account] = saved
     # Validate every account before changing any part of the supplied state.
     value = state.setdefault('external_activity', dict(version=VERSION, accounts={}, human_managed={},
@@ -467,7 +563,7 @@ def record_fill_deltas(state, rows, *, now_ms):
     value['accounts'].update(updates)
 
 
-def apply(state, observation):
+def apply(state, observation, *, now_ms=None):
     """Idempotent journal reducer; never rewrites attributable bot quantities."""
     if not observation:
         return
@@ -504,7 +600,8 @@ def apply(state, observation):
                       at_ms=current['observed_at_ms'], status='NO_LONGER_OPEN_OUTCOME_UNASSIGNED'))
         old_fills = {f['fill_id']:f for f in prior.get('fills', [])}
         cursor = current.get('history_cursor_ms') or prior.get('history_cursor_ms') or 0
-        retained = _merge_recent_fills(prior.get('fills', []), current['fills'], cursor)
+        retained = _merge_recent_fills(prior.get('fills', []), current['fills'],
+            _manual_retention_cursor(state,account,cursor))
         for fill in current['fills']:
             previous = old_fills.get(fill['fill_id'])
             if fill['origin'] == 'EXTERNAL' and (previous is None or previous['origin'] != 'EXTERNAL'):
@@ -525,6 +622,10 @@ def apply(state, observation):
         if key != lane(fact['account'], fact['symbol']) or fact['account'] not in state['routes'].values():
             raise ExternalActivityError('EXTERNAL_HANDOFF_SCOPE_INVALID')
         if key not in value['human_managed']:
+            retired=value.get('retired_markets',{}).get(key)
+            if retired is not None and fact.get('at_ms',0)<=retired['confirmed_at_ms']:
+                # A delayed/replayed observation cannot reopen a retired case.
+                continue
             cards=sorted(cid for cid,t in state['trades'].items() if t['account']==fact['account']
                          and t['symbol']==fact['symbol'] and t['phase'] not in ('CLOSED','CANCELED_WITHOUT_FILL',MANUAL_CLOSED))
             value['human_managed'][key] = dict(**deepcopy(fact), status=HUMAN, automatic_resume=False,card_ids=cards)
@@ -540,7 +641,7 @@ def apply(state, observation):
         if request is None:raise ExternalActivityError('OBSERVED_BOT_REQUEST_MISSING')
         p=request['proposal']
         if not managed(state,p['account'],p['symbol']):continue
-        if request['phase'] in ('OBSERVED','ABORTED_UNSENT'):continue
+        if not request_pending(state,request):continue
         trade=state['trades'][p['card_id']]
         recorded={k:deepcopy(v) for k,v in row.items() if k!='cancel_observation'}
         leg=trade['order_legs'].get(row['oid'],p['leg'])
@@ -556,25 +657,63 @@ def apply(state, observation):
     for key,handoff in list(value['human_managed'].items()):
         account,symbol=handoff['account'],handoff['symbol']
         current=observation['accounts'].get(account)
-        if current is None:continue
+        if current is None or account in observation.get('errors',{}):
+            handoff.pop('first_operational_observation',None)
+            handoff.pop('first_flat_observation_ms',None)
+            continue
         at=current['observed_at_ms']
         for cid in handoff.get('card_ids',[]):
             if cid in state['trades']:
                 state['trades'][cid]['manual_management'].update(
                     actual_position_quantity=current['positions'].get(symbol,'0'),observed_at_ms=at,
                     current_orders=[deepcopy(o) for o in current['orders'] if o['symbol']==symbol])
-        pending=any(r['proposal']['account']==account and r['proposal']['symbol']==symbol
-                    and r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in state['requests'].values())
-        flat=(current['history_complete'] and Decimal(current['positions'].get(symbol,'0'))==0
-              and not any(o['symbol']==symbol for o in current['orders']) and not pending)
-        if not flat:
-            handoff.pop('first_flat_observation_ms',None)
-            continue
-        first=handoff.setdefault('first_flat_observation_ms',at)
-        if at<=first:continue
-        proof=dict(account=account,symbol=symbol,first_observation_ms=first,confirmed_at_ms=at,
-                   actual_position_quantity='0',open_order_count=0,pending_bot_requests=0,
-                   observation_digest=life.digest(current))
+        pending={rid:r for rid,r in state['requests'].items()
+                 if r['proposal']['account']==account and r['proposal']['symbol']==symbol
+                 and request_pending(state,r)}
+        cards=handoff.get('card_ids',[])
+        if now_ms is None:
+            # Compatibility for already complete historical observations. The
+            # live reducer always supplies its current clock for operational
+            # closure; absent metadata never enters the new policy.
+            flat=(current['history_complete'] and Decimal(current['positions'].get(symbol,'0'))==0
+                  and not any(o['symbol']==symbol for o in current['orders']) and not pending)
+            if not flat:
+                handoff.pop('first_flat_observation_ms',None)
+                continue
+            first=handoff.setdefault('first_flat_observation_ms',at)
+            if at<=first:continue
+            proof=dict(account=account,symbol=symbol,first_observation_ms=first,confirmed_at_ms=at,
+                       actual_position_quantity='0',open_order_count=0,pending_bot_requests=0,
+                       observation_digest=life.digest(current))
+        else:
+            clean=(_operational_current(current,symbol,now_ms)
+                and bool(cards) and all(cid in state['trades'] for cid in cards)
+                and all(r['proposal']['card_id'] in cards and _quiescent_request(r,
+                    current['inventory_at_ms'],current['venue_at_ms']) for r in pending.values()))
+            if not clean:
+                handoff.pop('first_operational_observation',None)
+                continue
+            attempts={rid:_request_identity(r) for rid,r in state['requests'].items()
+                      if r['proposal']['account']==account and r['proposal']['symbol']==symbol
+                      and r['proposal']['card_id'] in cards}
+            sample=dict(at_ms=current['inventory_at_ms'],venue_ms=current['venue_at_ms'],
+                        digest=life.digest(current),request_digests=attempts)
+            first=handoff.get('first_operational_observation')
+            if first is None or first['request_digests']!=attempts:
+                handoff['first_operational_observation']=sample
+                continue
+            if sample['at_ms']<=first['at_ms'] or sample['venue_ms']<=first['venue_ms']:
+                continue
+            if not all(_quiescent_request(r,first['at_ms'],first['venue_ms']) for r in pending.values()):
+                handoff['first_operational_observation']=sample
+                continue
+            at=now_ms
+            proof=dict(version=OPERATIONAL_CLOSURE,account=account,symbol=symbol,card_ids=sorted(cards),
+                first_observation_ms=first['at_ms'],second_observation_ms=sample['at_ms'],
+                first_venue_ms=first['venue_ms'],second_venue_ms=sample['venue_ms'],confirmed_at_ms=at,
+                actual_position_quantity='0',open_order_count=0,pending_bot_requests=0,legacy_actions_pending=0,
+                first_observation_digest=first['digest'],observation_digest=sample['digest'],
+                retired_requests={rid:attempts[rid] for rid in pending})
         for cid in handoff.get('card_ids',[]):
             trade=state['trades'].get(cid)
             if trade is None:continue
@@ -583,16 +722,29 @@ def apply(state, observation):
             for f in value['accounts'][account].get('fills',[]):
                 if f['symbol']==symbol:
                     facts[f['fill_id']]={k:deepcopy(v) for k,v in f.items() if k!='origin'}
+            history_complete=current['history_complete'] and not pending
             trade['manual_closure_snapshot']=dict(environment='mainnet',account=account,symbol=symbol,
-                at_ms=at,history_complete=True,orders_complete=True,position_quantity='0',
+                at_ms=at,history_complete=history_complete,orders_complete=True,position_quantity='0',
                 fills=sorted(facts.values(),key=lambda f:(f['at_ms'],f['fill_id'])),open_orders=[],
                 terminal_orders=deepcopy(prior_snapshot.get('terminal_orders',[])))
+            trade['history_reconciliation']=dict(status='COMPLETE' if history_complete else 'INCOMPLETE',
+                history_complete=current['history_complete'],history_cursor_ms=current.get('history_cursor_ms'),
+                history_started_at_ms=current.get('history_started_at_ms'),history_error=current.get('history_error'),
+                unresolved_request_ids=sorted(rid for rid,r in pending.items() if r['proposal']['card_id']==cid))
             trade['phase']=MANUAL_CLOSED
             trade['manual_closure']=deepcopy(proof)
             trade['manual_management'].update(status=MANUAL_CLOSED,actual_position_quantity='0',
                                               observed_at_ms=at,current_orders=[])
             state['events'].append(dict(kind=MANUAL_CLOSED,at_ms=at,occurrence_id=cid,
                                         accounting_allocation='EXTERNAL_ACTIVITY_UNALLOCATED'))
+        if proof.get('version')==OPERATIONAL_CLOSURE:
+            for rid,request in pending.items():
+                p=request['proposal']
+                request['operational_retirement']=dict(version=OPERATIONAL_CLOSURE,request_id=rid,
+                    request_digest=_request_identity(request),account=account,symbol=symbol,card_id=p['card_id'],
+                    first_observation_ms=proof['first_observation_ms'],confirmed_at_ms=at,
+                    expires_after_ms=request['nonce']+SIGNED_REQUEST_WINDOW_MS,
+                    closure_digest=life.digest(proof),closure=deepcopy(proof))
         value.setdefault('retired_markets',{})[key]=proof
         value['human_managed'].pop(key)
         state.get('snapshots',{}).pop(key,None)
@@ -606,8 +758,16 @@ def apply(state, observation):
     value['observation_errors']=deepcopy(observation.get('errors',{}))
 
 
+def operationally_closed(trade):
+    return (trade.get('phase')==MANUAL_CLOSED
+        and _operational_proof_verified(trade.get('manual_closure',{}),
+                                       trade['account'],trade['symbol'],trade['cid']))
+
+
 def closure_verified(trade):
     proof=trade.get('manual_closure',{})
+    if proof.get('version')==OPERATIONAL_CLOSURE:
+        return operationally_closed(trade)
     return (trade.get('phase')==MANUAL_CLOSED and proof.get('account')==trade['account']
         and proof.get('symbol')==trade['symbol']
         and type(proof.get('first_observation_ms')) is int

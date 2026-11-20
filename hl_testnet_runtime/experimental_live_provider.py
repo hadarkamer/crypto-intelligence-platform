@@ -29,7 +29,7 @@ from . import formula_accounting as accounting
 def _isolated_markets(state, context):
     """Known bot uncertainty is local; raw account inventory stays complete."""
     unresolved={r['proposal']['card_id'] for r in state['requests'].values()
-                if r['phase'] not in recovery.DONE}
+                if external.request_pending(state, r)}
     return {a: sorted({t['symbol'] for t in state['trades'].values() if t['account']==a
         and (runtime._lane(a,t['symbol']) in context['blocked_lanes'] or t['cid'] in unresolved)})
         for a in context['external_observation']['accounts']}
@@ -81,7 +81,7 @@ def _original_stop_needed(state, trade):
     covered=(len(stops)==1 and stops[0]['wire_order']['r'] is True
         and life.number(stops[0]['wire_order']['s'])-sum(
             (life.number(f['quantity']) for f in stops[0]['fills']),Decimal(0))==remaining)
-    unknown_entry=any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+    unknown_entry=any(external.request_pending(state, r)
         and r['proposal']['card_id']==trade['cid'] and r['proposal']['operation']=='ENTRY'
         for r in state['requests'].values())
     return unknown_entry or remaining>0 and not covered
@@ -127,6 +127,13 @@ def _retired_experimental(state, now):
         in state.get('blocked_lanes',{}).items() if reason not in COLD_HISTORY_RETRY_ERRORS})
     result = {}
     for cid, trade in state['trades'].items():
+        if (external.operationally_closed(trade)
+                and not any(external.request_pending(state,r) for r in state['requests'].values()
+                    if r['proposal']['card_id']==cid)):
+            # A queued audit notice can delay archival, never reactivate this
+            # operationally finished market or its historical recovery reads.
+            result[cid]=dict(binding=None,snapshot=None,orders=[])
+            continue
         if cid not in state['sources'] or not _eligible(eligible_state, cid, now, require_settlement=False):
             continue
         if trade['phase']==external.MANUAL_CLOSED:
@@ -331,13 +338,13 @@ class LiveEvidenceProvider:
     def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None, meter=None):
         lookups={};ids={};seen=set()
         changing={str(row.get('o',row.get('oid'))) for r in state['requests'].values()
-            if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+            if external.request_pending(state, r)
             and r['proposal']['account']==account and r['proposal']['symbol']==symbol
             for row in r['proposal']['action'].get('cancels',r['proposal']['action'].get('modifies',[]))}
         for request in state['requests'].values():
             p=request['proposal']
             if (p['account']!=account or p['symbol']!=symbol or p['action']['type']=='cancel'
-                    or request['phase']=='ABORTED_UNSENT'):
+                    or request['phase']=='ABORTED_UNSENT' or external.request_retired(state,request)):
                 continue
             order=wire.requested_order(p['action']);cloid=order['c']
             oid=request.get('observed_oid')
@@ -409,7 +416,7 @@ class LiveEvidenceProvider:
         lane=runtime._lane(account,symbol)
         reader=self.public;meter=None
         affected=[t for t in state['trades'].values() if t['account']==account and t['symbol']==symbol
-                  and t['cid'] in state.get('position_recovery',{})]
+                  and t['cid'] in state.get('position_recovery',{}) and not external.operationally_closed(t)]
         for trade in affected:
             row=state['position_recovery'][trade['cid']]
             if row['phase']=='RESOLVED':continue
@@ -433,7 +440,7 @@ class LiveEvidenceProvider:
         if previous is None:
             attempts=[r['attempt_at_ms'] for r in state['requests'].values()
                       if r['proposal']['account']==account and r['proposal']['symbol']==symbol
-                      and r['phase']!='ABORTED_UNSENT']
+                      and r['phase']!='ABORTED_UNSENT' and not external.request_retired(state,r)]
             beginning=max(state['not_before_ms'],min(attempts)) if attempts else state['not_before_ms']
             previous=(deepcopy(old['evidence']['snapshot']) if old and old.get('evidence')
                       else _empty(account,symbol,beginning))
@@ -448,7 +455,7 @@ class LiveEvidenceProvider:
                 if callable(getattr(type(self.safety),'_receipt',None)) else None)
             unchanged=(receipt is not None and self.safety._continuous(receipt,account)
                 and not any(r['proposal']['account']==account and r['proposal']['symbol']==symbol
-                    and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+                    and external.request_pending(state, r)
                     for r in state['requests'].values()))
             observed=sync.collect(dict(bindings=bindings,snapshot=previous),reader,
                 clock=self.now,reuse_verified_terminals=True,verification_passes=1,
@@ -566,6 +573,14 @@ class LiveEvidenceProvider:
         for account,inventory in inventories.items():
             try:
                 value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,fill_reader=fill_reader)
+                for current in value['accounts'].values():
+                    # Exact clocks from the shared, validated current inventory.
+                    # History completeness remains an independent audit fact.
+                    current.update(orders_complete=True,positions_complete=True,
+                        inventory_at_ms=inventory.get('at_ms'),
+                        venue_at_ms=inventory.get('account_state',{}).get('time'),
+                        current_action_symbols=sorted({b['symbol'] for b in legacy.get(account,[])
+                            if b.get('pending') is not None or b.get('emergency') is not None}))
                 result['accounts'].update(value['accounts'])
                 result['human_managed'].update(value['human_managed'])
                 result['owned_request_observations'].update(value['owned_request_observations'])
@@ -641,7 +656,7 @@ class LiveEvidenceProvider:
                 # durable attempt. Do not reopen an unrelated years-old cursor.
                 attempts=[r['attempt_at_ms'] for r in working['requests'].values()
                           if r['proposal']['account']==account and r['proposal']['symbol']==symbol
-                          and r['phase']!='ABORTED_UNSENT']
+                          and r['phase']!='ABORTED_UNSENT' and not external.request_retired(working,r)]
                 if not active_ids and attempts:
                     clean['at_ms']=max(clean['at_ms'],min(attempts))
                 working.setdefault('collector_checkpoints',{})[lane]=clean
@@ -657,7 +672,7 @@ class LiveEvidenceProvider:
                       'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED','TESTNET_OBSERVATION_BATCH_EXPIRED')
                   and type(decision.get('retry_after_ms')) is int and decision['retry_after_ms']>now}
         unresolved_lanes={runtime._lane(r['proposal']['account'], r['proposal']['symbol']) for r in state['requests'].values()
-                             if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+                             if external.request_pending(state, r)}
         protection_lanes={runtime._lane(t['account'], t['symbol']) for t in state['trades'].values() if _original_stop_needed(state,t)
                              and not external.managed(state,t['account'],t['symbol'])}
         # Reject locally impossible admissions before reading their market or
@@ -717,7 +732,7 @@ class LiveEvidenceProvider:
                     # reads. The transport still reserves the full 120 per
                     # page; this local estimate grants no read permission.
                     planned+=['orderStatus' for r in working['requests'].values()
-                        if r['phase']!='ABORTED_UNSENT' and r['proposal']['action']['type']!='cancel'
+                        if r['phase']!='ABORTED_UNSENT' and not external.request_retired(working,r) and r['proposal']['action']['type']!='cancel'
                         and state['trades'][r['proposal']['card_id']]['orders'].get(
                             r.get('observed_oid'),{}).get('status') not in ('FILLED','CANCELED','REJECTED')]
                     weight=request_weight('/exchange',dict(action=dict(type='order',orders=[{}])))
@@ -847,7 +862,7 @@ class LiveEvidenceProvider:
             result['rejected_requests']=[]
             for rid,request in state['requests'].items():
                 p=request['proposal'];lane=runtime._lane(p['account'],p['symbol'])
-                if (request['phase']!='OUTCOME_UNKNOWN' or p['action']['type'] not in ('order','batchModify','cancel')
+                if (not external.request_pending(state,request) or request['phase']!='OUTCOME_UNKNOWN' or p['action']['type'] not in ('order','batchModify','cancel')
                         or (request.get('reply') or {}).get('state')!='REJECTED'
                         or request.get('observed_oid') is not None or lane in result['blocked_lanes']):
                     continue
@@ -886,7 +901,7 @@ class LiveEvidenceProvider:
                         and runtime._lane(trade['account'],trade['symbol']) not in human):
                     source_io_blocked.add(runtime._lane(trade['account'],trade['symbol']))
             unresolved={runtime._lane(r['proposal']['account'],r['proposal']['symbol']) for r in state['requests'].values()
-                        if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+                        if external.request_pending(state, r)}
             # Stable fixed-exit trades consume no live mark: use the CURRENT
             # reconciled fill/order facts, so newly missing or undersized exits
             # still request a fresh market before the runtime repairs them.
@@ -1146,6 +1161,12 @@ class LiveEvidenceProvider:
                     result['collector_checkpoints'].pop(lane)
                 for a,symbol in lanes:
                     if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]='ACCOUNT_COLLECTION_EXPIRED'
+        # A current-account failure invalidates operational closure even if the
+        # earlier independently retained history observation remains useful.
+        for account in result['inventory_account_errors']:
+            current=result['external_observation']['accounts'].get(account)
+            if current is not None:
+                current.update(orders_complete=False,positions_complete=False)
         result['external_observation']['isolated_markets'] = _isolated_markets(working,result)
         result['account_inventory_at_ms']={a:result['account_inventory_at_ms'][a] for a in inventories}
         result.update(inventory_complete=True,inventory_accounts=sorted(inventories),inventory_at_ms=now)
@@ -1185,10 +1206,12 @@ class LiveEvidenceProvider:
         state=self.experimental_store.load();p=request['proposal'];cid=p['card_id'];entry=p['operation']=='ENTRY'
         if state.get('domain')!='mainnet' or state['requests'].get(request['request_id'])!=request:
             raise ProviderError('EXACT_NATIVE_DURABLE_REQUEST_REQUIRED')
+        if 'operational_retirement' in request:
+            raise ProviderError('OPERATIONALLY_RETIRED_REQUEST_NO_SEND')
         if p['basis']!=life.digest(state['snapshots']):
             raise ProviderError('EXPERIMENTAL_OWNERSHIP_CHANGED_RECONCILE_FIRST')
         for rid,peer in state['requests'].items():
-            if rid==request['request_id'] or peer['phase'] in ('OBSERVED','ABORTED_UNSENT'):
+            if rid==request['request_id'] or not external.request_pending(state, peer):
                 continue
             same_market=(peer['proposal']['account']==p['account'] and peer['proposal']['symbol']==p['symbol'])
             pp=peer['proposal']

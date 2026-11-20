@@ -47,6 +47,7 @@ def project(state):
 
 def _project_rows(state):
     """Project already verified facts; domain checking belongs to the caller."""
+    from .experimental_external_activity import request_pending, request_retired
     rows = []
     for cid, trade in sorted(state['trades'].items()):
         if trade['cid'] != cid:
@@ -56,7 +57,9 @@ def _project_rows(state):
         if exit_qty > entry_qty:
             raise ReportError('EXIT_EXCEEDS_OWNED_ENTRY')
         requests = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
-        unresolved = sum(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in requests)
+        unresolved = sum(request_pending(state, r) for r in requests)
+        historical_unresolved = sum(request_retired(state, r)
+            and r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in requests)
         final = trade['phase'] in ('CLOSED', 'CANCELED_WITHOUT_FILL')
         if final and (unresolved or exit_qty != entry_qty
                 or any(o['status'] not in ('FILLED', 'CANCELED', 'REJECTED') for o in trade['orders'].values())):
@@ -86,6 +89,9 @@ def _project_rows(state):
         if trade.get('entry_risk'):
             rows[-1]['entry_risk'] = dict(trade['entry_risk'])
             rows[-1]['net_pnl_status'] = trade.get('accounting_pending', 'FORMULA_NET_SETTLEMENT_PENDING')
+        if historical_unresolved:
+            # Operational retirement does not rewrite an unknown venue result.
+            rows[-1]['historical_unresolved_attempts'] = historical_unresolved
         if trade.get('settlement'):
             receipt = trade['settlement']
             rows[-1].update(fees=receipt['fees_usd'], funding=receipt['funding_usd'],

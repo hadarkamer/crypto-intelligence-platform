@@ -527,7 +527,11 @@ class IntegratedReviewTests(unittest.TestCase):
             history_complete=True,orders_complete=True,position_quantity='0',
             fills=fills,open_orders=[],terminal_orders=[])
         cleaned=store.strip_archived_collector_snapshot(snapshot)
-        self.assertFalse(any(f['oid'] in trade['orders'] for f in cleaned['fills']))
+        # Operational flatness does not turn manual historical orders into
+        # immutable terminal evidence. Keep their audit facts; the provider's
+        # existing retired-market time fence separates them from a new trade.
+        self.assertEqual(cleaned,snapshot)
+        self.assertEqual(store.archive_record(trade['cid'])['trade'],after['trades'][trade['cid']])
 
 
 @unittest.skipUnless(pg_fixture.CI, 'Requires disposable loopback PostgreSQL; skipped is not verified')
