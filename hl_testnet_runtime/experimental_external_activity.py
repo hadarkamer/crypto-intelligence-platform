@@ -7,6 +7,7 @@ restart in the ordinary execution transaction.
 """
 from copy import deepcopy
 from decimal import Decimal
+import time
 
 from . import card_lifecycle as life, card_sync_evidence as sync
 
@@ -145,7 +146,105 @@ def cached_history(cache, account, start, end):
     return min(samples, key=len) if samples else None
 
 
-def owned_request_evidence(state, account, samples, observed, *, now_ms):
+def manual_history_requests(state):
+    """Read-only inquiry for an already sent ENTRY never resumes manual risk."""
+    from .filled_quantity_dispatch import requested_order
+    eligible = set()
+    for rid, request in state['requests'].items():
+        p = request['proposal']; account, symbol = p['account'], p['symbol']
+        if (request['phase'] != 'OUTCOME_UNKNOWN' or request.get('attempts') != 1
+                or p['action']['type'] != 'order' or p['leg'] != 'ENTRY'
+                or type(request.get('attempt_at_ms')) is not int
+                or not managed(state, account, symbol)):
+            continue
+        checkpoint = state.get('collector_checkpoints', {}).get(lane(account, symbol), {})
+        if (not checkpoint.get('history_complete') or not checkpoint.get('orders_complete')
+                or checkpoint.get('at_ms', request['attempt_at_ms']+1) > request['attempt_at_ms']):
+            continue
+        expected = requested_order(p['action'])
+        oid = request.get('observed_oid') or (request.get('reply') or {}).get('oid')
+        fills = state.get('external_activity', {}).get('accounts', {}).get(account, {}).get('fills', [])
+        known = [f for f in fills if f['account'] == account and f['symbol'] == symbol
+                 and f['oid'] == oid and f['at_ms'] >= request['attempt_at_ms']
+                 and f['side'] == ('B' if expected['b'] else 'A')]
+        quantity = sum((Decimal(f['quantity']) for f in known), Decimal(0))
+        # A later stream delta may complete the originally partial fill before
+        # its REST proof arrives. That must not remove inquiry eligibility.
+        if 0 < quantity <= Decimal(expected['s']):
+            eligible.add(rid)
+    return eligible
+
+
+def manual_history_accounts(state):
+    return {state['requests'][rid]['proposal']['account'] for rid in manual_history_requests(state)}
+
+
+def _manual_retention_cursor(state, account, cursor):
+    cards = {cid for h in state.get('external_activity',{}).get('human_managed',{}).values()
+             if h['account']==account for cid in h.get('card_ids',[])}
+    if not cards:
+        return cursor
+    starts = [r['attempt_at_ms'] for r in state['requests'].values()
+              if r['proposal']['account']==account and r['proposal']['leg']=='ENTRY'
+              and r['phase']!='ABORTED_UNSENT' and r['proposal']['card_id'] in cards]
+    return min([cursor]+starts) if starts else cursor
+
+
+def _history_facts(previous, raw, account, start, end):
+    prior = [{k:v for k,v in f.items() if k != 'origin'}
+             for f in previous if start <= f['at_ms'] <= end]
+    symbols = {r['coin'] for r in raw} | {f['symbol'] for f in prior}
+    facts = [f for symbol in symbols
+             for f in sync.merge_fills([f for f in prior if f['symbol'] == symbol],
+                                      raw, account, symbol, start, end)]
+    if len(facts) > MAX_RECENT_FILLS:
+        raise ExternalActivityError('EXTERNAL_HISTORY_CAPACITY_REVIEW_REQUIRED')
+    return sorted(facts, key=lambda f:(f['at_ms'], f['fill_id']))
+
+
+def _manual_gap_history(state, legacy, account, before, reader, start, end):
+    """Two bounded account-wide fill observations, never a fabricated anchor.
+
+    Unsaturated startTime=1 pages prove fill coverage under the documented
+    page limits and latest-10,000 retention. Stay below 500 rows as well as
+    times, conservatively satisfying the general 500-element wording and the
+    fill-specific 2,000-row limit. This inference
+    applies only to fills, never funding or order-action history. A short page
+    for merely the missing interval cannot establish this proof.
+    """
+    body = dict(type='userFillsByTime', user=account, startTime=1,
+                endTime=end, aggregateByTime=False)
+    plan = getattr(type(reader), 'observation_batch', None)
+    from contextlib import nullcontext
+    context = reader.observation_batch([body, body]) if callable(plan) else nullcontext()
+    started = time.monotonic()
+    with context:
+        passes = []
+        for _ in range(2):
+            # Provider starts this optional two-read plan within the first five
+            # seconds. PublicReader's unchanged per-read timeout is four seconds;
+            # reserve enough of the original 15-second observation for read two.
+            if time.monotonic()-started > 4:
+                raise sync.SyncError('EXTERNAL_HISTORY_OBSERVATION_DEFERRED')
+            raw = reader.read('userFillsByTime', account, start=1, end=end)
+            if not isinstance(raw, list) or any(not isinstance(r, dict) for r in raw):
+                raise sync.SyncError('INVALID_FILL_HISTORY')
+            # Do not paginate this proof: saturation cannot exclude the
+            # account-wide retention cap, even after splitting into time ranges.
+            if len(raw) >= 500 or len({life.moment(r.get('time')) for r in raw}) >= 500:
+                raise sync.SyncError('EXTERNAL_LIFETIME_HISTORY_SATURATED')
+            facts = _history_facts(before.get('fills', []), raw, account, 1, end)
+            if len({f['fill_id'] for f in facts}) != len(facts):
+                raise ExternalActivityError('EXTERNAL_FILL_FACT_CHANGED')
+            passes.append((raw, facts))
+        if passes[0][1] != passes[1][1]:
+            raise sync.SyncError('OBSERVATION_CHANGED_RETRY')
+    if time.monotonic()-started > 8:
+        raise sync.SyncError('OBSERVATION_TOO_SLOW')
+    return passes[0][0], 'ACCOUNT_LIFETIME_TWO_UNSATURATED_PASSES', 1
+
+
+def owned_request_evidence(state, account, samples, observed, *, now_ms, errors=None, prior_fills=()):
     """Resolve exact bot submissions without assigning external fills to them."""
     from . import filled_quantity_dispatch as wire
     result={}
@@ -175,7 +274,8 @@ def owned_request_evidence(state, account, samples, observed, *, now_ms):
             fills={f['fill_id']:{k:f[k] for k in ('fill_id','quantity','price','at_ms')}
                    for f in list(trade['entry_fills'].values())+list(trade['exit_fills'].values())
                    if f['order_id']==oid}
-            for f in observed['fills']:
+            retained = list(prior_fills) if managed(state,account,p['symbol']) else []
+            for f in retained+observed['fills']:
                 if f['oid']!=oid:continue
                 value={k:f[k] for k in ('fill_id','quantity','price','at_ms')}
                 if (f['account']!=account or f['symbol']!=p['symbol']
@@ -198,7 +298,18 @@ def owned_request_evidence(state, account, samples, observed, *, now_ms):
             else:
                 if opened is not None or not observed['history_complete']:continue
                 final='FILLED' if status=='filled' else 'CANCELED' if status in sync.CANCELED else 'REJECTED'
-                if final=='FILLED' and quantity!=Decimal(expected['s']) or final=='REJECTED' and quantity:continue
+                if final=='FILLED' and quantity!=Decimal(expected['s']):
+                    if errors is not None:
+                        raw_size=envelope['order'].get('sz')
+                        size=life.number(raw_size) if raw_size is not None else None
+                        residual=(size is not None and size>0
+                                  and Decimal(expected['s'])-size==quantity)
+                        errors[rid]=dict(code=('BOT_TERMINAL_REMAINDER_UNPROVEN' if residual
+                            else 'BOT_FILLED_QUANTITY_MISMATCH'),status=final,
+                            requested_quantity=expected['s'],observed_quantity=life.text(quantity),
+                            reported_size=raw_size,oid=oid,observed_at_ms=now_ms)
+                    continue
+                if final=='REJECTED' and quantity:continue
             result[rid]=dict(oid=oid,cloid=expected['c'],wire_order=deepcopy(expected),status=final,
                             at_ms=envelope['statusTimestamp'],fills=sorted(fills.values(),key=lambda f:(f['at_ms'],f['fill_id'])))
             if cancel:result[rid]['cancel_observation']=True
@@ -214,7 +325,8 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
     background reader for an otherwise uncovered account history interval.
     """
     old = state.get('external_activity', {}).get('accounts', {})
-    result = dict(version=VERSION, accounts={}, human_managed={}, owned_request_observations={})
+    result = dict(version=VERSION, accounts={}, human_managed={}, owned_request_observations={},
+                  owned_request_errors={})
     for account, inventory in inventories.items():
         all_samples = [v for k,v in cache.samples[0].items() if k[0]=='orderStatus' and k[1]==account]
         ids, cloids = ownership(state, legacy, account, all_samples)
@@ -282,13 +394,24 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                  before.get('history_started_at_ms',max(1,now_ms-sync.OVERLAP_MS)))
         due = cursor is None or now_ms-cursor >= HISTORY_INTERVAL_MS
         raw_fills = cached_history(cache, account, start, now_ms)
+        manual_gap = account in manual_history_accounts(state) and now_ms-start > sync.DAY_MS
+        if manual_gap:
+            # A cached narrow page is not a retention certificate for this old
+            # account interval. Only the dedicated bounded proof may advance it.
+            raw_fills = None
         if raw_fills is None and due and fill_reader is not None:
             # Bounded recovery: never silently advance over an unobserved gap.
-            if now_ms-start > sync.DAY_MS:
+            if now_ms-start > sync.DAY_MS and not manual_gap:
                 observed['history_error'] = 'EXTERNAL_HISTORY_GAP_REQUIRES_REVIEW'
             else:
                 try:
-                    raw_fills = sync.history(fill_reader, account, start, now_ms)
+                    if manual_gap:
+                        raw_fills, kind, beginning = _manual_gap_history(
+                            state, legacy, account, before, fill_reader, start, now_ms)
+                        observed['history_proof'] = dict(kind=kind,start_ms=beginning,end_ms=now_ms)
+                        raw_fills = [r for r in raw_fills if start <= r['time'] <= now_ms]
+                    else:
+                        raw_fills = sync.history(fill_reader, account, start, now_ms)
                 except (ValueError, OSError) as exc:
                     code = str(exc)
                     observed['history_error'] = code if code and len(code)<140 and all(c.isupper() or c.isdigit() or c=='_' for c in code) else 'EXTERNAL_HISTORY_UNAVAILABLE'
@@ -297,14 +420,7 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                 # Buffered stream executions are individual immutable facts.
                 # A completed REST interval covering one must reproduce it;
                 # an empty/delayed response cannot silently advance past it.
-                prior_facts = [{k:v for k,v in f.items() if k!='origin'}
-                               for f in before.get('fills', []) if start <= f['at_ms'] <= now_ms]
-                symbols = {r['coin'] for r in raw_fills} | {f['symbol'] for f in prior_facts}
-                normalized = [f for symbol in symbols
-                              for f in sync.merge_fills([f for f in prior_facts if f['symbol']==symbol],
-                                                       raw_fills, account, symbol, start, now_ms)]
-                if len(normalized) > MAX_RECENT_FILLS:
-                    raise ExternalActivityError('EXTERNAL_HISTORY_CAPACITY_REVIEW_REQUIRED')
+                normalized = _history_facts(before.get('fills', []), raw_fills, account, start, now_ms)
                 for fill in normalized:
                     fill['origin'] = 'BOT' if fill['oid'] in ids else 'UNATTRIBUTED' if uncertain else 'EXTERNAL'
                     if fill['origin'] == 'EXTERNAL' and fill['symbol'] in active:
@@ -319,6 +435,11 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
                             result['human_managed'][lane(account, fill['symbol'])] = dict(
                                 account=account, symbol=fill['symbol'], at_ms=now_ms,
                                 reason='EXTERNAL_FILL', fill_id=fill['fill_id'])
+                retention_cursor = _manual_retention_cursor(state,account,now_ms)
+                if retention_cursor != now_ms:
+                    # Detect capacity/conflict before the journal reducer, so
+                    # one manual account cannot abort independent protection.
+                    _merge_recent_fills(before.get('fills',[]),normalized,retention_cursor)
                 observed.update(fills=normalized, history_complete=True, history_cursor_ms=now_ms)
             except (ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, sync.SyncError) and str(exc) in (
@@ -331,7 +452,10 @@ def observe(state, legacy, inventories, cache, *, now_ms, fill_reader=None):
             old=prior_fills.get(f['fill_id'])
             if old is not None and {k:v for k,v in old.items() if k!='origin'}!={k:v for k,v in f.items() if k!='origin'}:
                 raise ExternalActivityError('EXTERNAL_FILL_FACT_CHANGED')
-        proofs=owned_request_evidence(state,account,all_samples,observed,now_ms=now_ms)
+        proofs=owned_request_evidence(state,account,all_samples,observed,now_ms=now_ms,
+            errors=result['owned_request_errors'],prior_fills=([f for f in before.get('fills',[])
+                if f['at_ms'] <= before['history_cursor_ms']]
+                if type(before.get('history_cursor_ms')) is int and observed['history_complete'] else ()))
         result['owned_request_observations'].update(proofs)
         remaining_uncertain=any(r['proposal']['account']==account and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
                                 and rid not in proofs for rid,r in state['requests'].items())
@@ -504,7 +628,11 @@ def apply(state, observation):
                       at_ms=current['observed_at_ms'], status='NO_LONGER_OPEN_OUTCOME_UNASSIGNED'))
         old_fills = {f['fill_id']:f for f in prior.get('fills', [])}
         cursor = current.get('history_cursor_ms') or prior.get('history_cursor_ms') or 0
-        retained = _merge_recent_fills(prior.get('fills', []), current['fills'], cursor)
+        # Preserve canonical entry costs and manual activity until the existing
+        # two-observation closure stores its durable snapshot. Advancing a long
+        # history cursor must not erase those facts before retain_fees runs.
+        retention_cursor = _manual_retention_cursor(state,account,cursor)
+        retained = _merge_recent_fills(prior.get('fills', []), current['fills'], retention_cursor)
         for fill in current['fills']:
             previous = old_fills.get(fill['fill_id'])
             if fill['origin'] == 'EXTERNAL' and (previous is None or previous['origin'] != 'EXTERNAL'):
@@ -604,6 +732,10 @@ def apply(state, observation):
         value['events'] = value['events'][-MAX_EVENTS:]
         value['evicted_events'] += discarded
     value['observation_errors']=deepcopy(observation.get('errors',{}))
+    errors={rid:deepcopy(row) for rid,row in value.get('request_observation_errors',{}).items()
+            if rid in state['requests'] and state['requests'][rid]['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+    errors.update(deepcopy(observation.get('owned_request_errors',{})))
+    value['request_observation_errors']=errors
 
 
 def closure_verified(trade):

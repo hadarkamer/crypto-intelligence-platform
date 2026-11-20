@@ -1,0 +1,133 @@
+{
+  "attempt_at_ms": 1793548865789,
+  "distinct_fill_times_each_pass": [
+    79,
+    79
+  ],
+  "external_history_cursor_ms": 1792071386631,
+  "external_history_started_at_ms": 1792053734816,
+  "full_raw_fills_identical_between_passes": true,
+  "full_raw_fills_sha256_each_pass": "5656daf1481c1783a65719bcf1ae735a81bc2959dc97e344a03d11db38884eaa",
+  "hype_fills_after_request": [
+    {
+      "cloid": "0x8d26d1fc3d2c50ea92c4cc4c004a7c8c",
+      "closedPnl": "0.0",
+      "coin": "HYPE",
+      "crossed": true,
+      "dir": "Open Short",
+      "fee": "0.005938",
+      "feeToken": "USDC",
+      "hash": "0xb02bdf8ec4e0c2bdb1a50447d844eb02017f00745fe3e18f53f48ae183e49ca8",
+      "oid": 591986903854,
+      "px": "87.975",
+      "side": "A",
+      "startPosition": "0.0",
+      "sz": "0.15",
+      "tid": 468682583552118,
+      "time": 1793548867852,
+      "twapId": null
+    },
+    {
+      "cloid": "0x8d26d1fc3d2c50ea92c4cc4c004a7c8c",
+      "closedPnl": "0.0",
+      "coin": "HYPE",
+      "crossed": true,
+      "dir": "Open Short",
+      "fee": "0.155976",
+      "feeToken": "USDC",
+      "hash": "0xb02bdf8ec4e0c2bdb1a50447d844eb02017f00745fe3e18f53f48ae183e49ca8",
+      "oid": 591986903854,
+      "px": "87.973",
+      "side": "A",
+      "startPosition": "-0.15",
+      "sz": "3.94",
+      "tid": 65596426522445,
+      "time": 1793548867852,
+      "twapId": null
+    },
+    {
+      "closedPnl": "25.39495",
+      "coin": "HYPE",
+      "crossed": true,
+      "dir": "Close Short",
+      "fee": "0.061809",
+      "feeToken": "USDC",
+      "hash": "0x62c0733851c06e02643a0448b413210207ef001decc38cd406891e8b10c447ed",
+      "oid": 603910608725,
+      "px": "74.246",
+      "side": "B",
+      "startPosition": "-4.09",
+      "sz": "1.85",
+      "tid": 639304881039428,
+      "time": 1794573302241,
+      "twapId": null
+    },
+    {
+      "closedPnl": "30.73504",
+      "coin": "HYPE",
+      "crossed": true,
+      "dir": "Close Short",
+      "fee": "0.074846",
+      "feeToken": "USDC",
+      "hash": "0x62c0733851c06e02643a0448b413210207ef001decc38cd406891e8b10c447ed",
+      "oid": 603910608725,
+      "px": "74.252",
+      "side": "B",
+      "startPosition": "-2.24",
+      "sz": "2.24",
+      "tid": 486023287930271,
+      "time": 1794573302241,
+      "twapId": null
+    }
+  ],
+  "order_status_both_passes": {
+    "order": {
+      "order": {
+        "children": [],
+        "cloid": "0x8d26d1fc3d2c50ea92c4cc4c004a7c8c",
+        "coin": "HYPE",
+        "isPositionTpsl": false,
+        "isTrigger": false,
+        "limitPx": "87.94",
+        "oid": 591986903854,
+        "orderType": "Limit",
+        "origSz": "5.42",
+        "reduceOnly": false,
+        "side": "A",
+        "sz": "1.33",
+        "tif": "Gtc",
+        "timestamp": 1793548867852,
+        "triggerCondition": "N/A",
+        "triggerPx": "0.0"
+      },
+      "status": "filled",
+      "statusTimestamp": 1793548867852
+    },
+    "status": "order"
+  },
+  "original_order_action": {
+    "grouping": "na",
+    "orders": [
+      {
+        "a": 159,
+        "b": false,
+        "c": "0x8d26d1fc3d2c50ea92c4cc4c004a7c8c",
+        "p": "87.94",
+        "r": false,
+        "s": "5.42",
+        "t": {
+          "limit": {
+            "tif": "Gtc"
+          }
+        }
+      }
+    ],
+    "type": "order"
+  },
+  "pre_send_checkpoint_ms": 1793548862738,
+  "proof_fixed_end_ms": 1795183911441,
+  "unaggregated_account_fill_count_each_pass": [
+    113,
+    113
+  ]
+}

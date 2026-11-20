@@ -560,15 +560,19 @@ class LiveEvidenceProvider:
             entry_reads[account]=value
             return deepcopy(value)
 
-    def _observe_external(self,state,legacy,inventories,cache,now,*,fill_reader=None):
+    def _observe_external(self,state,legacy,inventories,cache,now,*,fill_reader=None,history_accounts=None):
         result=dict(version=external.VERSION,accounts={},human_managed=deepcopy(
-            state.get('external_activity',{}).get('human_managed',{})),errors={},owned_request_observations={})
+            state.get('external_activity',{}).get('human_managed',{})),errors={},owned_request_observations={},
+            owned_request_errors={})
         for account,inventory in inventories.items():
             try:
-                value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,fill_reader=fill_reader)
+                reader=(fill_reader if (history_accounts is None or account in history_accounts)
+                        and 0<=self.now()-now<5000 else None)
+                value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,fill_reader=reader)
                 result['accounts'].update(value['accounts'])
                 result['human_managed'].update(value['human_managed'])
                 result['owned_request_observations'].update(value['owned_request_observations'])
+                result['owned_request_errors'].update(value.get('owned_request_errors',{}))
             except (ValueError,KeyError,TypeError) as exc:
                 result['errors'][account]=_error(exc)
         return result
@@ -1074,12 +1078,18 @@ class LiveEvidenceProvider:
             and runtime._lane(t['account'],t['symbol']) not in result.get('external_observation',{}).get('human_managed',{})
             for t in price_state['trades'].values())
         history_reader=None
+        manual_requests=external.manual_history_requests(state)
+        manual_history={state['requests'][rid]['proposal']['account'] for rid in manual_requests}
+        pending_requests={rid for rid,r in state['requests'].items()
+                          if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+        history_accounts=manual_history if unresolved else None
         if (state.get('external_activity') and not entry_selected and not pending_protection
-                and not unresolved and not waiting and 0<=self.now()-now<5000):
+                and not (pending_requests-manual_requests) and not waiting and 0<=self.now()-now<5000):
             history_reader=self._public_reader or sync.PublicReader(budget=self.budget,priority='background')
             # Observe the otherwise inactive account at the existing quiet
             # account cadence; do not delay first protection for this scan.
             for account in sorted(set(state['routes'].values())-set(inventories)):
+                if history_accounts is not None and account not in history_accounts:continue
                 feed=getattr(self.safety,'feed',None)
                 dirty=getattr(feed,'dirty_symbols',None)
                 if not callable(dirty) or not dirty(account):continue
@@ -1088,7 +1098,8 @@ class LiveEvidenceProvider:
                     result['account_inventory_at_ms'][account]=now
                 except (ValueError,OSError):
                     continue
-        result['external_observation']=self._observe_external(state,legacy,inventories,cache,now,fill_reader=history_reader)
+        result['external_observation']=self._observe_external(state,legacy,inventories,cache,now,
+            fill_reader=history_reader,history_accounts=history_accounts)
         # A completed history scan must agree with already saved stream facts.
         # A conflicting account cannot regain entry permission; an explicitly
         # deferred owned lane stays blocked until its evidence is reconciled.
