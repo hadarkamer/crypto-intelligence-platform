@@ -9,22 +9,36 @@ PG_STARTED=false
 PG_BIN="$(pg_config --bindir)"
 PGDATA="$WORK/pgdata"
 SOCKET="$WORK/socket"
+TLS_DIR="$WORK/tls"
+TLS_NSS_DB="$HOME/.pki/nssdb"
+TLS_NSS_MARKER="$WORK/tls-nss-owned"
 cleanup() {
   code=$?
   trap - EXIT INT TERM
   set +e
   clean=true
+  nss_clean=true
   if [ "$PG_STARTED" = true ] || [ -f "$PGDATA/postmaster.pid" ]; then
     "$PG_BIN/pg_ctl" -D "$PGDATA" -m immediate -w -t 10 stop >/dev/null 2>&1 || clean=false
   fi
   if "$PG_BIN/pg_ctl" -D "$PGDATA" status >/dev/null 2>&1; then clean=false; fi
   if [ -f "$PGDATA/postmaster.pid" ]; then clean=false; fi
+  # The temporary root is trusted only by this job's newly-created NSS DB.
+  # Never remove or edit an NSS DB that existed before this experiment.
+  if [ -f "$TLS_NSS_MARKER" ]; then
+    if [ -d "$TLS_NSS_DB" ] && [ ! -L "$TLS_NSS_DB" ] && \
+       [ "$(stat -c %i "$TLS_NSS_DB")" = "$(cat "$TLS_NSS_MARKER")" ]; then
+      rm -rf -- "$TLS_NSS_DB"
+    else nss_clean=false; fi
+    if [ -e "$TLS_NSS_DB" ]; then nss_clean=false; else rm -f -- "$TLS_NSS_MARKER"; fi
+  fi
+  if [ "$nss_clean" != true ]; then clean=false; fi
   # Only owned dummy cluster, fixtures and generated runtime are removed here.
-  rm -rf -- "$PGDATA" "$SOCKET" "$WORK/private" "$ROOT/standalone_collector/runtime"
-  for path in "$PGDATA" "$SOCKET" "$WORK/private" "$ROOT/standalone_collector/runtime"; do
+  rm -rf -- "$PGDATA" "$SOCKET" "$WORK/private" "$TLS_DIR" "$ROOT/standalone_collector/runtime"
+  for path in "$PGDATA" "$SOCKET" "$WORK/private" "$TLS_DIR" "$ROOT/standalone_collector/runtime"; do
     if [ -e "$path" ]; then clean=false; fi
   done
-  printf 'SESSION_PATH_CLEANUP {"postgres_stopped":%s,"owned_data_removed":%s,"last_stage":"%s"}\n' "$clean" "$clean" "$STAGE"
+  printf 'SESSION_PATH_CLEANUP {"postgres_stopped":%s,"owned_data_removed":%s,"temporary_nss_trust_removed":%s,"last_stage":"%s"}\n' "$clean" "$clean" "$nss_clean" "$STAGE"
   if [ "$clean" != true ]; then code=1; fi
   exit "$code"
 }
@@ -67,6 +81,48 @@ print('SESSION_PATH_PRELAUNCH '+json.dumps({'python':sys.version.split()[0], 'pa
 PY
 test -z "$(ip route show)"
 test -z "$(ip -6 route show default)"
+
+STAGE=dummy_tls
+command -v openssl >/dev/null
+command -v certutil >/dev/null
+test ! -e "$TLS_DIR"
+test ! -e "$TLS_NSS_DB"
+test ! -L "$TLS_NSS_DB"
+test ! -e "$TLS_NSS_MARKER"
+mkdir -m 700 "$TLS_DIR"
+# Certificate creation is entirely local. The CA is short-lived and limited
+# to the dummy server names; no OS trust store or service is modified.
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+  -keyout "$TLS_DIR/ca.key" -out "$TLS_DIR/ca.pem" \
+  -subj '/CN=CoinGlass isolated dummy CA' \
+  -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' >"$TLS_DIR/setup.log" 2>&1
+openssl req -new -newkey rsa:2048 -nodes -sha256 \
+  -keyout "$TLS_DIR/server.key" -out "$TLS_DIR/server.csr" \
+  -subj '/CN=www.coinglass.com' >>"$TLS_DIR/setup.log" 2>&1
+cat >"$TLS_DIR/server.ext" <<'TLS_EXT'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:www.coinglass.com,DNS:capi.coinglass.com
+TLS_EXT
+openssl x509 -req -sha256 -days 1 -in "$TLS_DIR/server.csr" \
+  -CA "$TLS_DIR/ca.pem" -CAkey "$TLS_DIR/ca.key" -CAcreateserial \
+  -extfile "$TLS_DIR/server.ext" -out "$TLS_DIR/server.pem" >>"$TLS_DIR/setup.log" 2>&1
+openssl verify -CAfile "$TLS_DIR/ca.pem" -verify_hostname www.coinglass.com \
+  "$TLS_DIR/server.pem" >>"$TLS_DIR/setup.log" 2>&1
+openssl verify -CAfile "$TLS_DIR/ca.pem" -verify_hostname capi.coinglass.com \
+  "$TLS_DIR/server.pem" >>"$TLS_DIR/setup.log" 2>&1
+rm -f -- "$TLS_DIR/ca.key" "$TLS_DIR/server.csr" "$TLS_DIR/ca.srl"
+mkdir -p "$(dirname -- "$TLS_NSS_DB")"
+mkdir -m 700 "$TLS_NSS_DB"
+stat -c %i "$TLS_NSS_DB" >"$TLS_NSS_MARKER"
+certutil -N --empty-password -d "sql:$TLS_NSS_DB" >>"$TLS_DIR/setup.log" 2>&1
+certutil -A -d "sql:$TLS_NSS_DB" -n 'coinglass-isolated-dummy-ca' \
+  -t 'C,,' -i "$TLS_DIR/ca.pem" >>"$TLS_DIR/setup.log" 2>&1
+certutil -L -d "sql:$TLS_NSS_DB" -n 'coinglass-isolated-dummy-ca' >/dev/null
+export CG_TEST_TLS_DIR="$TLS_DIR"
+printf 'SESSION_PATH_TLS {"temporary_nss_trust":true,"system_trust_changed":false,"certificate_hosts_verified":true}\n'
 
 STAGE=runtime_generation
 python - "$ROOT" <<'PY'

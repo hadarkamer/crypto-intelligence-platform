@@ -21,6 +21,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import sysconfig
@@ -280,6 +281,9 @@ def install_process_fixture(config):
         dummy_only_exception=True,internal_sandbox_disabled_observed=False,
         failure_injected=False)
     html=html_fixture()
+    tls_dir=Path(config['tls_dir']).resolve(strict=True)
+    check(tls_dir==Path(config['evidence']).resolve().parents[1]/'tls','dummy_tls_path_invalid')
+    check(tls_dir.stat().st_mode&0o077==0,'dummy_tls_path_permissions')
     receiver_expected={c['name']:c for c in state(number+1)['cookies']}
     receipts=[]
     class Handler(BaseHTTPRequestHandler):
@@ -290,23 +294,48 @@ def install_process_fixture(config):
             if self.path!='/seed':
                 host=self.headers.get('Host','').split(':',1)[0]
                 parts=dict(item.strip().split('=',1) for item in self.headers.get('Cookie','').split(';') if '=' in item)
-                wanted={n:c['value'] for n,c in receiver_expected.items() if not c['secure']
+                secure_transport=isinstance(self.connection,ssl.SSLSocket)
+                wanted={n:c['value'] for n,c in receiver_expected.items() if (secure_transport or not c['secure'])
                     and (c['domain'].startswith('.') or c['domain']==host)
                     and self.path.startswith(c['path'])}
-                receipts.append({'host_match':host in ('www.coinglass.com','capi.coinglass.com'),
-                    'cookies_match':parts==wanted,'secure_absent':COOKIE not in parts and 'fixture_none' not in parts})
+                receipts.append({'https':secure_transport,
+                    'host_match':host in ('www.coinglass.com','capi.coinglass.com'),
+                    'cookies_match':parts==wanted,'secure_rule_enforced':
+                    ((parts.get(COOKIE)==receiver_expected[COOKIE]['value']
+                      and parts.get('fixture_none')==receiver_expected['fixture_none']['value'])
+                     if secure_transport else COOKIE not in parts and 'fixture_none' not in parts)})
                 parts= wanted=None
             body=b'<!doctype html><title>dummy cookie receiver</title>'
             self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)))
             self.end_headers();self.wfile.write(body)
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
-    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    tls_server=None
+    try:
+        tls_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version=ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(tls_dir/'server.pem',tls_dir/'server.key')
+        class TLSHTTPServer(ThreadingHTTPServer):
+            def get_request(self):
+                connection,address=super().get_request()
+                connection.settimeout(2)
+                try:return tls_context.wrap_socket(connection,server_side=True),address
+                except BaseException:
+                    connection.close();raise
+        tls_server=TLSHTTPServer(('127.0.0.1',0),Handler)
+    except BaseException:
+        server.server_close()
+        if tls_server is not None:tls_server.server_close()
+        raise
+    servers=(server,tls_server)
+    threads=[threading.Thread(target=item.serve_forever,daemon=True) for item in servers]
+    for thread in threads:thread.start()
     receiver_closed=False
     def close_receiver():
         nonlocal receiver_closed
         if receiver_closed:return
-        server.shutdown();server.server_close();thread.join(timeout=1)
-        receiver_closed=True;base['dummy_server_closed']=not thread.is_alive()
+        for item,thread in zip(servers,threads):
+            item.shutdown();item.server_close();thread.join(timeout=1)
+        receiver_closed=True;base['dummy_server_closed']=all(not thread.is_alive() for thread in threads)
         check(base['dummy_server_closed'],'dummy_server_thread_leaked')
     atexit.register(close_receiver)
     def browser_processes():
@@ -316,6 +345,7 @@ def install_process_fixture(config):
             if not argv or Path(os.fsdecode(argv[0])).name not in ('chrome','chromium','headless_shell','chrome-headless-shell'):continue
             browser_pids.add(pid)
             check(not any(arg in argv for arg in (b'--disable-web-security',b'--disable-site-isolation-trials',b'--allow-file-access-from-files')),'web_security_disabled')
+            check(not any(arg.startswith((b'--ignore-certificate-errors',b'--allow-insecure-localhost')) for arg in argv),'tls_verification_disabled')
             base['internal_sandbox_disabled_observed'] |= b'--no-sandbox' in argv
             for arg in argv:
                 if arg.startswith(b'--user-data-dir='):
@@ -325,7 +355,7 @@ def install_process_fixture(config):
     def launch(owner,*args,**kwargs):
         check(owner.name=='chromium' and kwargs.get('headless') is True and not browsers,'unexpected_launch')
         kwargs['args']=[*kwargs.get('args',[]),'--disable-background-networking','--disable-component-update',
-            '--no-first-run','--host-resolver-rules=MAP www.coinglass.com 127.0.0.1, MAP capi.coinglass.com 127.0.0.1, MAP * ~NOTFOUND']
+            '--no-first-run','--host-resolver-rules=MAP www.coinglass.com 127.0.0.1, MAP capi.coinglass.com 127.0.0.1, MAP certificate-mismatch.invalid 127.0.0.1, MAP * ~NOTFOUND']
         value=original_launch(owner,*args,**kwargs)
         browsers.append(value);base['browser_launches']+=1;base['chromium_version']=value.version
         check(value.version=='140.0.7339.16','chromium_version_mismatch')
@@ -333,6 +363,7 @@ def install_process_fixture(config):
         return value
     def context(owner,*args,**kwargs):
         check(not contexts and 'extra_http_headers' not in kwargs,'unexpected_context')
+        check(kwargs.get('ignore_https_errors',False) is False,'tls_verification_disabled')
         value=original_context(owner,*args,**kwargs)
         contexts.append(value);base['contexts']+=1
         check(same_state(kwargs.get('storage_state'),state(number)),'restored_attributes_changed')
@@ -364,8 +395,8 @@ def install_process_fixture(config):
         return value
     def check_cookie_receipt(value):
         # Source capture/persistence has already completed. This test-only page
-        # reaches a real HTTP server; no TLS, CORS or SameSite guard is disabled.
-        # Secure cookie HTTPS receipt is NOT claimed by this HTTP-only probe.
+        # reaches real local HTTP/HTTPS servers. Chromium performs its normal
+        # certificate checks against the temporary NSS trust installed by run.sh.
         raw_session=value.new_cdp_session(value.pages[0])
         try:raw=raw_session.send('Network.getCookies',{'urls':[PAGE_URL,ACCOUNT_URL,'https://www.coinglass.com/cookie-probe/receive']})['cookies']
         finally:raw_session.detach()
@@ -383,9 +414,14 @@ def install_process_fixture(config):
         try:
             probe=original_new_page(value)
             port=server.server_address[1]
+            tls_port=tls_server.server_address[1]
             allowed={f'http://{host}:{port}{path}' for host,path in (
                 ('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
                 ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive'))}
+            allowed|={f'https://{host}:{tls_port}{path}' for host,path in (
+                ('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
+                ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive'),
+                ('certificate-mismatch.invalid','/cookie-probe/receive'))}
             def local_only(route):
                 if route.request.url in allowed and route.request.method=='GET':route.continue_()
                 else:route.abort()
@@ -394,12 +430,34 @@ def install_process_fixture(config):
             for host,path in (('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
                               ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive')):
                 original_goto(probe,f'http://{host}:{port}{path}',wait_until='load',timeout=3000)
-            check(len(receipts)==3 and all(all(r.values()) for r in receipts),'actual_server_cookie_mismatch')
+            check(len(receipts)==3 and all(not r['https'] and all(v for k,v in r.items() if k!='https') for r in receipts),'actual_server_cookie_mismatch')
             visible=probe.evaluate('document.cookie')
             check('fixture_missing=' not in visible,'httponly_cookie_visible')
             base['http_receiving_server_verified']=True;base['http_secure_cookies_withheld']=True
             base['http_host_path_samesite_verified']=True;base['httponly_browser_enforced']=True
-            base['https_secure_receiving_server_verified']=False
+            # Establish HTTPS again so Strict cookies retain their actual
+            # schemeful-site behavior; attributes are never rewritten.
+            from playwright.sync_api import Error as PlaywrightError
+            for host,path in (('www.coinglass.com','/seed'),('www.coinglass.com','/cookie-probe/receive'),
+                              ('www.coinglass.com','/other'),('capi.coinglass.com','/cookie-probe/receive')):
+                response=original_goto(probe,f'https://{host}:{tls_port}{path}',wait_until='load',timeout=3000)
+                check(response is not None and response.status==200,'https_response_failed')
+                security=response.security_details()
+                check(security is not None and security.get('issuer')=='CoinGlass isolated dummy CA'
+                    and security.get('subjectName')=='www.coinglass.com','tls_peer_mismatch')
+            check(len(receipts)==6 and all(r['https'] and all(r.values()) for r in receipts[3:]),'https_server_cookie_mismatch')
+            visible=probe.evaluate('document.cookie')
+            check(COOKIE+'=' not in visible and 'fixture_none=' not in visible,'secure_httponly_cookie_visible')
+            # Same trusted certificate with a name absent from its SAN must be
+            # rejected before any HTTP request/cookie reaches the server.
+            rejected=False
+            try:original_goto(probe,f'https://certificate-mismatch.invalid:{tls_port}/cookie-probe/receive',wait_until='load',timeout=3000)
+            except PlaywrightError as error:rejected='net::ERR_CERT_COMMON_NAME_INVALID' in str(error)
+            check(rejected and len(receipts)==6,'hostname_validation_not_enforced')
+            base['https_secure_receiving_server_verified']=True
+            base['https_certificate_verified']=True
+            base['https_wrong_hostname_rejected']=True
+            base['tls_verification_bypassed']=False
         finally:
             if probe is not None:
                 probe.unroute('**/*',local_only);probe.close()
@@ -548,7 +606,8 @@ def main():
                 expected=1
             else:expected=number
             evidence=private/('cycle-'+str(number));evidence.mkdir(mode=0o700)
-            write_json(CONFIG,{'package':str(package),'evidence':str(evidence),'generation':expected,'failure':failure})
+            write_json(CONFIG,{'package':str(package),'evidence':str(evidence),'generation':expected,'failure':failure,
+                'tls_dir':os.environ['CG_TEST_TLS_DIR']})
             label='entry_'+str(number)
             entry=subprocess.Popen([sys.executable,'-B',str(package/'approved_entry.py'),'--'+mode],
                 cwd=ROOT,env={k:os.environ[k] for k in ('PATH','HOME','LANG','LC_CTYPE','PLAYWRIGHT_BROWSERS_PATH') if k in os.environ},
@@ -603,7 +662,8 @@ def main():
                 'restored_state_matches_expected_generation','raw_cdp_missing_samesite_preserved',
                 'playwright_readback_supplies_lax','explicit_samesite_preserved',
                 'http_receiving_server_verified','http_secure_cookies_withheld',
-                'http_host_path_samesite_verified','httponly_browser_enforced','dummy_server_closed')
+                'http_host_path_samesite_verified','httponly_browser_enforced','dummy_server_closed',
+                'https_secure_receiving_server_verified','https_certificate_verified','https_wrong_hostname_rejected')
             check(all(browser.get(k) is True for k in required),'browser_evidence_failed')
             check(all(browser.get(k)==1 for k in ('browser_launches','contexts','document_requests','account_requests','map_requests')),'browser_count_failed')
             check(receipt.get('session_persistence',{}).get('saved') is True,'session_persistence_failed')
