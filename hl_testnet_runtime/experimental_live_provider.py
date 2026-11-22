@@ -346,6 +346,8 @@ class LiveEvidenceProvider:
             if (p['account']!=account or p['symbol']!=symbol or p['action']['type']=='cancel'
                     or request['phase']=='ABORTED_UNSENT' or external.request_retired(state,request)):
                 continue
+            if proof.rejected_without_order(state, request, now_ms=self.now()):
+                continue  # Product-adjudicated no-order result has no OID or new lookup.
             order=wire.requested_order(p['action']);cloid=order['c']
             oid=request.get('observed_oid')
             prior=state['trades'][p['card_id']]['orders'].get(oid)

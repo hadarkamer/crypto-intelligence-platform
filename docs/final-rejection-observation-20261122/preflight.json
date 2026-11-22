@@ -1,0 +1,14 @@
+{
+  "checked_at_utc": "2026-11-22T17:56:42.575519+00:00",
+  "repository": "hadarkamer/crypto-intelligence-platform",
+  "candidate_parent": "f960377247db58225e4a2d056be892711bb4cdb6",
+  "candidate_parent_tree": "82e11012cf918d9240ee387096b4990b4d85dd22",
+  "live_manager": "e2c7de8a529b61c6f32d76756967d126e48e1219",
+  "live_manager_deploy": "dep-dc06jqqjnfac7393tcig",
+  "live_source": "21548c94382b5bbaaa16db7079f78162ba5f80ba",
+  "live_source_deploy": "dep-dc04b4ec6qcc73b3m1hg",
+  "manager_service": "srv-dakptbh594qs7395460g",
+  "branch": "fix/recovery-final-rejection-20261122",
+  "deployment_performed": false,
+  "production_mutations": 0
+}

@@ -1,0 +1,18 @@
+{
+  "at_utc": "2026-11-22T17:59:29.372486+00:00",
+  "modules": [
+    "hl_testnet_runtime.test_shared_market_filled_open",
+    "hl_testnet_runtime.test_experimental_shared_market.CapacityTests",
+    "hl_testnet_runtime.test_cycle_decision_durability",
+    "hl_testnet_runtime.test_runtime"
+  ],
+  "tests": 102,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "seconds": 0.41331385299963586,
+  "product_sha256": {
+    "hl_testnet_runtime/experimental_live_provider.py": "b2a430828b21b007c7a63b8b3b137a5105036c179cd164f7e0b6ad68a61e359c",
+    "hl_testnet_runtime/experimental_execution_evidence.py": "7aa315c4d4a92c5411965d2d737c1e42893e65926c199516eca19a4ed53aa955"
+  }
+}

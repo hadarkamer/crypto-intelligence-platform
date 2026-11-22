@@ -1,0 +1,74 @@
+{
+  "baseline_commit": "f960377247db58225e4a2d056be892711bb4cdb6",
+  "product_and_test_sha256": {
+    "experimental_execution_evidence.py": "7aa315c4d4a92c5411965d2d737c1e42893e65926c199516eca19a4ed53aa955",
+    "experimental_live_provider.py": "b2a430828b21b007c7a63b8b3b137a5105036c179cd164f7e0b6ad68a61e359c",
+    "test_final_rejection_waiting_postgres.py": "a30ba742fe6a32ac7fcbe13d221d7809e99632e37030f567887785359fef7582"
+  },
+  "current_suite": {
+    "tests": 23,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "log": "pg-final-rejection-acceptance.log",
+    "run": {
+      "started_at": "2026-11-22T17:59:33.966316+00:00",
+      "run_directory": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-iwixqiu5",
+      "command": [
+        "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-venv/bin/python",
+        "-m",
+        "unittest",
+        "-v",
+        "hl_testnet_runtime.test_final_rejection_waiting_postgres",
+        "hl_testnet_runtime.test_recovery_isolation_postgres",
+        "hl_testnet_runtime.test_manual_operational_close",
+        "hl_testnet_runtime.test_manual_operational_gates"
+      ],
+      "host": "127.0.0.1",
+      "database": "hl_journal_ci",
+      "port": 41503,
+      "psycopg_version": "3.2.3",
+      "production_connections": 0,
+      "postgres_version": "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 10.2.1 20210130 (Red Hat 10.2.1-11), 64-bit",
+      "finished_at": "2026-11-22T17:59:41.047134+00:00",
+      "command_exit_code": 0,
+      "server_stopped": true
+    }
+  },
+  "baseline": {
+    "tests": 2,
+    "passed": 1,
+    "expected_failures": 1,
+    "reason": "Certified rejected TP still blocks observation with RECOVERY_EXTRA_HISTORY_INQUIRY_REQUIRES_CHOICE",
+    "log": "baseline-final-rejection.log",
+    "run": {
+      "started_at": "2026-11-22T17:59:34.078473+00:00",
+      "run_directory": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-zah8vdfe",
+      "command": [
+        "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-venv/bin/python",
+        "-m",
+        "unittest",
+        "-v",
+        "hl_testnet_runtime.test_final_rejection_waiting_postgres"
+      ],
+      "host": "127.0.0.1",
+      "database": "hl_journal_ci",
+      "port": 47241,
+      "psycopg_version": "3.2.3",
+      "production_connections": 0,
+      "postgres_version": "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 10.2.1 20210130 (Red Hat 10.2.1-11), 64-bit",
+      "finished_at": "2026-11-22T17:59:35.495162+00:00",
+      "command_exit_code": 1,
+      "server_stopped": true
+    }
+  },
+  "assertions": [
+    "Actual authenticated entry -> entry fill -> observed STOP -> raw HTTPS TP rejection -> product _rejections -> WAITING -> full STOP fill -> complete ordinary observation -> CLOSED and RESOLVED",
+    "Three total wire attempts only: ENTRY, STOP, rejected TP; zero sends and zero CLOID inquiries after WAITING, including restarts",
+    "Recovery round, read allocations, sends and original deadline unchanged; no trader choice",
+    "Exact frozen fees 0.120795 and full formula accounting remain identical after restart and repeated evidence",
+    "Raw unadjudicated rejection stays OUTCOME_UNKNOWN/WAITING after STOP fill; no settlement or new send",
+    "11 existing PostgreSQL isolation/recovery cases and10 manual HYPE closure/gates pass"
+  ],
+  "scope": "Product PostgreSQL16.2 and real intake/provider/runtime/dispatch; raw venue, HTTP and signature boundaries controlled; no production I/O"
+}

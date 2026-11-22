@@ -1,0 +1,151 @@
+{
+  "version": "settled-no-oid-waiting-postgres-v1",
+  "production_requests": 0,
+  "tests": [
+    {
+      "test": "test_product_rejected_tp_allows_waiting_stop_completion_once",
+      "cycles": [
+        {
+          "started_ms": 1795239493508,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 122,
+          "confirmed_response_weight": 122,
+          "cpu_ms": 31.130221999999986,
+          "wall_ms": 63.423230999433144
+        },
+        {
+          "started_ms": 1795239521671,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 164,
+          "confirmed_response_weight": 65,
+          "cpu_ms": 30.136347000000008,
+          "wall_ms": 69.18070699975942
+        },
+        {
+          "started_ms": 1795239522297,
+          "elapsed_ms": 300,
+          "reads": 4,
+          "attempt_weight": 144,
+          "confirmed_response_weight": 45,
+          "cpu_ms": 38.40389799999999,
+          "wall_ms": 74.23115900019184
+        },
+        {
+          "started_ms": 1795239523597,
+          "elapsed_ms": 300,
+          "reads": 4,
+          "attempt_weight": 144,
+          "confirmed_response_weight": 45,
+          "cpu_ms": 25.292753,
+          "wall_ms": 53.71726800058241
+        },
+        {
+          "started_ms": 1795239528897,
+          "elapsed_ms": 150,
+          "reads": 2,
+          "attempt_weight": 22,
+          "confirmed_response_weight": 22,
+          "cpu_ms": 12.034402,
+          "wall_ms": 26.293576000171015
+        },
+        {
+          "started_ms": 1795242822949,
+          "elapsed_ms": 225,
+          "reads": 3,
+          "attempt_weight": 24,
+          "confirmed_response_weight": 24,
+          "cpu_ms": 15.291473999999972,
+          "wall_ms": 39.6299670001099
+        }
+      ],
+      "attempted_reads": 23,
+      "successful_reads": 23,
+      "conservative_attempt_weight": 620,
+      "confirmed_response_weight": 323,
+      "attempted_actions": 3,
+      "attempted_action_weight": 3,
+      "cpu_ms": 252.898195,
+      "wall_ms": 527.0116539995797,
+      "peak_rss_kib": 38188
+    },
+    {
+      "test": "test_raw_rejection_without_adjudication_remains_waiting_after_stop",
+      "cycles": [
+        {
+          "started_ms": 1795239493508,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 122,
+          "confirmed_response_weight": 122,
+          "cpu_ms": 27.280640999999996,
+          "wall_ms": 56.029958999715745
+        },
+        {
+          "started_ms": 1795239521671,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 164,
+          "confirmed_response_weight": 65,
+          "cpu_ms": 32.99083100000006,
+          "wall_ms": 67.67922499966517
+        },
+        {
+          "started_ms": 1795239522297,
+          "elapsed_ms": 300,
+          "reads": 4,
+          "attempt_weight": 144,
+          "confirmed_response_weight": 45,
+          "cpu_ms": 37.38911099999997,
+          "wall_ms": 77.92464700014534
+        },
+        {
+          "started_ms": 1795239582598,
+          "elapsed_ms": 150,
+          "reads": 2,
+          "attempt_weight": 22,
+          "confirmed_response_weight": 22,
+          "cpu_ms": 16.908045999999956,
+          "wall_ms": 42.14150600000721
+        },
+        {
+          "started_ms": 1795242822949,
+          "elapsed_ms": 150,
+          "reads": 2,
+          "attempt_weight": 22,
+          "confirmed_response_weight": 22,
+          "cpu_ms": 12.707946999999997,
+          "wall_ms": 27.639827999337285
+        },
+        {
+          "started_ms": 1795242828099,
+          "elapsed_ms": 150,
+          "reads": 2,
+          "attempt_weight": 22,
+          "confirmed_response_weight": 22,
+          "cpu_ms": 9.610085000000046,
+          "wall_ms": 23.0005319999691
+        },
+        {
+          "started_ms": 1795242833249,
+          "elapsed_ms": 150,
+          "reads": 2,
+          "attempt_weight": 22,
+          "confirmed_response_weight": 22,
+          "cpu_ms": 9.89054300000003,
+          "wall_ms": 21.10231900041981
+        }
+      ],
+      "attempted_reads": 22,
+      "successful_reads": 22,
+      "conservative_attempt_weight": 518,
+      "confirmed_response_weight": 320,
+      "attempted_actions": 3,
+      "attempted_action_weight": 3,
+      "cpu_ms": 167.330657,
+      "wall_ms": 390.97001899972383,
+      "peak_rss_kib": 38444
+    }
+  ]
+}

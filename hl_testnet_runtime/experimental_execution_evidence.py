@@ -18,6 +18,41 @@ class EvidenceError(ValueError):
     pass
 
 
+def rejected_without_order(state, request, *, now_ms):
+    """Recognize the existing atomic product rejection, never a bare reply.
+
+    `_rejections` persists the terminal request and its matching event only
+    after checking the reply digest, exact no-order lookup and full ownership.
+    That durable adjudication has no exchange OID to collect. It remains valid
+    after restart without re-querying its CLOID or refreshing its original time.
+    Rejected modifications leave the original order owned by its own request.
+    """
+    proposal = request.get('proposal', {})
+    trade = state['trades'].get(proposal.get('card_id'))
+    reply = request.get('reply') or {}
+    attempt = request.get('attempt_at_ms')
+    if (state['requests'].get(request.get('request_id')) != request
+            or request.get('phase') != 'OBSERVED'
+            or request.get('terminal_state') != 'REJECTED_NO_ORDER'
+            or 'observed_oid' not in request or request['observed_oid'] is not None
+            or reply.get('state') != 'REJECTED' or 'oid' not in reply or reply['oid'] is not None
+            or reply.get('code') not in set(wire.recovery.ERRORS.values()) | {'OTHER_REJECTION'}
+            or proposal.get('action', {}).get('type') not in ('order', 'batchModify')
+            or trade is None or trade.get('cid') != proposal.get('card_id')
+            or trade.get('account') != proposal.get('account')
+            or trade.get('symbol') != proposal.get('symbol')
+            or type(attempt) is not int or type(now_ms) is not int or attempt > now_ms):
+        return False
+    cloid = wire.requested_order(proposal['action'])['c']
+    if any(row.get('cloid') == cloid for row in trade['orders'].values()):
+        return False  # A known order cannot also be certified never created.
+    return any(event.get('kind') == 'REJECTED_NO_ORDER'
+        and event.get('request_id') == request['request_id']
+        and event.get('occurrence_id') == trade['cid']
+        and type(event.get('at_ms')) is int and attempt <= event['at_ms'] <= now_ms
+        for event in state['events'])
+
+
 def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_terminals=False):
     """Convert complete life.snapshot with exact current or terminal identity.
 
@@ -52,6 +87,10 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_termi
                 or external.request_retired(state,request)):
             continue
         order=wire.requested_order(p['action']);raw=lookups.get(order['c'])
+        if rejected_without_order(state, request, now_ms=now_ms):
+            if raw is not None and raw != {'status':'unknownOid'}:
+                raise EvidenceError('IMMUTABLE_TERMINAL_OWNERSHIP_CHANGED')
+            continue
         if raw is None and reuse_verified_terminals and request['phase']=='OBSERVED':
             oid=request.get('observed_oid')
             prior=state['trades'][p['card_id']]['orders'].get(oid)

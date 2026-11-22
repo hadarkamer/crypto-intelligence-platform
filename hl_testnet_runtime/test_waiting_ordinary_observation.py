@@ -10,6 +10,7 @@ from unittest.mock import patch
 from experimental_execution_fixtures import r2732_message
 from . import position_recovery as recovery
 from . import experimental_execution_runtime as core
+from . import experimental_execution_evidence as evidence
 from . import test_experimental_live_service as support
 
 
@@ -179,27 +180,133 @@ class WaitingOrdinaryObservationTests(unittest.TestCase):
         self.assertEqual(observed[waiting_account], (cache, None))
         self.assertEqual(observed[other_account], (cache, background))
 
-    def test_settled_request_without_oid_cannot_start_cloid_inquiry_while_waiting(self):
-        before = self.wait_after_missing_observation()
-        state = self.fx.store.load()
+    def no_order_rejection(self, state, *, adjudicate=True):
         rejected = deepcopy(next(r for r in state['requests'].values()
             if r['proposal']['leg'] == 'TAKE_PROFIT'))
         rejected.update(request_id='e'*64, observed_oid=None,
-            terminal_state='REJECTED_NO_ORDER', phase='OBSERVED',
+            phase='OUTCOME_UNKNOWN',
             reply=dict(state='REJECTED', code='OTHER_REJECTION', oid=None))
         rejected['proposal']['action']['orders'][0]['c'] = '0x'+'e'*32
         state['requests'][rejected['request_id']] = rejected
-        self.assertFalse(recovery.pending(state, self.cid))
-        account = state['trades'][self.cid]['account']
+        if adjudicate:
+            fact=dict(request_id=rejected['request_id'], account=rejected['proposal']['account'],
+                symbol=rejected['proposal']['symbol'], at_ms=self.fx.oracle.now(),
+                lookup_status='unknownOid', reply_digest=core.life.digest(rejected['reply']))
+            self.fx.worker._rejections(state, dict(rejected_requests=[fact]), self.fx.oracle.now())
+        return rejected
+
+    def test_settled_request_without_oid_cannot_start_cloid_inquiry_while_waiting(self):
+        # The product transition, not a hand-set OBSERVED flag, certifies no order.
+        state = self.fx.store.load()
+        rejected = self.no_order_rejection(state)
+        self.assertTrue(evidence.rejected_without_order(state, rejected, now_ms=self.fx.oracle.now()))
+        self.fx.store.mutate(lambda value:value.update(state))
+        read = self.fx.raw.read
+        def unavailable(kind, *args, **kwargs):
+            if kind == 'userFillsByTime': raise ValueError('PUBLIC_READ_UNAVAILABLE')
+            return read(kind, *args, **kwargs)
+        with patch.object(self.fx.raw, 'read', side_effect=unavailable):
+            self.fx.service.tick()
+        # A definitive action rejection already ends its bounded round.
+        self.assertEqual(self.row()['phase'], 'WAITING')
+        before = deepcopy(self.row())
+        self.fx.reconnect()
+        self.fx.oracle.t += 5000
+        with patch.object(self.fx.provider, '_lookup', side_effect=AssertionError('NO_NEW_CLOID_INQUIRY')) as lookup:
+            self.fx.service.tick()
+        lookup.assert_not_called()
+        self.assertEqual(self.row()['phase'], 'RESOLVED')
+        self.assertEqual(self.row()['reason'], 'EXITS_PRESENT')
+        after = self.fx.store.load()
+        self.assertEqual(after['requests'][rejected['request_id']], rejected)
+        self.assertNotIn('choice', self.row())
+        for key in ('round','read_calls','read_weight','sends'):
+            self.assertEqual(self.row()[key], before[key])
+        self.assertEqual(len(self.fx.http), 3)
+
+    def test_unadjudicated_rejected_reply_still_blocks_waiting_without_new_inquiry(self):
+        before = self.wait_after_missing_observation()
+        state = self.fx.store.load()
+        rejected = self.no_order_rejection(state, adjudicate=False)
+        self.assertFalse(evidence.rejected_without_order(state, rejected, now_ms=self.fx.oracle.now()))
+        self.fx.store.mutate(lambda value:value.update(state))
+        self.fx.reconnect(); self.fx.oracle.t += 5000
+        with patch.object(self.fx.provider, '_lookup', side_effect=AssertionError('NO_NEW_CLOID_INQUIRY')) as lookup:
+            self.fx.service.tick()
+        lookup.assert_not_called()
+        self.assertEqual(self.row()['phase'], 'WAITING')
+        self.assertEqual(self.row()['read_calls'], before['read_calls'])
+        self.assertEqual(len(self.fx.http), 3)
+
+    def test_bare_terminal_flag_does_not_replace_product_rejection_event(self):
+        self.wait_after_missing_observation()
+        state = self.fx.store.load()
+        rejected = self.no_order_rejection(state, adjudicate=False)
+        rejected.update(phase='OBSERVED', terminal_state='REJECTED_NO_ORDER')
+        self.assertFalse(evidence.rejected_without_order(state, rejected, now_ms=self.fx.oracle.now()))
         self.fx.oracle.t += 5000
         with patch.object(self.fx.provider, '_lookup') as lookup:
             context = self.fx.provider.collect(state)
         lookup.assert_not_called()
+        account = state['trades'][self.cid]['account']
         self.assertEqual(context['blocked_lanes'][core._lane(account, 'XRP')],
             'RECOVERY_EXTRA_HISTORY_INQUIRY_REQUIRES_CHOICE')
-        self.assertEqual(self.row()['phase'], 'WAITING')
-        self.assertEqual(self.row()['read_calls'], before['read_calls'])
-        self.assertEqual(len(self.fx.http), 3)
+
+    def test_rejection_proof_scope_and_contradictory_order_are_not_ignored(self):
+        state = self.fx.store.load()
+        rejected = self.no_order_rejection(state)
+        rid = rejected['request_id']; now = self.fx.oracle.now()
+        changes = {
+            'unknown': lambda value:value['requests'][rid].update(phase='OUTCOME_UNKNOWN'),
+            'reply': lambda value:value['requests'][rid]['reply'].update(state='OUTCOME_UNKNOWN'),
+            'oid': lambda value:value['requests'][rid].update(observed_oid='999'),
+            'account': lambda value:value['requests'][rid]['proposal'].update(account='0x'+'a'*40),
+            'event_owner': lambda value:value['events'][-1].update(occurrence_id='f'*64),
+            'event_request': lambda value:value['events'][-1].update(request_id='f'*64),
+            'event_early': lambda value:value['events'][-1].update(at_ms=rejected['attempt_at_ms']-1),
+            'event_future': lambda value:value['events'][-1].update(at_ms=now+1),
+            'known_cloid': lambda value:next(iter(value['trades'][self.cid]['orders'].values())).update(
+                cloid=rejected['proposal']['action']['orders'][0]['c']),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                changed=deepcopy(state);change(changed)
+                self.assertFalse(evidence.rejected_without_order(changed, changed['requests'][rid], now_ms=now))
+        # A new observed order for a certified-rejected CLOID contradicts finality.
+        account=state['trades'][self.cid]['account']; lane=core._lane(account,'XRP')
+        cloid=rejected['proposal']['action']['orders'][0]['c']
+        with self.assertRaisesRegex(evidence.EvidenceError,'IMMUTABLE_TERMINAL_OWNERSHIP_CHANGED'):
+            evidence.normalize_snapshot(state, state['collector_checkpoints'][lane],
+                {cloid:dict(status='order')}, now_ms=now, reuse_verified_terminals=True)
+
+    def test_rejected_modify_keeps_original_stop_identity_after_it_fills(self):
+        state = self.fx.store.load()
+        original = next(r for r in state['requests'].values() if r['proposal']['leg']=='STOP')
+        oid = original['observed_oid']
+        rejected = deepcopy(original); rejected.update(request_id='e'*64,
+            phase='OUTCOME_UNKNOWN', observed_oid=None,
+            reply=dict(state='REJECTED',code='OTHER_REJECTION',oid=None))
+        order=deepcopy(original['proposal']['action']['orders'][0]);order['c']='0x'+'e'*32
+        rejected['proposal'].update(operation='AMEND_EXIT',
+            action=dict(type='batchModify',modifies=[dict(oid=int(oid),order=order)]))
+        state['requests'][rejected['request_id']]=rejected
+        fact=dict(request_id=rejected['request_id'],account=rejected['proposal']['account'],
+            symbol='XRP',at_ms=self.fx.oracle.now(),lookup_status='unknownOid',old_order_id=oid,
+            reply_digest=core.life.digest(rejected['reply']))
+        self.fx.worker._rejections(state,dict(rejected_requests=[fact]),self.fx.oracle.now())
+        self.assertTrue(evidence.rejected_without_order(state,rejected,now_ms=self.fx.oracle.now()))
+        self.fx.store.mutate(lambda value:value.update(state))
+        self.fx.oracle.fill(oid,state['trades'][self.cid]['quantity'])
+        self.fx.oracle.t+=50
+        with patch.object(self.fx.provider,'_lookup',side_effect=AssertionError('NO_NEW_CLOID_INQUIRY')) as lookup:
+            context=self.fx.provider.collect(self.fx.store.load())
+        lookup.assert_not_called()
+        snapshot=next(s for s in context['snapshots'] if s['symbol']=='XRP')
+        stop=next(row for row in snapshot['orders'] if row['oid']==oid)
+        self.assertEqual(stop['status'],'FILLED')
+        self.assertEqual(stop['cloid'],original['proposal']['action']['orders'][0]['c'])
+        self.assertFalse(any(row['cloid']==order['c'] for row in snapshot['orders']))
+        self.assertEqual(len(self.fx.http),3)
 
     def test_waiting_long_sparse_history_uses_original_retention_proof(self):
         before = self.wait_after_missing_observation()
