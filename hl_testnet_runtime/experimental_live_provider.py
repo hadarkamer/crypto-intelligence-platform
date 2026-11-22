@@ -335,7 +335,7 @@ class LiveEvidenceProvider:
                 value['capital_error']=_error(exc)
         return value
 
-    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None, meter=None):
+    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None, meter=None, known_only=False):
         lookups={};ids={};seen=set()
         changing={str(row.get('o',row.get('oid'))) for r in state['requests'].values()
             if external.request_pending(state, r)
@@ -383,6 +383,8 @@ class LiveEvidenceProvider:
                         reader=observation_cache.pass_reader(0) if observation_cache is not None else self.public
                         raw=reader.read('orderStatus',account,oid=oid)
             else:
+                if known_only:
+                    raise ProviderError('RECOVERY_EXTRA_HISTORY_INQUIRY_REQUIRES_CHOICE')
                 if meter is not None: meter.debit('orderStatus')
                 raw=self._lookup(account,cloid)
             if raw is not None:lookups[cloid]=raw
@@ -414,24 +416,41 @@ class LiveEvidenceProvider:
 
     def _lane(self, state, account, symbol, legacy, inventory, *, observation_cache=None, observation_end_ms=None, historical=None):
         lane=runtime._lane(account,symbol)
-        reader=self.public;meter=None
+        reader=self.public;meter=None;ordinary=False
         affected=[t for t in state['trades'].values() if t['account']==account and t['symbol']==symbol
                   and t['cid'] in state.get('position_recovery',{}) and not external.operationally_closed(t)]
         for trade in affected:
             row=state['position_recovery'][trade['cid']]
             if row['phase']=='RESOLVED':continue
             grant=state.get('_recovery_grants',{}).get(trade['cid'])
-            if recovery.paused(state,trade['cid']) or grant is None:
+            ordinary=recovery.ordinary_observation_allowed(state,trade['cid'])
+            if not ordinary and (recovery.paused(state,trade['cid']) or grant is None):
                 raise ProviderError('POSITION_RECOVERY_WAITING_FOR_DECISION_OR_BUDGET')
             if meter is not None:raise ProviderError('SHARED_RECOVERY_LANE_REQUIRES_REVIEW')
+            if ordinary:
+                previous=state.get('collector_checkpoints',{}).get(lane)
+                end=self.now() if observation_end_ms is None else observation_end_ms
+                if (previous is None or previous.get('history_complete') is not True
+                        or previous.get('orders_complete') is not True
+                        or end<previous['at_ms']):
+                    raise ProviderError('RECOVERY_EXTRA_HISTORY_INQUIRY_REQUIRES_CHOICE')
+                # One ordinary observation under the existing per-collection
+                # envelope and shared IP budget. No recovery reservation or
+                # counter is renewed, and this path never discovers a new OID.
+                # Existing retention-anchor checks still prove a long sparse
+                # gap. Recursive full-page history expansion remains extra
+                # inquiry; a failed proof cannot advance its checkpoint.
+                grant=dict(calls=recovery.READ_CALLS,weight=recovery.READ_WEIGHT,
+                    deadline=end+15000)
             meter=recovery.InquiryMeter(grant,self.now)
-            reader=recovery.InquiryReader(reader,meter)
+            reader=recovery.InquiryReader(reader,meter,allow_history_split=not ordinary)
             if observation_cache is not None:
                 scoped_cache=sync.ObservationReadCache(reader)
                 scoped_cache.samples=observation_cache.samples
                 observation_cache=scoped_cache
         exp,lookups=self._experimental_bindings(state,account,symbol,
-            observation_cache=observation_cache,inventory=inventory,meter=meter)
+            observation_cache=observation_cache,inventory=inventory,meter=meter,
+            known_only=ordinary)
         old=next((s for s in legacy if s['symbol']==symbol),None)
         old_bindings=[] if old is None else old['bindings']
         bindings=old_bindings+exp
@@ -570,9 +589,19 @@ class LiveEvidenceProvider:
     def _observe_external(self,state,legacy,inventories,cache,now,*,fill_reader=None):
         result=dict(version=external.VERSION,accounts={},human_managed=deepcopy(
             state.get('external_activity',{}).get('human_managed',{})),errors={},owned_request_observations={})
+        waiting_accounts={state['trades'][cid]['account']
+            for cid,row in state.get('position_recovery',{}).items()
+            if row['phase']=='WAITING' and cid in state['trades']
+            and not external.operationally_closed(state['trades'][cid])}
         for account,inventory in inventories.items():
             try:
-                value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,fill_reader=fill_reader)
+                # The ordinary lane pass already supplies its bounded history
+                # observation. A failed/full page must not restart through the
+                # account background path and recursively spend more inquiry.
+                # Cached history and current inventory still flow for every
+                # account; independent accounts keep their normal background read.
+                value=external.observe(state,legacy,{account:inventory},cache,now_ms=now,
+                    fill_reader=None if account in waiting_accounts else fill_reader)
                 for current in value['accounts'].values():
                     # Exact clocks from the shared, validated current inventory.
                     # History completeness remains an independent audit fact.

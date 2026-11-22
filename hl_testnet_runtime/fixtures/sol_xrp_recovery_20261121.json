@@ -1,0 +1,141 @@
+{
+  "provenance": "Read-only production journal projection, e2c7, observed 2026-11-22. No exchange calls or mutations. Account identities excluded. Raw venue responses in tests are controlled and are not claimed as historical observations.",
+  "sol_source": {
+    "kind": "ALERT",
+    "side": "SHORT",
+    "stop": "66.12369",
+    "entry": "65.469",
+    "proof": {
+      "cycle_id": "shared-watch:2026-11-21T05:32:15.014818+00:00",
+      "timeframe": "30m",
+      "decision_at": "2026-11-21T05:36:20.657000+00:00",
+      "episode_key": "shared-watch:2026-11-21T05:32:15.014818+00:00:SFF1361:SOL",
+      "reference_at": "2026-11-21T05:38:00+00:00",
+      "source_target": null,
+      "reference_price": "65.469",
+      "data_available_at": "2026-11-21T05:37:34.714000+00:00",
+      "source_config_sha256": "63a7a1478c5d800f99ba21b8ae939ac33d19fbb53c57b0d1d7d42c05c7b18988",
+      "source_contract_version": "all-hyperliquid-perpetual-trade1m-v2"
+    },
+    "arm_at": "2026-11-21T05:38:12.508000+00:00",
+    "family": "sol_sff1361",
+    "policy": {
+      "name": "SFF1361_SOL_RECENT_V1",
+      "entry_kind": "LIMIT_AFTER_ALERT",
+      "source_price": "HYPERLIQUID_SOL_PERPETUAL_TRADE_1M"
+    },
+    "symbol": "SOL",
+    "rule_id": "SFF1361_SOL_RECENT",
+    "version": "experimental-approved-alert-v2",
+    "source_at": "2026-11-21T05:38:00+00:00",
+    "created_at": "2026-11-21T05:38:12.508000+00:00",
+    "expires_at": "2026-11-21T05:39:42.508000+00:00",
+    "approved_at": "2026-11-21T05:38:12.508000+00:00",
+    "take_profit": "64.15962",
+    "valid_until": null,
+    "source_as_of": "2026-11-21T05:38:12.508000+00:00",
+    "source_state": "APPROVED",
+    "cancel_reason": null,
+    "occurrence_id": "a449231f4b2e6f02034e7e514fbde34751c97cdd135f3a9923b4af2f14dbd2ee",
+    "original_target": null,
+    "source_sequence": 17952394925081,
+    "source_price_kind": "TRADE_1M",
+    "source_environment": "mainnet",
+    "execution_environment": "mainnet"
+  },
+  "xrp_source": {
+    "kind": "ALERT",
+    "side": "SHORT",
+    "stop": "0.9143737032903854847385360603",
+    "entry": "0.904846875896984711575",
+    "proof": {
+      "cycle_id": "shared-watch:2026-11-21T07:02:15.014454+00:00",
+      "timeframe": "12h",
+      "decision_at": "2026-11-21T07:06:24.756000+00:00",
+      "episode_key": "000e74c63c8da10ec44a09696701e1a2d6f05aa2d7a30a9b5158c92fbf981352",
+      "reference_at": "2026-11-21T07:07:00+00:00",
+      "source_target": "0.92095",
+      "reference_price": "0.89992",
+      "data_available_at": "2026-11-21T07:06:30.125000+00:00",
+      "source_config_sha256": "63a7a1478c5d800f99ba21b8ae939ac33d19fbb53c57b0d1d7d42c05c7b18988",
+      "source_contract_version": "all-hyperliquid-perpetual-trade1m-v2"
+    },
+    "arm_at": "2026-11-21T07:08:11.339000+00:00",
+    "family": "xrp_liquidity_inverse",
+    "policy": {
+      "name": "XRP_LIQUIDITY_RAW_INVERSE_V1",
+      "entry_kind": "LIMIT_AFTER_ALERT",
+      "source_price": "HYPERLIQUID_XRP_PERPETUAL_TRADE_1M",
+      "pending_expires_at": "2026-11-22T07:07:00+00:00",
+      "cancel_before_fill_price": "0.87889"
+    },
+    "symbol": "XRP",
+    "rule_id": "XRP_LIQUIDITY_RAW_INVERSE",
+    "version": "experimental-approved-alert-v2",
+    "source_at": "2026-11-21T07:07:00+00:00",
+    "created_at": "2026-11-21T07:08:11.339000+00:00",
+    "expires_at": "2026-11-21T07:09:41.339000+00:00",
+    "approved_at": "2026-11-21T07:08:11.339000+00:00",
+    "take_profit": "0.8823373878716997235921612995",
+    "valid_until": null,
+    "source_as_of": "2026-11-21T07:08:11.339000+00:00",
+    "source_state": "APPROVED",
+    "cancel_reason": null,
+    "occurrence_id": "d356b1064f4688182030971aab5d0e78670e315fc4c46c91598408742518c364",
+    "original_target": "0.87889",
+    "source_sequence": 17952448913391,
+    "source_price_kind": "TRADE_1M",
+    "source_environment": "mainnet",
+    "execution_environment": "mainnet"
+  },
+  "sol_orders": {
+    "ENTRY": "612268082509",
+    "STOP": "612268286101",
+    "TAKE_PROFIT": "612268333021"
+  },
+  "sol_fills": [
+    {
+      "fill_id": "hl:48260705842792",
+      "oid": "612268082509",
+      "side": "A",
+      "at_ms": 1795239521421,
+      "price": "65.469",
+      "quantity": "3.05",
+      "fee": "0.029952",
+      "fee_token": "USDC"
+    },
+    {
+      "fill_id": "hl:431460069390707",
+      "oid": "612268286101",
+      "side": "B",
+      "at_ms": 1795242817949,
+      "price": "66.188",
+      "quantity": "3.05",
+      "fee": "0.090843",
+      "fee_token": "USDC"
+    }
+  ],
+  "recovery": {
+    "event_id": "9854912670e9e3c6ef6c6d80",
+    "episode": 2,
+    "round": 1,
+    "phase": "WAITING",
+    "reason": "INQUIRY_LIMIT",
+    "read_calls_reserved": 24,
+    "read_weight_reserved": 720,
+    "started_ms": 1795240957822,
+    "finished_ms": 1795240982324,
+    "last_complete_checkpoint_ms": 1795240944429
+  },
+  "current_regular_inventory": {
+    "observed_at_ms": 1795347700527,
+    "inventory_at_ms": 1795347700842,
+    "venue_at_ms": 1795347700945,
+    "orders_complete": true,
+    "positions_complete": true,
+    "sol_position": "0",
+    "sol_orders": [],
+    "history_complete": false,
+    "history_error": "EXTERNAL_HISTORY_GAP_REQUIRES_REVIEW"
+  }
+}

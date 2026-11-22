@@ -85,8 +85,12 @@ def assess(state):
             open_ids.append(oid)
             if trade['order_legs'][oid] != 'ENTRY':
                 outstanding = _number(row['wire_order']['s']) - _sum(row['fills'])
-                if outstanding <= 0 or row['wire_order']['r'] is not True:
+                if outstanding < 0 or row['wire_order']['r'] is not True:
                     raise SharedMarketError('EXACT_SHARED_REDUCING_CAPACITY_REQUIRED')
+                # A stream fill can arrive before terminal order confirmation.
+                # Zero remaining size is not overfill: retain the OPEN identity
+                # and occupied lane until reconciliation, without failing an
+                # independent market's admission or protection assessment.
                 capacity += outstanding
         unresolved = []
         for request in requests.get(cid, []):

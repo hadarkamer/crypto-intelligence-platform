@@ -1,0 +1,89 @@
+{
+  "version": "recovery-isolation-postgres-v1",
+  "production_requests": 0,
+  "clock": "Advances 75ms per controlled read (20s in the slow-provider test) plus explicit cycle/budget waits; CPU/wall are actual local runtime.",
+  "policy": {
+    "maximum": 1200,
+    "background": 800,
+    "window_ms": 69000
+  },
+  "tests": [
+    {
+      "test": "test_open_fully_filled_sol_stop_does_not_abort_exact_xrp_signal",
+      "cycles": [
+        {
+          "started_ms": 1795239493508,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 122,
+          "confirmed_response_weight": 122,
+          "cpu_ms": 37.09116999999995,
+          "wall_ms": 80.47253499989893
+        },
+        {
+          "started_ms": 1795239521671,
+          "elapsed_ms": 376,
+          "reads": 5,
+          "attempt_weight": 164,
+          "confirmed_response_weight": 65,
+          "cpu_ms": 37.33337400000003,
+          "wall_ms": 78.23957700020401
+        },
+        {
+          "started_ms": 1795239522297,
+          "elapsed_ms": 301,
+          "reads": 4,
+          "attempt_weight": 144,
+          "confirmed_response_weight": 45,
+          "cpu_ms": 41.92429800000003,
+          "wall_ms": 87.64318500016088
+        },
+        {
+          "started_ms": 1795239522848,
+          "elapsed_ms": 300,
+          "reads": 4,
+          "attempt_weight": 144,
+          "confirmed_response_weight": 45,
+          "cpu_ms": 35.17785400000001,
+          "wall_ms": 79.11414400041394
+        },
+        {
+          "started_ms": 1795239523398,
+          "elapsed_ms": 225,
+          "reads": 3,
+          "attempt_weight": 142,
+          "confirmed_response_weight": 43,
+          "cpu_ms": 31.537366999999982,
+          "wall_ms": 72.10707800004457
+        },
+        {
+          "started_ms": 1795240944429,
+          "elapsed_ms": 225,
+          "reads": 3,
+          "attempt_weight": 142,
+          "confirmed_response_weight": 43,
+          "cpu_ms": 37.21460899999995,
+          "wall_ms": 86.14599799966527
+        },
+        {
+          "started_ms": 1795244892339,
+          "elapsed_ms": 375,
+          "reads": 5,
+          "attempt_weight": 122,
+          "confirmed_response_weight": 122,
+          "cpu_ms": 32.67157800000009,
+          "wall_ms": 65.95942200056015
+        }
+      ],
+      "attempted_reads": 29,
+      "successful_reads": 29,
+      "conservative_attempt_weight": 980,
+      "confirmed_response_weight": 485,
+      "attempted_actions": 3,
+      "attempted_action_weight": 3,
+      "cpu_ms": 402.926443,
+      "wall_ms": 844.8484059999828,
+      "peak_rss_kib": 38476
+    }
+  ]
+}

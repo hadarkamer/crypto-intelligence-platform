@@ -42,6 +42,19 @@ def paused(state, cid):
                 state.get('position_recovery', {}).get(cid, {}).get('phase') in PAUSED)
 
 
+def ordinary_observation_allowed(state, cid):
+    """Waiting pauses recovery work, not routine proof of already-owned orders.
+
+    An unresolved send still needs the separately authorized inquiry path. A
+    normal observation can only follow the OID bindings already established;
+    it grants no send, new round, counter reset or manual-position adoption.
+    """
+    trade = state['trades'].get(cid, {})
+    return bool(trade and not trade.get('manual_management')
+        and state.get('position_recovery', {}).get(cid, {}).get('phase') == 'WAITING'
+        and not pending(state, cid))
+
+
 def _target(proposal):
     # DOGE's two frozen target prices are two different required exits.
     from .filled_quantity_dispatch import requested_order
@@ -54,12 +67,21 @@ def _facts(state, trade, context, now):
     lane = _lane(trade['account'], trade['symbol'])
     sample = context.get('external_observation', {}).get('accounts', {}).get(trade['account'])
     quantity = life.text(_remaining(trade))
-    stamp = state.get('snapshots', {}).get(lane, {}).get('at_ms')
+    snapshot = state.get('snapshots', {}).get(lane, {})
+    stamp = snapshot.get('at_ms')
+    observed = next((row for row in context.get('snapshots', [])
+        if row.get('account') == trade['account'] and row.get('symbol') == trade['symbol']), None)
+    # A fresh account inventory cannot refresh stale owned-order evidence.
+    # Require the exact lane observation reconciled during this same cycle.
+    lane_known = (observed is not None and observed == snapshot
+        and snapshot.get('history_complete') is True
+        and snapshot.get('orders_complete') is True
+        and snapshot.get('position_complete') is True
+        and type(stamp) is int and 0 <= now-stamp <= 15000)
     if sample and 0 <= now - sample['observed_at_ms'] <= 15000:
         quantity = sample['positions'].get(trade['symbol'], '0')
         stamp = sample['observed_at_ms']
-    known = (lane not in context.get('blocked_lanes', {})
-             and type(stamp) is int and 0 <= now - stamp <= 15000
+    known = (lane_known and lane not in context.get('blocked_lanes', {})
              and not pending(state, trade['cid']))
     closed = trade['phase'] in FINAL and Decimal(quantity) == 0 and known
     legs = {'STOP': 'UNKNOWN', 'TAKE_PROFIT': 'UNKNOWN'}
@@ -282,7 +304,7 @@ def choose(state, *, token, round_number, choice, actor, allowed_users, now):
 
 
 class InquiryMeter:
-    """Cap this already-reserved envelope; the existing shared budget still applies."""
+    """Cap one read envelope; the existing shared budget still applies."""
     def __init__(self, grant, clock):
         self.calls, self.weight, self.deadline = grant['calls'], grant['weight'], grant['deadline']
         self.clock = clock
@@ -296,9 +318,10 @@ class InquiryMeter:
 
 
 class InquiryReader:
-    """Use the existing reader and admission, with a round-local upper bound."""
-    def __init__(self, reader, meter):
+    """Use the existing reader and admission within a bounded observation."""
+    def __init__(self, reader, meter, *, allow_history_split=True):
         self.reader, self.meter = reader, meter
+        self.allow_history_split = allow_history_split
 
     def read(self, kind, account, **kwargs):
         self.meter.debit(kind)
@@ -310,5 +333,7 @@ class InquiryReader:
         return method(bodies) if callable(method) else nullcontext()
 
     def reserve_history_split(self, *args):
+        if not self.allow_history_split:
+            raise ValueError('RECOVERY_EXTRA_HISTORY_INQUIRY_REQUIRES_CHOICE')
         method = getattr(self.reader, 'reserve_history_split', None)
         if callable(method): method(*args)

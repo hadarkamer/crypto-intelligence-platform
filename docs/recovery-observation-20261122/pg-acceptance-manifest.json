@@ -1,0 +1,49 @@
+{
+  "baseline_commit": "e2c7de8a529b61c6f32d76756967d126e48e1219",
+  "current_files_sha256": {
+    "experimental_execution_archive.py": "5c608174a8302f66454942e67574caee9b9f43f8a6c1bf4a8890a292b002057a",
+    "experimental_live_provider.py": "d473f165f067e94f6a67b0738baaa6cd72113acc08dc91219f7a34b9ed37ddd6",
+    "experimental_live_runtime.py": "e2c470743f553e9de250996965a4f324a074eba47addf0e614684be63f5ac01b",
+    "experimental_live_service.py": "232dca749e8c1e96b540471e5d75feb26bced893b6f55ccae737744eb95b059c",
+    "experimental_shared_market.py": "01a059809a7706e4db70854c71c85539c924f20c763a9d86610a5763e3891b98",
+    "position_recovery.py": "cb1189553c64cbab422ceb52399b7f2d663c2ff1d63544655f645a36d7f35bf5",
+    "test_recovery_isolation_postgres.py": "04a9c782e8809c106d31da8823fd0931a3d441f3aaf03e24472fc8a555a225cc",
+    "fixtures/sol_xrp_recovery_20261121.json": "f75fde5e39f10950a59b351fd9a0e4aeaf1d94e78e0bbda37c408f2c1252c4ce"
+  },
+  "current_suite": {
+    "tests": 21,
+    "skipped": 0,
+    "failed": 0,
+    "seconds": 7.795,
+    "log": "pg-acceptance-run.log",
+    "metrics": "pg-acceptance-metrics.json"
+  },
+  "baseline": {
+    "expected_failure": "PERSISTENCE_UNAVAILABLE_NO_SEND in original preparation transaction",
+    "cycle": {
+      "started_ms": 1795244892339,
+      "elapsed_ms": 375,
+      "reads": 5,
+      "attempt_weight": 122,
+      "confirmed_response_weight": 122,
+      "cpu_ms": 32.67157800000009,
+      "wall_ms": 65.95942200056015
+    },
+    "log": "pg-baseline-run.log",
+    "metrics": "pg-baseline-metrics.json"
+  },
+  "current": {
+    "result": "Exact frozen XRP admitted; independent STOP protected on following cycle while SOL WAITING",
+    "cycle": {
+      "started_ms": 1795244892339,
+      "elapsed_ms": 451,
+      "reads": 6,
+      "attempt_weight": 124,
+      "confirmed_response_weight": 122,
+      "cpu_ms": 64.24571499999998,
+      "wall_ms": 107.50288600047497,
+      "intake_to_decision_ms": 451
+    }
+  },
+  "scope": "Real PostgreSQL16.2, authenticated product intake/provider/budget/planner/dispatch; existing controlled exchange/HTTP/signature boundaries only. No production connections. CPU/RSS are local isolated measurements, not Render or soak measurements."
+}

@@ -79,7 +79,8 @@ def entry_retry_ready(state, cid, now):
         and retry.get('attempts') == len(attempts))
 
 
-def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after_ms=None):
+def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after_ms=None,
+                    stage='ENTRY_ADMISSION'):
     source = state['sources'][cid]['source']
     role = 'long_account' if source['side'] == 'LONG' else 'short_account'
     account = state['routes'][role]
@@ -90,7 +91,7 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
             else 'market' if _lane(account, source['symbol']) in context.get('blocked_lanes', {})
             else 'occurrence')
     state.setdefault('entry_blocked', {})[cid] = reason
-    decision = dict(stage='ENTRY_ADMISSION', scope=scope,
+    decision = dict(stage=stage, scope=scope,
         account_role=role, symbol=source['symbol'], occurrence_id=cid, reason=reason,
         at_ms=now, retry_after_ms=retry_after_ms,
         deadline=source.get('expires_at') or source.get('valid_until'))
@@ -99,7 +100,8 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
     if previous is None or any(previous.get(key) != decision[key] for key in fields):
         state['events'].append(dict(kind='ENTRY_DEFERRED', **deepcopy(decision)))
     state['entry_decisions'][cid] = decision
-    recovery.refused_source(state,cid,decision)
+    if stage == 'ENTRY_ADMISSION':
+        recovery.refused_source(state,cid,decision)
 
 
 def readiness():
@@ -468,6 +470,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         safe = {**state, 'trades': {cid:t for cid,t in state['trades'].items()
             if _lane(t['account'], t['symbol']) not in blocked}}
         proposal = self._maintain_live(safe, scoped, now)
+        scheduled_reason = ('ENTRY_WAITING_FOR_PROTECTION_OR_MAINTENANCE' if proposal is not None
+            else 'ENTRY_GATE_CLOSED' if not entries_enabled else None)
+        evaluated = set()
         accounting.retain_fees(state, context)
         accounting.settle(state, now)
         unavailable = {_lane(r['proposal']['account'], r['proposal']['symbol']) for r in state['requests'].values()
@@ -480,6 +485,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 source = state['sources'][cid]
                 if not _source_active(source, now):
                     continue
+                evaluated.add(cid)
                 role = 'long_account' if source['source']['side'] == 'LONG' else 'short_account'
                 account = state['routes'][role]
                 source_lane = _lane(account, source['source']['symbol'])
@@ -489,6 +495,18 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     continue
                 proposal = self._admit(state, cid, scoped, now)
                 if proposal is not None: break
+        if proposal is not None and scheduled_reason is None:
+            scheduled_reason = 'ENTRY_WAITING_FOR_EARLIER_CANDIDATE'
+        if scheduled_reason is not None:
+            attempted = {r['proposal']['card_id'] for r in state['requests'].values()}
+            for cid, source in state['sources'].items():
+                if (cid in evaluated or cid in state['trades'] or cid in attempted
+                        or not _source_active(source, now)):
+                    continue
+                # Explain the existing single-action scheduling order without
+                # changing it or issuing a market-refusal recovery notice.
+                _entry_decision(state, cid, scoped, now, scheduled_reason,
+                    stage='ENTRY_SCHEDULING', scope='cycle')
         if 'collector_checkpoints' in context:
             # Failed lanes retain their previous checkpoint for reconciliation.
             state.setdefault('collector_checkpoints', {}).update(deepcopy(context['collector_checkpoints']))

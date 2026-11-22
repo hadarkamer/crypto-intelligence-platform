@@ -1,0 +1,24 @@
+{
+  "at_utc": "2026-11-22T11:55:45.603311+00:00",
+  "modules": [
+    "hl_testnet_runtime.test_runtime",
+    "hl_testnet_runtime.test_cycle_decision_durability",
+    "hl_testnet_runtime.test_waiting_ordinary_observation",
+    "hl_testnet_runtime.test_shared_market_filled_open",
+    "hl_testnet_runtime.test_execution_history_store.SQLiteHistoryTests",
+    "hl_testnet_runtime.test_experimental_shared_market.CapacityTests"
+  ],
+  "tests": 129,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "seconds": 2.488814965000529,
+  "product_sha256": {
+    "hl_testnet_runtime/experimental_execution_archive.py": "5c608174a8302f66454942e67574caee9b9f43f8a6c1bf4a8890a292b002057a",
+    "hl_testnet_runtime/experimental_live_provider.py": "d473f165f067e94f6a67b0738baaa6cd72113acc08dc91219f7a34b9ed37ddd6",
+    "hl_testnet_runtime/experimental_live_runtime.py": "e2c470743f553e9de250996965a4f324a074eba47addf0e614684be63f5ac01b",
+    "hl_testnet_runtime/experimental_live_service.py": "232dca749e8c1e96b540471e5d75feb26bced893b6f55ccae737744eb95b059c",
+    "hl_testnet_runtime/experimental_shared_market.py": "01a059809a7706e4db70854c71c85539c924f20c763a9d86610a5763e3891b98",
+    "hl_testnet_runtime/position_recovery.py": "cb1189553c64cbab422ceb52399b7f2d663c2ff1d63544655f645a36d7f35bf5"
+  }
+}

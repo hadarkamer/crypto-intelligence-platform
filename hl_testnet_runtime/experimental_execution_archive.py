@@ -131,6 +131,41 @@ def _eligible(state, cid, now, *, require_settlement=True):
     return True
 
 
+def _finish_unsubmitted_source(state, cid, now):
+    """Record explicit finality before an unsent occurrence leaves hot state.
+
+    Absence of a fill is not proof of no submission. Existing attempts qualify
+    only with the dispatch boundary's positive never-sent certificate. Old
+    missing decision evidence is named as missing rather than reconstructed.
+    The archive transaction saves this result and its event atomically.
+    """
+    source = state['sources'][cid]
+    if source.get('entry_result') is not None:
+        return
+    trade = state['trades'].get(cid)
+    requests = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
+    if trade and (trade['entry_fills'] or trade['exit_fills'] or trade['orders']):
+        return
+    if requests and not all(r['phase'] == 'ABORTED_UNSENT'
+            and r.get('certified_unsent') is True and r.get('observed_oid') is None
+            and r.get('reply') is None and r['proposal']['operation'] == 'ENTRY' for r in requests):
+        return
+    msg = source['source']
+    deadline = msg.get('expires_at') or msg.get('valid_until')
+    prior = state.get('entry_decisions', {}).get(cid) or {}
+    preceding = prior.get('reason') or next((r.get('unsent_reason') for r in reversed(requests)
+        if r.get('unsent_reason')), None)
+    reason = source.get('terminal_reason') or (
+        'ENTRY_WINDOW_EXPIRED' if deadline is not None and now >= contract.moment_ms(deadline)
+        else 'SOURCE_RETIRED_BEFORE_SUBMISSION')
+    result = dict(stage='ENTRY_FINISHED', outcome='NEVER_SUBMITTED', reason=reason,
+        at_ms=now, deadline=deadline, received_at=source['created_at'],
+        preceding_reason=preceding or 'PRIOR_DECISION_REASON_UNAVAILABLE',
+        preceding_stage=prior.get('stage'), decision_evidence_available=preceding is not None)
+    source['entry_result'] = result
+    state['events'].append(dict(kind='ENTRY_FINISHED', occurrence_id=cid, **deepcopy(result)))
+
+
 def _bundle(state, cid, now):
     trade = state['trades'].get(cid)
     requests = {rid: deepcopy(r) for rid, r in state['requests'].items() if r['proposal']['card_id'] == cid}
@@ -402,6 +437,7 @@ class HistoryMixin:
                 scanned += 1
                 history['cursor'] = cid
                 if not _eligible(state, cid, now_ms): continue
+                _finish_unsubmitted_source(state, cid, now_ms)
                 record = _bundle(state, cid, now_ms)
                 size = len(life.encoded(record).encode())
                 if size > MAX_RECORD_BYTES:

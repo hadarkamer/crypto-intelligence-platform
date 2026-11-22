@@ -1,0 +1,68 @@
+{
+  "baseline": "e2c7de8a529b61c6f32d76756967d126e48e1219",
+  "new_focused_tests": {
+    "module": "hl_testnet_runtime.test_waiting_ordinary_observation",
+    "passed": 8
+  },
+  "existing_recovery_memory_and_connection": {
+    "passed": 24,
+    "baseline_failure_excluded": "test_incomplete_hype_history_keeps_actual_exposure_but_allows_xrp",
+    "excluded_reason": "Retired HYPE_ROW71205 fixture expects a new ENTRY before recovery scenario; identical failure on exact baseline."
+  },
+  "postgres_recovery": {
+    "passed": 20,
+    "metadata": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-k4e51exj/result.json"
+  },
+  "postgres_manual_operational_close": {
+    "passed": 13,
+    "metadata": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-2cle9mmh/result.json"
+  },
+  "postgres_selected_runtime": {
+    "passed": 7,
+    "failed": 1,
+    "metadata": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-kpvh3z0l/result.json",
+    "baseline_reproduction_metadata": "/workspace/scratch/6c22ac369d3b/legacy-hype-reconciliation-20261120/pg-runs/isolated-r_n6tfuo/result.json",
+    "baseline_failure": "test_unproven_peer_lane_does_not_block_proven_filled_lane_protection",
+    "baseline_failure_reason": "Retired HYPE_ROW71205 peer fixture never creates its trade; identical KeyError before protection assertion on exact baseline."
+  },
+  "ordinary_observation_sample": {
+    "fresh_cycle_raw_calls": {
+      "frontendOpenOrders": 1,
+      "clearinghouseState": 1,
+      "userFillsByTime": 1,
+      "metaAndAssetCtxs": 1
+    },
+    "three_day_sparse_gap_raw_calls": {
+      "frontendOpenOrders": 1,
+      "clearinghouseState": 1,
+      "userFillsByTime": 3,
+      "metaAndAssetCtxs": 1
+    },
+    "calls_are_actual_controlled_reader_invocations": true,
+    "exchange_sends": 0,
+    "new_cloid_lookups": 0,
+    "recovery_counters_unchanged": true,
+    "cap_reuses_existing_constants": {
+      "READ_CALLS": 24,
+      "READ_WEIGHT": 720
+    },
+    "cap_is_not_a_measured_call_count": true
+  },
+  "production_connections": 0,
+  "changed_product_files": [
+    "hl_testnet_runtime/experimental_live_provider.py",
+    "hl_testnet_runtime/position_recovery.py"
+  ],
+  "operational_limits": [
+    "WAITING cannot send, start a round, reset counters or adopt manual ownership.",
+    "Unresolved requests and unbound settled requests cannot trigger ordinary CLOID inquiry.",
+    "Full-page history cannot trigger ordinary recursive splits.",
+    "Active leftover TP or active exposure with a missing exit remains blocked.",
+    "Fresh complete same-cycle lane proof required; account clock cannot refresh stale order evidence."
+  ],
+  "review_followup": {
+    "finding": "The ordinary lane no-split guard worked, but the account background history reader independently retried the failed full interval and split pages.",
+    "fix": "For accounts with nonretired WAITING episodes, external observation reuses cached history and current inventory but does not request uncovered background history. Other accounts retain their background reader.",
+    "verification": "All requested history windows repeatedly full: exactly one actual fill read, no fallback or recursive split. Independent-account background reader verified. Manual closure PG13 revalidated after the change."
+  }
+}

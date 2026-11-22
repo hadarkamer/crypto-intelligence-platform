@@ -7,6 +7,7 @@ Schema initialization remains a separate operator migration, never an HTTP or
 recurring-work side effect. No deployment/activation settings are written here.
 """
 import json
+import logging
 from collections import Counter
 import threading
 import time
@@ -28,12 +29,67 @@ _CYCLE_CODES = frozenset({
     'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE', 'TESTNET_SHARED_REQUEST_BUDGET_REQUIRED',
     'EXPERIMENTAL_ACTIVE_HISTORY_CAPACITY_EXHAUSTED', 'PROCESS_OWNERSHIP_UNAVAILABLE',
     'EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING',
+    'PUBLIC_READ_UNAVAILABLE', 'PERSISTENCE_UNAVAILABLE_NO_SEND',
+    'EXACT_SHARED_REDUCING_CAPACITY_REQUIRED',
+    'EXACT_SHARED_ORDER_OWNERSHIP_REQUIRED', 'FILL_HAS_MULTIPLE_SHARED_OWNERS',
+    'EXIT_EXCEEDED_OWNED_QUANTITY_PEER_RISK',
 })
 
 
 def _cycle_error(exc):
     code = str(exc)
+    if type(exc) is JournalError and code == 'PERSISTENCE_UNAVAILABLE_NO_SEND':
+        # The journal deliberately masks callback failures at its no-send
+        # boundary. Recover only an allowlisted domain identifier for audit;
+        # never expose a driver message, query, URL or arbitrary exception text.
+        nested = exc
+        seen = {id(exc)}
+        for _ in range(4):
+            nested = nested.__cause__ or nested.__context__
+            if nested is None or id(nested) in seen:
+                break
+            seen.add(id(nested))
+            inner = str(nested)
+            if inner in _CYCLE_CODES and inner != 'PERSISTENCE_UNAVAILABLE_NO_SEND':
+                return inner
     return code if code in _CYCLE_CODES else 'CONNECTION_CYCLE_RECONCILIATION_REQUIRED'
+
+
+def _persist_cycle_failure(store, *, started_ms, at_ms, reason):
+    """Save a failed cycle after its action transaction has rolled back.
+
+    This transition has no execution capability. It reloads under the existing
+    writer lock, so an uncertain commit that actually prepared an attempt is
+    never described as unsubmitted. A new arrival during the failed cycle is
+    likewise not blamed for work that preceded its receipt. Repeated failures
+    of the same kind update one decision rather than append duplicate events.
+    """
+    reason = _cycle_error(ValueError(reason))
+    def transition(state):
+        state['last_cycle_failure'] = dict(stage='CONNECTION_CYCLE', reason=reason,
+            started_at_ms=started_ms, at_ms=at_ms)
+        attempted = {r['proposal']['card_id'] for r in state['requests'].values()}
+        recorded = 0
+        for cid, row in state['sources'].items():
+            if cid in state['trades'] or cid in attempted or row['entry_permission'] == 'RETIRED':
+                continue
+            msg = row['source']
+            deadline = msg.get('expires_at') or msg.get('valid_until')
+            if (contract.moment_ms(row['created_at']) > started_ms or deadline is None
+                    or contract.moment_ms(deadline) <= started_ms):
+                continue
+            role = 'long_account' if msg['side'] == 'LONG' else 'short_account'
+            decision = dict(stage='CONNECTION_CYCLE', scope='cycle', account_role=role,
+                symbol=msg['symbol'], occurrence_id=cid, reason=reason, at_ms=at_ms,
+                started_at_ms=started_ms, retry_after_ms=None, deadline=deadline)
+            previous = state.setdefault('entry_decisions', {}).get(cid)
+            if previous is None or any(previous.get(k) != decision[k] for k in ('stage', 'reason')):
+                state['events'].append(dict(kind='ENTRY_DEFERRED', **decision))
+            state['entry_decisions'][cid] = decision
+            state.setdefault('entry_blocked', {})[cid] = reason
+            recorded += 1
+        return recorded
+    return store.mutate(transition)
 
 
 class ConnectionService:
@@ -48,6 +104,7 @@ class ConnectionService:
         self._tick_lock = threading.Lock()
         self.last_status = 'NOT_STARTED'
         self.last_cycle_error_code = None
+        self.last_cycle_diagnostic_error_code = None
         self.last_cycle_at_ms = None
         self.last_entry_decisions = dict(source_blocks=0, account_blocks=0, market_blocks=0, reasons={})
         self.cycles = 0
@@ -147,6 +204,7 @@ class ConnectionService:
         if not self._tick_lock.acquire(blocking=False):
             raise BoundaryError('EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING')
         self._next_entry_retry_ms = None
+        started_ms = self.runtime.venue.now()
         try:
             # Idle ticks reuse the committed observation until its next scan.
             # Feed changes revoke reuse immediately.
@@ -184,6 +242,21 @@ class ConnectionService:
             self.last_cycle_error_code = _cycle_error(exc)
             self.last_cycle_at_ms = self.runtime.venue.now()
             self.last_status = 'CONNECTION_CYCLE_RECONCILIATION_REQUIRED'
+            # The failed runtime/nonce transaction is no longer open here.
+            # A diagnostic commit cannot grant send authority or retry a wire.
+            try:
+                _persist_cycle_failure(self.runtime.store, started_ms=started_ms,
+                    at_ms=self.last_cycle_at_ms, reason=self.last_cycle_error_code)
+                self.last_cycle_diagnostic_error_code = None
+            except Exception as diagnostic_error:
+                # Do not retry an uncertain diagnostic COMMIT or hide the
+                # original failure. The fixed-code service log survives even
+                # while the database itself is unavailable.
+                self.last_cycle_diagnostic_error_code = _cycle_error(diagnostic_error)
+            logging.getLogger(__name__).error(
+                'EXPERIMENTAL_CYCLE_FAILURE reason=%s started_ms=%s at_ms=%s diagnostic_error=%s',
+                self.last_cycle_error_code, started_ms, self.last_cycle_at_ms,
+                self.last_cycle_diagnostic_error_code)
             raise
         finally:
             self._tick_lock.release()
