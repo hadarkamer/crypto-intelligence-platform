@@ -22,7 +22,9 @@ ASSETS = Path('/usr/share/novnc')
 BWRAP = '/usr/bin/bwrap'
 FILES = ('operator_desktop_child.py', 'session_capture.py', 'session_state.py',
          'modern_map_reader.py', 'modern_map_evidence.py', 'heatmap_hover.py',
-         'model1_execution.py', 'collection_metrics.py')
+         'model1_execution.py', 'collection_metrics.py', 'capture_failure_diagnostics.py',
+         'capture_failure_observer.py', 'capture_readiness.py', 'heatmap_models.py',
+         'image_detail.py', 'model1_price_range.py', 'price_detail_input.py')
 PORT = 443
 
 
@@ -95,7 +97,9 @@ def namespace_args(directory):
             '--proc','/proc','--dev','/dev','--size','67108864','--tmpfs','/dev/shm',
             '--size','268435456','--tmpfs','/tmp',
             '--dir','/etc','--dir','/run','--dir','/app',
-            '--ro-bind','/etc/ssl','/etc/ssl','--ro-bind','/etc/fonts','/etc/fonts',
+            '--dir','/etc/ssl','--ro-bind','/etc/ssl/certs','/etc/ssl/certs',
+            '--ro-bind-try','/etc/ssl/openssl.cnf','/etc/ssl/openssl.cnf',
+            '--ro-bind','/etc/fonts','/etc/fonts',
             '--ro-bind','/etc/passwd','/etc/passwd','--ro-bind','/etc/group','/etc/group',
             '--ro-bind-try','/etc/chromium','/etc/chromium',
             '--ro-bind-try','/etc/chromium.d','/etc/chromium.d',
@@ -133,12 +137,30 @@ async def probe():
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL, env={})
             try:
-                return await asyncio.wait_for(proc.wait(),50)==0
+                async with asyncio.timeout(50):
+                    # Verify the real, private VNC protocol endpoint while the
+                    # headed browser starts. No network or credentials are needed.
+                    for _ in range(100):
+                        if proc.returncode is not None:
+                            return False
+                        try:
+                            reader,writer = await asyncio.open_unix_connection(str(Path(directory)/'display'))
+                            break
+                        except (FileNotFoundError,ConnectionRefusedError):
+                            await asyncio.sleep(.05)
+                    else:
+                        return False
+                    try:
+                        greeting = await reader.readexactly(12)
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                    return greeting==b'RFB 003.008\n' and await proc.wait()==0
             finally:
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError, asyncio.IncompleteReadError):
             return False
 
 
