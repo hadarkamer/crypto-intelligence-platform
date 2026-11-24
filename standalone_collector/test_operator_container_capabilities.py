@@ -101,6 +101,7 @@ def _browser_fixture(collector,pid,fd,home,proxy_port):
         return 'collector_boundary_failed'
     print('collector_boundary_verified',flush=True)
     from playwright.sync_api import Error, sync_playwright
+    failing_phase = 'ordinary_chromium_sandbox_failed'
     try:
         with sync_playwright() as runtime:
             browser = runtime.chromium.launch(executable_path=CHROMIUM,
@@ -109,11 +110,13 @@ def _browser_fixture(collector,pid,fd,home,proxy_port):
                       '--disable-background-networking','--disable-quic','--disable-sync',
                       '--host-resolver-rules=MAP * ~NOTFOUND'])
             try:
+                failing_phase = 'neutral_browser_navigation_failed'
                 page = browser.new_page()
                 page.goto('about:blank')
                 if page.url!='about:blank':
                     return 'neutral_browser_navigation_failed'
                 print('browser_sandbox_verified',flush=True)
+                failing_phase = 'mandatory_browser_url_policy_unconfirmed'
                 # The test container has --network none and the local fixture
                 # returns 403. No actual DNS or provider connection can occur.
                 with suppress(Error):
@@ -125,8 +128,15 @@ def _browser_fixture(collector,pid,fd,home,proxy_port):
                     return 'mandatory_browser_url_policy_unconfirmed'
             finally:
                 browser.close()
-    except Exception:
-        return 'ordinary_chromium_sandbox_failed'
+    except Exception as exc:
+        diagnostic = str(exc).lower()
+        # The input is an offline fixture; even its exception text stays private.
+        if failing_phase == 'ordinary_chromium_sandbox_failed':
+            if 'failed to move to new namespace' in diagnostic or 'no usable sandbox' in diagnostic:
+                return 'chromium_namespace_sandbox_unavailable'
+            if 'suid sandbox helper' in diagnostic:
+                return 'chromium_suid_helper_unavailable'
+        return failing_phase
     return 'verified'
 
 
@@ -158,7 +168,8 @@ def _result():
                 # Do not publish subprocess output; expose only fixed result fields.
                 lines = set(runner.stdout.decode('ascii',errors='ignore').splitlines())
                 states = ('collector_boundary_failed','neutral_browser_navigation_failed',
-                          'mandatory_browser_url_policy_unconfirmed','ordinary_chromium_sandbox_failed','verified')
+                          'mandatory_browser_url_policy_unconfirmed','ordinary_chromium_sandbox_failed',
+                          'chromium_namespace_sandbox_unavailable','chromium_suid_helper_unavailable','verified')
                 outcome = next((value for value in states if value in lines),'fixture_incomplete')
                 if outcome=='verified' and (not proxy.source_seen or proxy.forbidden_seen):
                     outcome = 'restricted_proxy_unconfirmed'
