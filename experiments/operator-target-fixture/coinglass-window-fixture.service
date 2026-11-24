@@ -1,0 +1,20 @@
+[Unit]
+Description=Private zero-provider CoinGlass visual fixture
+
+[Service]
+Type=simple
+User=cg-window-fixture
+Group=cg-window-fixture
+UMask=0077
+StateDirectory=coinglass-window-fixture
+StateDirectoryMode=0700
+RuntimeDirectory=coinglass-window-fixture
+RuntimeDirectoryMode=0700
+Environment=HOME=/var/lib/coinglass-window-fixture
+Environment=TMPDIR=/run/coinglass-window-fixture
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/opt/coinglass-window-fixture/standalone_collector
+EnvironmentFile=/run/coinglass-fixture-config/operator.env
+ExecStart=/usr/local/lib/coinglass-window-fixture/bin/python -B /opt/coinglass-window-fixture/qa/server.py
+KillMode=control-group
+Restart=no
