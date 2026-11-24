@@ -51,11 +51,32 @@ jobs:
         run: >-
           python -m pip install
           'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3'
-          'playwright==1.55.0' 'Pillow==12.3.0'
+          'playwright==1.55.0' 'Pillow==12.3.0' 'pycryptodome==3.21.0'
       - name: Install synthetic DOM test browser
         run: python -m playwright install --with-deps chromium
+      - name: Provide local database and Chromium for managed-session fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --silent --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coinglass-test" @electric-sql/pglite@0.5.13
+          echo "PGLITE_MODULE=$RUNNER_TEMP/coinglass-test/node_modules/@electric-sql/pglite" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/coinglass-test/bin"
+          python - <<'PYTEST'
+          from pathlib import Path
+          import os
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as playwright:
+              target = Path(playwright.chromium.executable_path)
+              assert target.is_file()
+              (Path(os.environ["RUNNER_TEMP"]) / "coinglass-test/bin/chromium").symlink_to(target)
+          PYTEST
+          echo "$RUNNER_TEMP/coinglass-test/bin" >> "$GITHUB_PATH"
+          pg_config --bindir >> "$GITHUB_PATH"
       - name: Prepare actual runtime and run collector contracts
         run: python standalone_collector/prepare.py
+      - name: Exercise protected-map fixture and restart the browser against saved local state
+        working-directory: standalone_collector
+        run: python -m unittest test_session_browser_restart test_modern_map -v
       - name: Verify read-only startup and source configuration checks
         working-directory: standalone_collector
         run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v

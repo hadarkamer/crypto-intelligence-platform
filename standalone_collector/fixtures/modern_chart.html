@@ -1,0 +1,58 @@
+<!doctype html><html><head><style>
+body{background:#0c1016;color:white;font:14px sans-serif;margin:8px}ul{display:inline-flex;gap:8px;padding:0}
+li{list-style:none;cursor:pointer}li.ui_on__fixture{background:white;color:black}b{display:inline-block}
+nav,header{display:flex;align-items:center;gap:20px}.picker{display:inline-block}
+canvas{display:block}aside{margin-top:6px}#selection{display:none}
+</style></head><body>
+<h1>BTC Liquidation Heatmap</h1><header>
+<ul id="models"><li class="ui_on__fixture"><span>Model 1</span></li><li><span>Model 2</span></li><li><span>Model 3</span></li></ul>
+<ul><li><span>Pair</span></li><li class="ui_on__fixture"><span>Coin</span></li></ul>
+<button aria-label="Coin">BTC</button></header>
+<nav><span class="picker"><span>Range</span> <div role="combobox">24 hour</div></span>
+<span class="picker"><span>Layout</span> <div role="combobox">Single chart</div></span>
+<ul id="modes"><li class="ui_on__fixture"><span>Pan</span></li><li><span>Measure</span></li></ul>
+<span id="update"></span></nav>
+<nav><span class="picker"><span>Lens</span> <div role="combobox">Heat</div></span>
+<span class="picker"><span>Colours</span> <div role="combobox">Viridis Default</div></span>
+<span><span>Intensity</span> ≥ 0 % – ≤ 100 %</span></nav>
+<canvas width="760" height="345"></canvas>
+<aside><h2>Market overview</h2><div><span>Open liquidation levels (total)</span> 100M</div>
+<div><span>Longs (below price)</span> 20M</div><div><span>Shorts (above price)</span> 80M</div>
+<div><span>Price step / column period</span> 1 / 5m</div><div data-lv="true">115</div></aside>
+<section id="selection"><ul><li class="ui_on__fixture"><span>Right edge</span></li><li><span>Whole box</span></li></ul>
+<div>Reference (last price) <span>105</span></div><div>Box total · <span id="box"></span></div>
+<div><span>Largest cluster</span> <span id="leader"></span></div></section>
+<script>
+const groups=[[115,30,'#fde725'],[111,12,'#35b779'],[110,15,'#35b779'],[99,15,'#fde725']];
+const chart=document.querySelector('canvas'),ctx=chart.getContext('2d');
+const clock=new Date(),dt=clock.toISOString();
+document.querySelector('#update').textContent='Updated '+dt.slice(11,16);
+const stamp=dt.slice(5,7)+'/'+dt.slice(8,10)+' '+dt.slice(11,16);
+const previous=new Date(clock.getTime()-60*60*1000).toISOString();
+function render(hover,px=680){
+  ctx.fillStyle='#12151c';ctx.fillRect(0,0,760,345);ctx.fillStyle='#440053';ctx.fillRect(0,0,700,301);
+  for(let i=0;i<5;i++){ctx.fillStyle='rgb('+String(40+i*24)+',22,154)';ctx.fillRect(420,18+i*30,280,4)}
+  for(const [p,v,c] of groups){ctx.fillStyle=c;ctx.fillRect(420,Math.round((120-p)*10)-4,280,9)}
+  if(hover){ctx.fillStyle='white';ctx.fillText(px>650?stamp:previous.slice(5,7)+'/'+previous.slice(8,10)+' '+previous.slice(11,16),px-30,325)}
+}
+render(false);let anchor=null;
+chart.addEventListener('mousemove',e=>render(true,e.offsetX));chart.addEventListener('mouseleave',()=>render(false));
+chart.addEventListener('mousedown',e=>{anchor=e.offsetY});chart.addEventListener('mouseup',e=>{
+  if(!document.querySelector('#modes li:last-child').classList.contains('ui_on__fixture'))return;
+  let ymin=Math.min(anchor,e.offsetY),ymax=Math.max(anchor,e.offsetY);
+  let pLow=120-ymax/10,pHigh=120-ymin/10;
+  const selected=groups.filter(([p])=>p>=pLow-.01&&p<=pHigh+.01);
+  if(!selected.length)return;
+  const leader=selected.reduce((a,b)=>a[1]>b[1]?a:b),sum=selected.reduce((a,b)=>a+b[1],0);
+  document.querySelector('#selection').style.display='block';
+  document.querySelector('#box').textContent=pLow.toFixed(2)+' → '+pHigh.toFixed(2)+' (1%) '+(ymax-ymin>280?100:sum)+'M';
+  document.querySelector('#leader').textContent=leader[0]+' · '+leader[1]+'M';
+});
+for(const li of document.querySelectorAll('li'))li.onclick=()=>{
+  for(const s of li.parentNode.children)s.classList.remove('ui_on__fixture');li.classList.add('ui_on__fixture');
+};
+document.querySelector('[role=combobox]').onclick=function(){
+  const list=document.createElement('div');list.setAttribute('role','listbox');list.innerHTML='<span>12 hour</span>';
+  this.parentNode.append(list);list.onclick=()=>{this.textContent='12 hour';list.remove()};
+};
+</script></body></html>

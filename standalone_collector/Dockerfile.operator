@@ -1,0 +1,21 @@
+# Optional replacement runtime for the SAME web service. Build from repository root.
+FROM python:3.11-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PLAYWRIGHT_BROWSERS_PATH=/opt/collector-browsers
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bubblewrap ca-certificates chromium \
+      chromium-sandbox fonts-liberation novnc openbox socat tigervnc-standalone-server wmctrl x11-utils \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 collector
+WORKDIR /srv/collector
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY market_vision/ ./market_vision/
+COPY collection_bridge.py collection_model1_task.py ai_market_vision.py ./
+COPY standalone_collector/ ./standalone_collector/
+RUN python standalone_collector/prepare.py \
+ && mkdir -p /etc/chromium/policies/managed \
+ && cp standalone_collector/operator_chromium_policy.json /etc/chromium/policies/managed/operator.json \
+ && mkdir -p standalone_collector/diagnostics \
+ && chown collector:collector standalone_collector/diagnostics
+USER collector
+CMD ["python", "standalone_collector/app.py"]

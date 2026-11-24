@@ -23,6 +23,12 @@ SAFE_REASONS={'loading-indicator','blur','no-canvas','wrong-label','invalid-sour
 
 
 def source_session_configured():
+    if os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true':
+        # Configuration presence is not a claim that stored authentication is
+        # currently accepted. The worker checks the managed row before a scan.
+        return bool(os.getenv('COINGLASS_SESSION_KEY', '').strip())
+    if os.getenv('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true':
+        return False
     return any(bool(os.getenv(name,'').strip()) for name in SESSION_KEYS)
 
 
@@ -118,21 +124,48 @@ async def diagnostic_image(request):
 
 async def run_worker(store):
     from collection_bridge import run_existing_scanner,BridgeError
+    from session_runtime import ManagedSession, SessionError
+    from collection_metrics import logged_phase, queue_wait
     while True:
         held=None
         try:
             claimed=await asyncio.to_thread(store.claim)
             if claimed:
                 held,row=claimed;jid=str(row['id'])
+                queue_wait(jid, row)
+                session = None
+                symbol = row.get('symbol', 'BTC')
+                model = row.get('heatmap_model', 1)
+                timeframe = row['timeframe']
                 try:
-                    result,image=await run_existing_scanner(row['timeframe'],jid,row.get('heatmap_model',1))
-                    await asyncio.to_thread(store.finish,jid,result,image)
+                    try:
+                        session=ManagedSession.from_environment(held,jid)
+                    except SessionError as exc:
+                        raise BridgeError(exc.code,'Session state configuration failed',503) from None
+                    if session is None:
+                        result,image=await run_existing_scanner(timeframe,jid,model,symbol=symbol)
+                    else:
+                        from operator_login import waiting_incident
+                        if await asyncio.to_thread(waiting_incident, held, symbol, model, timeframe):
+                            raise BridgeError('source_login_required', 'Operator sign-in is pending', 409)
+                        result,image=await run_existing_scanner(timeframe,jid,model,session=session,symbol=symbol)
+                    with logged_phase(jid, 'collector_db_save_ms'):
+                        await asyncio.to_thread(store.finish,jid,result,image)
                 except asyncio.CancelledError:
-                    await asyncio.to_thread(store.finish,jid,None,None,'interrupted');raise
+                    with logged_phase(jid, 'collector_db_save_ms'):
+                        await asyncio.to_thread(store.finish,jid,None,None,'interrupted')
+                    raise
                 except BridgeError as exc:
-                    await asyncio.to_thread(store.finish,jid,None,None,exc.code)
+                    try:
+                        if session is not None and exc.code == 'source_login_required':
+                            from operator_login import record_login_required
+                            await asyncio.to_thread(record_login_required, held, symbol, model, timeframe, jid)
+                    finally:
+                        with logged_phase(jid, 'collector_db_save_ms'):
+                            await asyncio.to_thread(store.finish,jid,None,None,exc.code)
                 except Exception:
-                    await asyncio.to_thread(store.finish,jid,None,None,'scan_failed')
+                    with logged_phase(jid, 'collector_db_save_ms'):
+                        await asyncio.to_thread(store.finish,jid,None,None,'scan_failed')
         except asyncio.CancelledError:raise
         except Exception:print('MODEL1_WORKER temporary store failure',flush=True)
         finally:
@@ -142,25 +175,34 @@ async def run_worker(store):
 
 def create_app():
     from aiohttp import web
-    from collection_bridge import JobStore,register_collection_routes
+    from collection_bridge import BridgeError,JobStore,register_collection_routes
+    from symbol_jobs import MEASURE_SCHEMA,modern_enabled,verified_symbols
     application=web.Application(client_max_size=2048)
     enabled=os.getenv('COLLECTION_BRIDGE_ENABLED','').lower()=='true'
     configured=bool(os.getenv('DATABASE_URL') and os.getenv('OPENAI_API_KEY')
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
-    active=enabled and configured
+    modern=modern_enabled()
+    try:
+        declared=verified_symbols()
+        supported_symbols=sorted(declared if modern else declared & {'BTC'})
+    except BridgeError:
+        supported_symbols=[]
+    active=enabled and configured and bool(supported_symbols)
     store=JobStore(os.getenv('DATABASE_URL','')) if active else None
     async def health(_):
         from prominent_levels import SELECTION_POLICY, CONTRACT
         from store_diagnostics import store_readiness
-        result={'ok':True,'service':'decision-hub-model1-collector',
+        result={'ok':bool(supported_symbols),'service':'decision-hub-model1-collector',
             'mode':'collection' if active else 'not_configured','bot_started':False,
             'scheduled_collection':False,'source_session_configured':source_session_configured(),
-            'capture_flow':'original','acceptance':'screenshot-observed-and-numeric-validation',
+            'capture_flow':'coin-map-right-edge' if modern else 'original',
+            'acceptance':'screenshot-observed-and-numeric-validation',
+            'supported_symbols':supported_symbols,
             'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
             'new_capture_hourly_limit':None,
             'worker_concurrency':1,'automatic_cache_minutes':15}
         result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
-        result['numeric_reader']='displayed-hover.v1'
+        result['numeric_reader']=MEASURE_SCHEMA if modern else 'displayed-hover.v1'
         result['store_connectivity']=await asyncio.to_thread(store_readiness,store)
         report=read_public_probe_report()
         if report is not None:result['source_probe']=report
@@ -168,6 +210,8 @@ def create_app():
     application.router.add_get('/',health);application.router.add_get('/health',health)
     application.router.add_get('/api/collection/model1/source-probe/evidence',diagnostic_image)
     register_collection_routes(application,store=store,enabled=active,start_worker=False)
+    from operator_login import register_operator_login
+    register_operator_login(application, store, active)
     if active:
         async def lifecycle(app):
             await asyncio.to_thread(store.initialize)
