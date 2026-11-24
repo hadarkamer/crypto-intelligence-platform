@@ -101,6 +101,14 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result,{'status':'failed','source_attempts':0})
 
 
+class StubBridgeError(Exception):
+    pass
+
+
+def isolated_bridge():
+    return types.SimpleNamespace(BridgeError=StubBridgeError, JobStore=Mock(), register_collection_routes=Mock())
+
+
 class EndpointTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.directory=Path(self.temp.name)
@@ -126,13 +134,28 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPNotFound):await app.diagnostic_image(request)
     async def test_old_public_endpoint_removed_even_with_old_flag(self):
         os.environ['PUBLIC_SOURCE_DIAGNOSTIC']='true'
-        fake_bridge=types.SimpleNamespace(JobStore=Mock(),register_collection_routes=Mock())
+        fake_bridge=isolated_bridge()
         with patch.dict('sys.modules',{'collection_bridge':fake_bridge}):application=app.create_app()
         routes={route.resource.canonical for route in application.router.routes()}
         self.assertNotIn('/source-probe.png',routes);self.assertIn('/api/collection/model1/source-probe/evidence',routes);fake_bridge.JobStore.assert_not_called()
+    async def test_invalid_symbol_configuration_does_not_start_worker(self):
+        os.environ.update(COLLECTION_BRIDGE_ENABLED='true', DATABASE_URL='synthetic', OPENAI_API_KEY='synthetic',
+                          COINGLASS_COLLECTOR_TOKEN=SYNTHETIC_TOKEN, COINGLASS_COOKIE_HEADER=SYNTHETIC_SESSION,
+                          COINGLASS_VERIFIED_SYMBOLS='invalid-symbol')
+        fake_bridge=isolated_bridge()
+        with patch.dict('sys.modules',{'collection_bridge':fake_bridge}):
+            application=app.create_app()
+        route=next(r for r in application.router.routes() if r.resource.canonical=='/health' and r.method=='GET')
+        response=await route.handler(make_mocked_request('GET','/health'))
+        result=json.loads(response.text)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['mode'],'not_configured')
+        self.assertEqual(result['supported_symbols'],[])
+        fake_bridge.JobStore.assert_not_called()
+
     async def test_health_exposes_presence_not_cookie_contents(self):
         os.environ['COINGLASS_COOKIE_HEADER']=SYNTHETIC_SESSION
-        fake_bridge=types.SimpleNamespace(JobStore=Mock(),register_collection_routes=Mock())
+        fake_bridge=isolated_bridge()
         with patch.dict('sys.modules',{'collection_bridge':fake_bridge}):application=app.create_app()
         route=next(r for r in application.router.routes() if r.resource.canonical=='/health' and r.method=='GET')
         response=await route.handler(make_mocked_request('GET','/health'));result=json.loads(response.text)

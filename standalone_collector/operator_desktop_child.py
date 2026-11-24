@@ -88,6 +88,10 @@ def send_checkpoint(output, state):
 
 def main():
     probe=sys.argv[1:]==['--probe']
+    def mark_probe(stage):
+        if probe:
+            print(stage,flush=True)
+    mark_probe('isolated_environment')
     # Do not inherit the private state-output socket into any UI process.
     output=None if probe else os.fdopen(os.dup(0),'r+b',buffering=0)
     devnull=os.open('/dev/null',os.O_RDONLY)
@@ -102,6 +106,7 @@ def main():
         return 1
     if any(name in os.environ for name in ('DATABASE_URL','COINGLASS_SESSION_KEY','OPENAI_API_KEY')):
         return 1
+    mark_probe('private_display')
     display=spawn(['/usr/bin/Xtigervnc',':19','-geometry','1200x800','-depth','24',
                    '-rfbport','-1','-rfbunixpath','/channel/display','-rfbunixmode','0600',
                    '-SecurityTypes','None','-nolisten','tcp','-AcceptCutText=0','-SendCutText=0',
@@ -117,9 +122,11 @@ def main():
     # No application launcher/menu exposed through the private window manager.
     cfg=Path('/tmp/openbox.xml')
     cfg.write_text('<openbox_config xmlns="http://openbox.org/3.4/rc"><keyboard/><mouse/><menu/></openbox_config>')
+    mark_probe('window_manager')
     wm=spawn(['/usr/bin/openbox','--config-file',str(cfg),'--sm-disable'])
     relay=spawn(['/usr/bin/socat','TCP4-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork',
                  'UNIX-CONNECT:/channel/egress'])
+    mark_probe('native_browser')
     browser=spawn(['/usr/bin/chromium','--user-data-dir='+PROFILE,*CHROME_FLAGS,
                    'about:blank' if probe else 'https://www.coinglass.com/login'])
     attached = False
@@ -139,6 +146,7 @@ def main():
         time.sleep(.35)
     else:
         return 1
+    mark_probe('native_browser_close')
     for wid in ids:
         cmd(['/usr/bin/wmctrl','-ic',wid])
     # Chromium alone serializes its temporary browsing state. A source session
@@ -150,9 +158,11 @@ def main():
     display.terminate()
     display.wait(timeout=4)
     symbol,model,timeframe=(None,None,None) if probe else sys.argv[1:]
+    mark_probe('reader_import')
     from playwright.sync_api import sync_playwright
     from modern_map_reader import open_verified_map
     from session_capture import snapshot_coinglass
+    mark_probe('sandboxed_verifier')
     with sync_playwright() as playwright:
         context=playwright.chromium.launch_persistent_context(PROFILE,
             executable_path='/usr/bin/chromium',chromium_sandbox=True,headless=True,
@@ -160,6 +170,7 @@ def main():
         try:
             page=context.new_page()
             if probe:
+                mark_probe('local_verification')
                 page.goto("about:blank")
                 return 0 if page.url=="about:blank" else 1
             if timeframe != '12H':

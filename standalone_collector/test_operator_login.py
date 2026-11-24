@@ -12,14 +12,14 @@ import socket
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import operator_window
-from operator_desktop import Desktop, permitted_host
+from operator_desktop import Desktop, permitted_host, probe_result, sandbox_preflight
 from operator_desktop_child import HOME_TITLE, LOGIN_TITLE, LoginReturn, send_checkpoint
 from operator_login import (LoginIncidentError, begin_window, close_window, incident_status,
                             record_login_required, register_operator_login, waiting_incident)
@@ -221,6 +221,19 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(proof,2)
             finally:
                 controller.close()
+
+    async def test_runtime_diagnostic_uses_fixed_denial_code_and_stops_before_browser(self):
+        class Denied:
+            returncode = 1
+            async def communicate(self):
+                return None, b'bwrap: Creating new namespace failed: Operation not permitted'
+        with patch('operator_desktop.asyncio.create_subprocess_exec',new=AsyncMock(return_value=Denied())):
+            self.assertEqual(await sandbox_preflight('/unused'),'host_namespace_denied')
+        with patch('operator_desktop.installation_issue',return_value=None), \
+             patch('operator_desktop.sandbox_preflight',new=AsyncMock(return_value='host_namespace_denied')), \
+             patch('operator_desktop.asyncio.create_subprocess_exec',new=AsyncMock()) as spawn:
+            self.assertEqual(await probe_result(),'host_namespace_denied')
+            spawn.assert_not_awaited()
 
     async def test_untrusted_egress_domains(self):
         for domain in ('www.coinglass.com','accounts.google.com'):

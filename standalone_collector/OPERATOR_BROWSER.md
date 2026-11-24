@@ -4,7 +4,7 @@ The existing collector web process serves the viewer. A verified source sign-in 
 
 ## Runtime and build
 
-Use repository root as the container build context. The existing service remains on its current native runtime until an authorized rollout. The following commands build and test the optional image on a staging host with Docker. The test starts native Chromium at about:blank and starts the same Playwright verifier used by the handoff. It needs no provider, identity, database, or deployment credential. The expected exit status is zero and isolated_operator_browser must be true.
+Use repository root as the container build context. The existing service remains on its current native runtime until an authorized rollout. The following commands build and test the optional image on a staging host with Docker. The test starts native Chromium at about:blank and starts the same Playwright verifier used by the handoff. It needs no provider, identity, database, or deployment credential. The expected exit status is zero, isolated_operator_browser must be true and reason must be ready. A failing probe reports a fixed reason code for the image, kernel namespace, display or browser stage.
 
 ```sh
 docker build -f standalone_collector/Dockerfile.operator -t coinglass-operator-stage .

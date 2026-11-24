@@ -113,56 +113,113 @@ def namespace_args(directory):
     return args
 
 
-def installed():
-    # The supplied service Dockerfile owns this layout; never infer isolation
-    # from an environment variable naming an arbitrary binary or remote host.
-    files = (BWRAP,'/usr/bin/Xtigervnc','/usr/bin/chromium','/usr/bin/socat',
-             '/usr/bin/xprop','/usr/bin/wmctrl','/usr/bin/openbox','/usr/local/bin/python')
+def installation_issue():
+    # These paths are owned by the supplied image. A configured flag or
+    # executable supplied by an HTTP client is never a capability proof.
+    binaries = (BWRAP, '/usr/bin/Xtigervnc', '/usr/bin/chromium', '/usr/bin/socat',
+                '/usr/bin/xprop', '/usr/bin/wmctrl', '/usr/bin/openbox', '/usr/local/bin/python')
+    if os.getuid() == 0:
+        return 'service_user_must_be_nonroot'
+    if not all(os.access(path, os.X_OK) for path in binaries):
+        return 'image_binaries_missing'
+    if not (ASSETS/'core/rfb.js').is_file() or not all((HERE/f).is_file() for f in FILES):
+        return 'image_assets_missing'
     policy = Path('/etc/chromium/policies/managed/operator.json')
     try:
-        if json.loads(policy.read_text()) != json.loads((HERE/'operator_chromium_policy.json').read_text()):
+        if json.loads(policy.read_text()) == json.loads((HERE/'operator_chromium_policy.json').read_text()):
+            return None
+    except (OSError, ValueError):
+        pass
+    return 'browser_policy_missing_or_invalid'
+
+
+async def sandbox_preflight(directory):
+    # Test the exact child namespace and its mounts, before launching any UI.
+    proc = await asyncio.create_subprocess_exec(*namespace_args(directory), '/usr/bin/true',
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE, env={})
+    try:
+        async with asyncio.timeout(10):
+            _, diagnostic = await proc.communicate()
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    if proc.returncode == 0:
+        return None
+    # The command only runs true with fixed image paths, no credentials, no
+    # network. Return an enum even if the host reports something unexpected.
+    detail = diagnostic[:4096].lower()
+    denied = any(marker in detail for marker in (b'operation not permitted', b'permission denied',
+                                                  b'no permissions to create'))
+    if denied and (b'namespace' in detail or b'unshare' in detail):
+        return 'host_namespace_denied'
+    if denied and (b'mount' in detail or b'pivot' in detail):
+        return 'host_mount_denied'
+    if denied and (b'netlink' in detail or b'loopback' in detail):
+        return 'host_network_namespace_denied'
+    return 'host_sandbox_denied' if denied else 'sandbox_image_setup_failed'
+
+
+async def _rfb_greeting(directory, proc):
+    for _ in range(150):
+        if proc.returncode is not None:
             return False
-    except (OSError,ValueError):
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(Path(directory)/'display'))
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            await asyncio.sleep(.1)
+    else:
         return False
-    return (os.getuid()!=0 and all(os.access(path,os.X_OK) for path in files)
-            and (ASSETS/'core/rfb.js').is_file() and all((HERE/f).is_file() for f in FILES))
+    try:
+        return await reader.readexactly(12) == b'RFB 003.008\n'
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
-async def probe():
-    if not installed():
-        return False
+PROBE_STAGES = frozenset(('isolated_environment', 'private_display', 'window_manager',
+                          'native_browser', 'native_browser_close', 'reader_import',
+                          'sandboxed_verifier', 'local_verification'))
+
+
+async def probe_result():
+    issue = installation_issue()
+    if issue:
+        return issue
     with tempfile.TemporaryDirectory() as directory:
         try:
-            proc=await asyncio.create_subprocess_exec(*namespace_args(directory),
-                '/usr/local/bin/python','/app/operator_desktop_child.py','--probe',
-                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            issue = await sandbox_preflight(directory)
+            if issue:
+                return issue
+            proc = await asyncio.create_subprocess_exec(*namespace_args(directory),
+                '/usr/local/bin/python', '/app/operator_desktop_child.py', '--probe',
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, env={})
+            greeting = asyncio.create_task(_rfb_greeting(directory, proc))
             try:
-                async with asyncio.timeout(50):
-                    # Verify the real, private VNC protocol endpoint while the
-                    # headed browser starts. No network or credentials are needed.
-                    for _ in range(100):
-                        if proc.returncode is not None:
-                            return False
-                        try:
-                            reader,writer = await asyncio.open_unix_connection(str(Path(directory)/'display'))
-                            break
-                        except (FileNotFoundError,ConnectionRefusedError):
-                            await asyncio.sleep(.05)
-                    else:
-                        return False
-                    try:
-                        greeting = await reader.readexactly(12)
-                    finally:
-                        writer.close()
-                        await writer.wait_closed()
-                    return greeting==b'RFB 003.008\n' and await proc.wait()==0
+                async with asyncio.timeout(55):
+                    stages, _ = await proc.communicate()
+                    if proc.returncode != 0:
+                        known = [stage for stage in stages.decode('ascii',errors='ignore').splitlines()
+                                 if stage in PROBE_STAGES]
+                        return (known[-1] if known else 'sandbox_child') + '_failed'
+                    return 'ready' if await greeting else 'private_rfb_handshake_failed'
             finally:
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-        except (OSError, TimeoutError, asyncio.IncompleteReadError):
-            return False
+                greeting.cancel()
+                await asyncio.gather(greeting,return_exceptions=True)
+        except TimeoutError:
+            return 'runtime_probe_timeout'
+        except (OSError, asyncio.IncompleteReadError):
+            return 'runtime_transport_unavailable'
+
+
+async def probe():
+    return await probe_result() == 'ready'
 
 
 @dataclass
@@ -263,6 +320,7 @@ class Desktop:
 if __name__ == '__main__':
     if sys.argv[1:] != ['--check-runtime']:
         raise SystemExit(2)
-    ready = asyncio.run(probe())
-    print(json.dumps({'isolated_operator_browser': ready, 'provider_requests': 0}))
+    reason = asyncio.run(probe_result())
+    ready = reason == 'ready'
+    print(json.dumps({'isolated_operator_browser':ready,'reason':reason,'provider_requests':0}))
     raise SystemExit(0 if ready else 1)
