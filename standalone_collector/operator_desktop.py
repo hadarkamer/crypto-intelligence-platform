@@ -88,22 +88,22 @@ async def _connect_tunnel(reader, writer):
             remote.close()
 
 
-def namespace_args(directory):
+def namespace_args(directory, system=Path('/')):
     # Only immutable system files and the audited reader are visible. In
     # particular, neither application storage nor the host's /proc or /tmp is bound.
     args = [BWRAP,'--unshare-all','--unshare-user','--die-with-parent','--new-session',
             '--cap-drop','ALL','--hostname','coinglass-operator','--clearenv',
-            '--ro-bind','/usr','/usr','--symlink','usr/bin','/bin',
+            '--ro-bind',str(system/'usr'),'/usr','--symlink','usr/bin','/bin',
             '--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
             '--proc','/proc','--dev','/dev','--size','67108864','--tmpfs','/dev/shm',
             '--size','268435456','--tmpfs','/tmp',
             '--dir','/etc','--dir','/run','--dir','/app',
-            '--dir','/etc/ssl','--ro-bind','/etc/ssl/certs','/etc/ssl/certs',
-            '--ro-bind-try','/etc/ssl/openssl.cnf','/etc/ssl/openssl.cnf',
-            '--ro-bind','/etc/fonts','/etc/fonts',
+            '--dir','/etc/ssl','--ro-bind',str(system/'etc/ssl/certs'),'/etc/ssl/certs',
+            '--ro-bind-try',str(system/'etc/ssl/openssl.cnf'),'/etc/ssl/openssl.cnf',
+            '--ro-bind',str(system/'etc/fonts'),'/etc/fonts',
             '--ro-bind','/etc/passwd','/etc/passwd','--ro-bind','/etc/group','/etc/group',
-            '--ro-bind-try','/etc/chromium','/etc/chromium',
-            '--ro-bind-try','/etc/chromium.d','/etc/chromium.d',
+            '--ro-bind-try',str(system/'etc/chromium'),'/etc/chromium',
+            '--ro-bind-try',str(system/'etc/chromium.d'),'/etc/chromium.d',
             '--bind',str(directory),'/channel','--chdir','/tmp','--setenv','HOME','/tmp/home',
             '--setenv','PATH','/usr/local/bin:/usr/bin:/bin','--setenv','LANG','C.UTF-8',
             '--setenv','DISPLAY',':19','--setenv','XDG_RUNTIME_DIR','/tmp/xdg',
@@ -113,18 +113,18 @@ def namespace_args(directory):
     return args
 
 
-def installation_issue():
+def installation_issue(system):
     # These paths are owned by the supplied image. A configured flag or
     # executable supplied by an HTTP client is never a capability proof.
-    binaries = (BWRAP, '/usr/bin/Xtigervnc', '/usr/bin/chromium', '/usr/bin/socat',
+    binaries = ('/usr/bin/Xtigervnc', '/usr/bin/chromium', '/usr/bin/socat',
                 '/usr/bin/xprop', '/usr/bin/wmctrl', '/usr/bin/openbox', '/usr/local/bin/python')
     if os.getuid() == 0:
         return 'service_user_must_be_nonroot'
-    if not all(os.access(path, os.X_OK) for path in binaries):
+    if not os.access(BWRAP,os.X_OK) or not all(os.access(system/path.lstrip('/'),os.X_OK) for path in binaries):
         return 'image_binaries_missing'
-    if not (ASSETS/'core/rfb.js').is_file() or not all((HERE/f).is_file() for f in FILES):
+    if not (system/'usr/share/novnc/core/rfb.js').is_file() or not all((HERE/f).is_file() for f in FILES):
         return 'image_assets_missing'
-    policy = Path('/etc/chromium/policies/managed/operator.json')
+    policy = system/'etc/chromium/policies/managed/operator.json'
     try:
         if json.loads(policy.read_text()) == json.loads((HERE/'operator_chromium_policy.json').read_text()):
             return None
@@ -133,9 +133,9 @@ def installation_issue():
     return 'browser_policy_missing_or_invalid'
 
 
-async def sandbox_preflight(directory):
+async def sandbox_preflight(directory, system=Path('/')):
     # Test the exact child namespace and its mounts, before launching any UI.
-    proc = await asyncio.create_subprocess_exec(*namespace_args(directory), '/usr/bin/true',
+    proc = await asyncio.create_subprocess_exec(*namespace_args(directory,system), '/usr/bin/true',
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE, env={})
     try:
@@ -184,16 +184,16 @@ PROBE_STAGES = frozenset(('isolated_environment', 'private_display', 'window_man
                           'sandboxed_verifier', 'local_verification'))
 
 
-async def probe_result():
-    issue = installation_issue()
+async def probe_result(system=Path('/')):
+    issue = installation_issue(system)
     if issue:
         return issue
     with tempfile.TemporaryDirectory() as directory:
         try:
-            issue = await sandbox_preflight(directory)
+            issue = await sandbox_preflight(directory,system)
             if issue:
                 return issue
-            proc = await asyncio.create_subprocess_exec(*namespace_args(directory),
+            proc = await asyncio.create_subprocess_exec(*namespace_args(directory,system),
                 '/usr/local/bin/python', '/app/operator_desktop_child.py', '--probe',
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, env={})
@@ -318,9 +318,16 @@ class Desktop:
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] != ['--check-runtime']:
+    if sys.argv[1:] == ['--check-runtime']:
+        system = Path('/')
+    elif len(sys.argv)==3 and sys.argv[1]=='--check-native-fixture':
+        # CI test fixture: the real distro binaries from the built image, on
+        # a genuine unprivileged host without the outer Docker seccomp layer.
+        # Service requests cannot select an executable, root, or host policy.
+        system = Path(sys.argv[2]).resolve(strict=True)
+    else:
         raise SystemExit(2)
-    reason = asyncio.run(probe_result())
+    reason = asyncio.run(probe_result(system))
     ready = reason == 'ready'
     print(json.dumps({'isolated_operator_browser':ready,'reason':reason,'provider_requests':0}))
     raise SystemExit(0 if ready else 1)
