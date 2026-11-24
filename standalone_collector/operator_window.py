@@ -341,7 +341,14 @@ def register_window(application,store,active):
     application.cleanup_ctx.append(manager.lifecycle)
     async def static(request):
         names = {'':'operator_viewer.html','/viewer.js':'operator_viewer.js','/viewer.css':'operator_viewer.css'}
-        return web.FileResponse(HERE/names[request.path[len(PREFIX):]],headers=HEADERS)
+        headers = dict(HEADERS)
+        if manager.origin:
+            # Older clients do not consistently interpret HTTPS 'self' as
+            # covering WSS. The pinned origin also fences the actual WS route.
+            websocket_origin = 'wss://' + urlsplit(manager.origin).netloc
+            headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace(
+                "connect-src 'self'", "connect-src 'self' " + websocket_origin)
+        return web.FileResponse(HERE/names[request.path[len(PREFIX):]],headers=headers)
     for suffix in ('','/viewer.js','/viewer.css'):
         application.router.add_get(PREFIX+suffix,static)
     application.router.add_post(PREFIX+'/admit',manager.admit)

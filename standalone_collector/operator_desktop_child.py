@@ -71,7 +71,12 @@ def send_checkpoint(output, state):
         raise ValueError('invalid_operator_checkpoint')
     # Do not close the verifying browser until the parent has committed the
     # scoped source state and incident resolution in the same DB transaction.
-    output.write(struct.pack('!I',len(payload)) + payload)
+    frame = memoryview(struct.pack('!I',len(payload)) + payload)
+    while frame:
+        sent = output.write(frame)
+        if not sent:
+            raise RuntimeError('operator_checkpoint_unacknowledged')
+        frame = frame[sent:]
     while select.select([output],[],[],600)[0]:
         command = output.read(1)
         if command == b'S':
