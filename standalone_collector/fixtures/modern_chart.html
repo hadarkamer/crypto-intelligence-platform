@@ -1,4 +1,4 @@
-<!doctype html><html><head><style>
+<!doctype html><html><head><meta charset="utf-8"><style>
 body{background:#0c1016;color:white;font:14px sans-serif;margin:8px}ul{display:inline-flex;gap:8px;padding:0}
 li{list-style:none;cursor:pointer}li.ui_on__fixture{background:white;color:black}b{display:inline-block}
 nav,header{display:flex;align-items:center;gap:20px}.picker{display:inline-block}
@@ -14,7 +14,10 @@ canvas{display:block}aside{margin-top:6px}#selection{display:none}
 <span id="update"></span></nav>
 <nav><span class="picker"><span>Lens</span> <div role="combobox">Heat</div></span>
 <span class="picker"><span>Colours</span> <div role="combobox">Viridis Default</div></span>
-<span><span>Intensity</span> ≥ 0 % – ≤ 100 %</span></nav>
+<span><span>Intensity</span>
+<button aria-label="Lowest intensity" type="button"></button>
+<button aria-label="Full-brightness intensity" type="button"></button>
+<span id="intensity-label">≥ 0 % – ≤ 100 %</span></span></nav>
 <canvas width="760" height="345"></canvas>
 <aside><h2>Market overview</h2><div><span>Open liquidation levels (total)</span> 100M</div>
 <div><span>Longs (below price)</span> 20M</div><div><span>Shorts (above price)</span> 80M</div>

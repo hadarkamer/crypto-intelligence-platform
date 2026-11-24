@@ -109,7 +109,7 @@ class BrowserReplay(unittest.TestCase):
                 def route(req):
                     calls.append(req.request.url)
                     if req.request.url==url:
-                        req.fulfill(content_type='text/html',body=(FIXTURE.parent/'modern_chart.html').read_text())
+                        req.fulfill(content_type='text/html; charset=utf-8',body=(FIXTURE.parent/'modern_chart.html').read_bytes())
                     else:req.abort()
                 page.route('**/*',route)
                 with tempfile.TemporaryDirectory() as out, patch.dict('sys.modules',{'session_capture':Mock()}):

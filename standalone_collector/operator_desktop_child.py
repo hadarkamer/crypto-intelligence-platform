@@ -11,6 +11,7 @@ import re
 import resource
 import select
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ NULL = subprocess.DEVNULL
 PROFILE='/tmp/browser'
 PROXY='--proxy-server=http://127.0.0.1:3128'
 HOME_TITLE='CoinGlass | Crypto, Stocks, Macro & Global Market Data'
+LOGIN_TITLE='Login to CoinGlass'
 CHROME_FLAGS=[PROXY,'--disable-quic','--no-first-run','--no-default-browser-check',
               '--disable-background-networking','--renderer-process-limit=3',
               '--disable-sync','--disable-breakpad','--disable-crash-reporter',
@@ -39,11 +41,44 @@ def windows():
     return re.findall(r'0x[0-9a-fA-F]+',ids)
 
 
-def returned_to_source(window_ids):
-    # The public home-page title is only a navigation hint to start verification.
-    # Neither a title nor the absence of any dialog grants access.
-    return any(HOME_TITLE in cmd(['/usr/bin/xprop','-id',wid,'-notype','_NET_WM_NAME'])
-               for wid in window_ids)
+class LoginReturn:
+    """Navigation hint from a single native window, after the viewer has arrived."""
+    def __init__(self):
+        self.login_window = None
+        self.home_since = None
+
+    def observe(self, window_ids, now):
+        if len(window_ids) != 1:
+            self.home_since = None
+            return False
+        wid = window_ids[0]
+        title = cmd(['/usr/bin/xprop','-id',wid,'-notype','_NET_WM_NAME'])
+        if LOGIN_TITLE in title:
+            self.login_window = wid
+        if self.login_window != wid or HOME_TITLE not in title:
+            self.home_since = None
+            return False
+        if self.home_since is None:
+            self.home_since = now
+        return now-self.home_since >= 1
+
+
+def send_checkpoint(output, state):
+    import json
+    from session_state import STATE_LIMIT
+    payload = json.dumps(state,separators=(',',':'),allow_nan=False).encode('utf-8')
+    if not payload or len(payload)>STATE_LIMIT:
+        raise ValueError('invalid_operator_checkpoint')
+    # Do not close the verifying browser until the parent has committed the
+    # scoped source state and incident resolution in the same DB transaction.
+    output.write(struct.pack('!I',len(payload)) + payload)
+    while select.select([output],[],[],600)[0]:
+        command = output.read(1)
+        if command == b'S':
+            return
+        if command != b'V':
+            break
+    raise RuntimeError('operator_checkpoint_unacknowledged')
 
 
 def main():
@@ -82,11 +117,19 @@ def main():
                  'UNIX-CONNECT:/channel/egress'])
     browser=spawn(['/usr/bin/chromium','--user-data-dir='+PROFILE,*CHROME_FLAGS,
                    'about:blank' if probe else 'https://www.coinglass.com/login'])
+    attached = False
+    transition = LoginReturn()
     until=time.monotonic()+(16 if probe else 570)
     while time.monotonic()<until and all(p.poll() is None for p in (browser,relay,wm,display)):
         ids=windows()
-        requested = output and select.select([output], [], [], 0)[0] and output.read(1) == b'V'
-        if ids and (probe or returned_to_source(ids) or requested):
+        command = None
+        if output and select.select([output], [], [], 0)[0]:
+            command = output.read(1)
+            if command == b'A':
+                attached = True
+            if not command:
+                return 1
+        if ids and (probe or (attached and (command==b'V' or transition.observe(ids,time.monotonic())))):
             break
         time.sleep(.35)
     else:
@@ -105,7 +148,6 @@ def main():
     from playwright.sync_api import sync_playwright
     from modern_map_reader import open_verified_map
     from session_capture import snapshot_coinglass
-    import json
     with sync_playwright() as playwright:
         context=playwright.chromium.launch_persistent_context(PROFILE,
             executable_path='/usr/bin/chromium',chromium_sandbox=True,headless=True,
@@ -119,10 +161,10 @@ def main():
                 open_verified_map(page,symbol,int(model),'12H')
             open_verified_map(page,symbol,int(model),timeframe)
             state=snapshot_coinglass(context,page)
+            with output:
+                send_checkpoint(output,state)
         finally:
             context.close()
-    with output:
-        output.write(json.dumps(state,separators=(',',':'),allow_nan=False).encode('utf-8'))
     return 0
 
 

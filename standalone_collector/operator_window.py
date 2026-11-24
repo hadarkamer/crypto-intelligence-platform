@@ -106,6 +106,7 @@ class Window:
     human_wait_ms: int | None = None
     attached: bool = False
     connected_once: bool = False
+    verification_requested: bool = False
     task: object = None
 
 
@@ -182,6 +183,7 @@ class WindowManager:
             while True:
                 try:
                     await asyncio.to_thread(self.db.finish,window,state)
+                    await window.desktop.acknowledge_commit()
                     return
                 except LoginIncidentError as exc:
                     if str(exc)!='collector_busy':
@@ -243,6 +245,9 @@ class WindowManager:
         window = self.authorized(request)
         if not self.same_origin(request) or not window or not window.attached:
             return response({'error':'forbidden'},403)
+        if window.verification_requested:
+            return response({'accepted':True})
+        window.verification_requested = True
         try:
             await window.desktop.verify_now()
         except OSError:
@@ -262,6 +267,7 @@ class WindowManager:
         try:
             reader,writer = await window.desktop.connect_display()
             await ws.prepare(request)
+            await window.desktop.viewer_attached()
             window.attached_at = time.monotonic()
             window.connected_once = True
             async def downstream():

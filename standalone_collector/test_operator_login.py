@@ -61,6 +61,12 @@ class LocalDisplay:
     async def connect_display(self):
         return await asyncio.open_connection(sock=self.parent)
 
+    async def viewer_attached(self):
+        self.viewed = True
+
+    async def acknowledge_commit(self):
+        self.committed = True
+
     async def verified_state(self):
         await self.proven.wait()
         return DUMMY
@@ -166,6 +172,7 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
             if self.manager.current is None:
                 break
             await asyncio.sleep(.025)
+        self.assertTrue(desktop.viewed and desktop.committed)
         self.assertEqual((self.db.saved,self.db.released),(1,1))
         stale = await self.client.get('/coinglass/operator/display',headers=headers)
         self.assertEqual(stale.status,403)

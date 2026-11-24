@@ -72,11 +72,12 @@ jobs:
           PYTEST
           echo "$RUNNER_TEMP/coinglass-test/bin" >> "$GITHUB_PATH"
           pg_config --bindir >> "$GITHUB_PATH"
+          echo "PG_BIN_FOR_OPERATOR_TESTS=$(pg_config --bindir)" >> "$GITHUB_ENV"
       - name: Prepare actual runtime and run collector contracts
         run: python standalone_collector/prepare.py
       - name: Exercise protected-map fixture and restart the browser against saved local state
         working-directory: standalone_collector
-        run: python -m unittest test_session_browser_restart test_modern_map -v
+        run: python -m unittest test_session_browser_restart test_operator_login test_collection_metrics -v
       - name: Verify read-only startup and source configuration checks
         working-directory: standalone_collector
         run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v

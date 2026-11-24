@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import sys
 import tempfile
 
@@ -211,21 +212,34 @@ class Desktop:
                 await asyncio.sleep(.1)
         raise RuntimeError('desktop_start_failed')
 
+    async def viewer_attached(self):
+        await asyncio.get_running_loop().sock_sendall(self.channel,b'A')
+
     async def verify_now(self):
-        await asyncio.get_running_loop().sock_sendall(self.channel, b'V')
+        await asyncio.get_running_loop().sock_sendall(self.channel,b'V')
+
+    async def _read_exact(self,size):
+        raw = bytearray()
+        loop = asyncio.get_running_loop()
+        while len(raw)<size:
+            chunk = await loop.sock_recv(self.channel,min(8192,size-len(raw)))
+            if not chunk:
+                raise RuntimeError('protected_map_unconfirmed')
+            raw.extend(chunk)
+        return raw
 
     async def verified_state(self):
-        # Dedicated socketpair attached to the child's fd 0; no cookie is ever routed
-        # via service stdout, a filesystem result, the VNC viewer, or an HTTP response.
-        raw=bytearray()
-        loop=asyncio.get_running_loop()
-        while chunk:=await loop.sock_recv(self.channel, min(8192,STATE_LIMIT+1-len(raw))):
-            raw.extend(chunk)
-            if len(raw)>STATE_LIMIT:
-                raise RuntimeError('invalid_operator_receipt')
-        if await self.proc.wait()!=0 or not raw:
-            raise RuntimeError('protected_map_unconfirmed')
-        return validate_state(json.loads(raw))
+        size = struct.unpack('!I',await self._read_exact(4))[0]
+        if not 0<size<=STATE_LIMIT:
+            raise RuntimeError('invalid_operator_receipt')
+        return validate_state(json.loads(await self._read_exact(size)))
+
+    async def acknowledge_commit(self):
+        # The encrypted transaction is durable even if the local verifier
+        # crashes before observing this private acknowledgement.
+        await asyncio.get_running_loop().sock_sendall(self.channel,b'S')
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self.proc.wait(),5)
 
     async def close(self):
         self.channel.close()
