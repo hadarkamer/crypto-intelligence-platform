@@ -56,14 +56,17 @@ def record_login_required(conn, symbol, model, timeframe, job_id):
         return str(incident_id)
 
 
-def incident_status(conn, incident_id=None):
+def incident_status(conn, incident_id=None, job_id=None):
     projection = """
         SELECT id, human_wait_ms, CASE WHEN resolved_at IS NOT NULL THEN 'resolved'
             WHEN window_expires_at > clock_timestamp() THEN 'in_progress'
             ELSE 'waiting' END AS status
         FROM collector_private.coinglass_login_incidents
         """
-    if incident_id is None:
+    if job_id is not None:
+        row = conn.execute(projection + ' WHERE id=(SELECT incident_id FROM '
+                           'collector_private.coinglass_login_jobs WHERE job_id=%s)', (job_id,)).fetchone()
+    elif incident_id is None:
         row = conn.execute(projection + ' WHERE resolved_at IS NULL').fetchone()
     else:
         row = conn.execute(projection + ' WHERE id=%s', (incident_id,)).fetchone()
@@ -148,9 +151,9 @@ def register_operator_login(application, store, active):
                 not hmac.compare_digest(presented.encode(), ('Bearer ' + bridge_secret).encode())):
             raise web.HTTPUnauthorized(headers=headers)
 
-    def read_status(incident_id):
+    def read_status(incident_id, job_id):
         with store.connect() as conn:
-            return incident_status(conn, incident_id)
+            return incident_status(conn, incident_id, job_id)
 
     def respond(data, status=200):
         return web.json_response(data, headers=headers, status=status)
@@ -160,13 +163,12 @@ def register_operator_login(application, store, active):
         if not (managed and active and store):
             return respond({'status': 'unavailable', 'incident_id': None, 'can_launch': False})
         incident_id = request.query.get('incident_id')
-        if incident_id is not None:
-            try:
-                incident_id = str(UUID(incident_id))
-            except ValueError:
-                return respond({'error': 'invalid_incident_id'}, 400)
+        job_id = request.query.get('job_id')
+        if ((incident_id is not None and (job_id is not None or not uuid_value(incident_id)))
+                or (job_id is not None and not uuid_value(job_id))):
+            return respond({'error': 'invalid_status_selector'}, 400)
         try:
-            data = await asyncio.to_thread(read_status, incident_id)
+            data = await asyncio.to_thread(read_status, incident_id, job_id)
         except Exception:
             return respond({'status': 'unavailable', 'incident_id': None, 'can_launch': False}, 503)
         return respond({**data, 'can_launch': manager.ready and data['status']=='waiting'})
@@ -174,7 +176,8 @@ def register_operator_login(application, store, active):
     async def launch(request):
         authorize(request)
         body = await json_body(request)
-        return await manager.open(uuid_value(body.get('incident_id')),uuid_value(body.get('operator_id')))
+        return await manager.open(uuid_value(body.get('incident_id')),uuid_value(body.get('operator_id')),
+                                  body.get('viewer_challenge'))
 
     application.router.add_get(base+'/session-status', status)
     application.router.add_post(base+'/session-window', launch)

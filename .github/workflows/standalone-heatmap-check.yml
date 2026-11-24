@@ -96,3 +96,15 @@ jobs:
           path: hover-source-evidence
           retention-days: 7
 
+
+  operator-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the dedicated browser image
+        run: docker build --file standalone_collector/Dockerfile.operator --tag coinglass-operator-test .
+      - name: Test a private browser without provider access or host privileges
+        run: |
+          docker run --rm --network none \
+            coinglass-operator-test python standalone_collector/operator_desktop.py --check-runtime

@@ -1,5 +1,5 @@
--- Candidate migration only: apply to an isolated database for tests.
--- Production requires a reviewed migration identity and verified runtime role.
+-- Worker-owned private storage for managed CoinGlass sessions.
+-- Apply with the migration owner and grant the deployment worker role below.
 -- Do not add this DDL to application startup or grant browser/API roles access.
 CREATE SCHEMA IF NOT EXISTS collector_private;
 REVOKE ALL ON SCHEMA collector_private FROM PUBLIC;

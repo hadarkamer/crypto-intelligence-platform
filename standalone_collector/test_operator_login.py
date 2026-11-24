@@ -25,6 +25,7 @@ from session_state import SessionStateError, WORK_LOCK
 
 HERE = Path(__file__).resolve().parent
 ORIGIN = 'https://collector.invalid'
+APP_ORIGIN = 'https://app.invalid'
 OWNER = '6d7e012f-868a-4105-a19b-412cead3ed93'
 INCIDENT = '576e893e-6fe1-42a7-bdb8-7bfba1aa737d'
 DUMMY = {'cookies':[{'domain':'.coinglass.com','name':'dummy','value':'fixture',
@@ -78,12 +79,12 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
         self.db = SimulatedDB()
         self.auth = {'Authorization':'Bearer '+'test'*12}
         self.env = patch.dict(os.environ,{'COINGLASS_COLLECTOR_TOKEN':'test'*12,
-            'COINGLASS_OPERATOR_ID':OWNER,'COINGLASS_OPERATOR_ORIGIN':ORIGIN,
+            'COINGLASS_OPERATOR_ID':OWNER,'COINGLASS_OPERATOR_ORIGIN':ORIGIN,'COINGLASS_APP_ORIGIN':APP_ORIGIN,
             'COINGLASS_OPERATOR_DESKTOP_ENABLED':'true','COINGLASS_SESSION_STORE_ENABLED':'true'})
         self.env.start()
-        def factory(db,owner,origin,enabled):
+        def factory(db,owner,origin,app_origin,enabled):
             async def ready(): return True
-            self.manager = WindowManager(self.db,owner,origin,enabled,LocalDisplay,ready)
+            self.manager = WindowManager(self.db,owner,origin,app_origin,enabled,LocalDisplay,ready)
             return self.manager
         self.app = web.Application()
         with patch.object(operator_window,'WindowManager',side_effect=factory):
@@ -92,7 +93,8 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.start_server()
         await asyncio.sleep(0)
         self.launch_path = '/api/collection/coinglass/session-window'
-        self.body = {'incident_id':INCIDENT,'operator_id':OWNER}
+        self.verifier = secrets.token_urlsafe(32)
+        self.body = {'incident_id':INCIDENT,'operator_id':OWNER,'viewer_challenge':operator_window.viewer_challenge(self.verifier)}
 
     async def asyncTearDown(self):
         await self.client.close()
@@ -108,14 +110,15 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
 
     async def viewer(self):
         ticket = await self.ticket()
-        admitted = await self.client.post('/coinglass/operator/admit',json={'ticket':ticket},
-                                           headers={'Origin':ORIGIN})
-        self.assertEqual(admitted.status,200)
+        admitted = await self.client.post('/coinglass/operator/admit',data={'ticket':ticket,'verifier':self.verifier},allow_redirects=False,
+                                           headers={'Origin':APP_ORIGIN})
+        self.assertEqual(admitted.status,303)
+        self.assertEqual(admitted.headers['Location'],'/coinglass/operator')
         cookie = admitted.cookies[COOKIE]
         self.assertTrue(cookie['secure'] and cookie['httponly'])
         self.assertEqual(cookie['samesite'],'Strict')
-        replay = await self.client.post('/coinglass/operator/admit',json={'ticket':ticket},
-                                        headers={'Origin':ORIGIN})
+        replay = await self.client.post('/coinglass/operator/admit',data={'ticket':ticket,'verifier':self.verifier},allow_redirects=False,
+                                        headers={'Origin':APP_ORIGIN})
         self.assertEqual(replay.status,403)
         return {'Cookie':COOKIE+'='+cookie.value,'Origin':ORIGIN}
 
@@ -126,14 +129,19 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
                                        headers=self.auth)
         self.assertEqual(wrong.status,403)
         ticket = await self.ticket()
+        missing = await self.client.post('/coinglass/operator/admit',data={'ticket':ticket},headers={'Origin':APP_ORIGIN})
+        self.assertEqual(missing.status,403)
+        wrong_proof = await self.client.post('/coinglass/operator/admit',
+                              data={'ticket':ticket,'verifier':secrets.token_urlsafe(32)},headers={'Origin':APP_ORIGIN})
+        self.assertEqual(wrong_proof.status,403)
         duplicate = await self.client.post(self.launch_path,json=self.body,headers=self.auth)
         self.assertEqual(duplicate.status,409)
-        evil = await self.client.post('/coinglass/operator/admit',json={'ticket':ticket},
+        evil = await self.client.post('/coinglass/operator/admit',data={'ticket':ticket,'verifier':self.verifier},allow_redirects=False,
                                       headers={'Origin':'https://elsewhere.invalid'})
         self.assertEqual(evil.status,403)
         self.manager.current.redeem_before = 0
-        expired = await self.client.post('/coinglass/operator/admit',json={'ticket':ticket},
-                                         headers={'Origin':ORIGIN})
+        expired = await self.client.post('/coinglass/operator/admit',data={'ticket':ticket,'verifier':self.verifier},allow_redirects=False,
+                                         headers={'Origin':APP_ORIGIN})
         self.assertEqual(expired.status,403)
         await asyncio.sleep(.35)
         self.assertIsNone(self.manager.current)
@@ -248,7 +256,9 @@ class IncidentPostgresTests(unittest.TestCase):
             self.assertEqual(record_login_required(conn,'ETH',2,'48H',str(uuid4())),gate)
             self.assertIsNone(waiting_incident(conn,'ETH',2,'24H'))
             self.assertEqual(conn.info.transaction_status,0)
-        window = self.window(gate)
+        with self.store.connect() as public_job:
+            public_job.execute('SELECT pg_advisory_lock(%s)',(WORK_LOCK,))
+            window = self.window(gate)
         with self.store.connect() as conn:
             self.assertTrue(conn.execute('SELECT pg_try_advisory_lock(%s) AS held',(WORK_LOCK,)).fetchone()['held'])
             self.assertEqual(incident_status(conn,gate)['status'],'in_progress')
@@ -260,6 +270,7 @@ class IncidentPostgresTests(unittest.TestCase):
         with self.store.connect() as conn:
             result = incident_status(conn,gate)
             self.assertEqual((result['status'],result['human_wait_ms']),('resolved',234))
+            self.assertEqual(incident_status(conn,job_id=self.job),result)
         successor = self.record()
         self.assertNotEqual(successor,gate)
         new = self.window(successor)

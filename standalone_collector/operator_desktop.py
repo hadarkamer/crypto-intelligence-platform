@@ -11,7 +11,6 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-import signal
 import socket
 import sys
 import tempfile
@@ -23,14 +22,14 @@ ASSETS = Path('/usr/share/novnc')
 BWRAP = '/usr/bin/bwrap'
 FILES = ('operator_desktop_child.py', 'session_capture.py', 'session_state.py',
          'modern_map_reader.py', 'modern_map_evidence.py', 'heatmap_hover.py',
-         'model1_execution.py', 'heatmap_models.py')
+         'model1_execution.py', 'collection_metrics.py')
 PORT = 443
 
 
 def permitted_host(host):
     host = host.lower()
     return (host == 'coinglass.com' or host.endswith('.coinglass.com')
-            or host in ('accounts.google.com', 'oauth2.googleapis.com',
+            or host in ('cdn.coinglasscdn.com', 'accounts.google.com', 'oauth2.googleapis.com',
                         'lh3.googleusercontent.com')
             or host == 'gstatic.com' or host.endswith('.gstatic.com'))
 
@@ -90,10 +89,11 @@ def namespace_args(directory):
     # Only immutable system files and the audited reader are visible. In
     # particular, neither application storage nor the host's /proc or /tmp is bound.
     args = [BWRAP,'--unshare-all','--unshare-user','--die-with-parent','--new-session',
-            '--cap-drop','ALL','--clearenv',
+            '--cap-drop','ALL','--hostname','coinglass-operator','--clearenv',
             '--ro-bind','/usr','/usr','--symlink','usr/bin','/bin',
             '--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
-            '--proc','/proc','--dev','/dev','--tmpfs','/dev/shm','--tmpfs','/tmp',
+            '--proc','/proc','--dev','/dev','--size','67108864','--tmpfs','/dev/shm',
+            '--size','268435456','--tmpfs','/tmp',
             '--dir','/etc','--dir','/run','--dir','/app',
             '--ro-bind','/etc/ssl','/etc/ssl','--ro-bind','/etc/fonts','/etc/fonts',
             '--ro-bind','/etc/passwd','/etc/passwd','--ro-bind','/etc/group','/etc/group',
@@ -113,6 +113,12 @@ def installed():
     # from an environment variable naming an arbitrary binary or remote host.
     files = (BWRAP,'/usr/bin/Xtigervnc','/usr/bin/chromium','/usr/bin/socat',
              '/usr/bin/xprop','/usr/bin/wmctrl','/usr/bin/openbox','/usr/local/bin/python')
+    policy = Path('/etc/chromium/policies/managed/operator.json')
+    try:
+        if json.loads(policy.read_text()) != json.loads((HERE/'operator_chromium_policy.json').read_text()):
+            return False
+    except (OSError,ValueError):
+        return False
     return (os.getuid()!=0 and all(os.access(path,os.X_OK) for path in files)
             and (ASSETS/'core/rfb.js').is_file() and all((HERE/f).is_file() for f in FILES))
 
@@ -127,7 +133,7 @@ async def probe():
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL, env={})
             try:
-                return await asyncio.wait_for(proc.wait(),30)==0
+                return await asyncio.wait_for(proc.wait(),50)==0
             finally:
                 if proc.returncode is None:
                     proc.kill()
@@ -216,3 +222,11 @@ class Desktop:
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         self.directory.cleanup()
+
+
+if __name__ == '__main__':
+    if sys.argv[1:] != ['--check-runtime']:
+        raise SystemExit(2)
+    ready = asyncio.run(probe())
+    print(json.dumps({'isolated_operator_browser': ready, 'provider_requests': 0}))
+    raise SystemExit(0 if ready else 1)

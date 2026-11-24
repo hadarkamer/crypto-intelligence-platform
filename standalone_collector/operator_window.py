@@ -1,5 +1,7 @@
 """Authenticated single-owner viewer and bounded private database transitions."""
 import asyncio
+import base64
+import hashlib
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,7 +67,6 @@ class Database:
 
     def reserve(self,incident):
         with self.store.connect() as conn:
-            self._lock(conn)
             window_id,expires = begin_window(conn,incident)
             row = conn.execute("""
                 SELECT symbol, model, timeframe FROM collector_private.coinglass_login_jobs
@@ -98,6 +99,7 @@ class Window:
     revision: int
     ticket: str
     redeem_before: float
+    challenge: str = ''
     desktop: object = None
     viewer: str = ''
     attached_at: float = 0.0
@@ -108,8 +110,8 @@ class Window:
 
 
 class WindowManager:
-    def __init__(self,db,owner,origin,enabled,desktop=Desktop,probe_fn=probe):
-        self.db,self.owner,self.origin = db,owner,origin
+    def __init__(self,db,owner,origin,app_origin,enabled,desktop=Desktop,probe_fn=probe):
+        self.db,self.owner,self.origin,self.app_origin = db,owner,origin,app_origin
         self.enabled,self.desktop,self.probe_fn = enabled,desktop,probe_fn
         self.ready = False
         self.current = None
@@ -117,7 +119,7 @@ class WindowManager:
 
     async def lifecycle(self,app):
         async def check():
-            if self.enabled and self.owner and self.origin:
+            if self.enabled and self.owner and self.origin and self.app_origin:
                 with suppress(Exception):
                     self.ready = bool(await self.probe_fn())
         checker = asyncio.create_task(check())
@@ -135,11 +137,13 @@ class WindowManager:
             window.task.cancel()
             await asyncio.gather(window.task,return_exceptions=True)
 
-    async def open(self,incident,owner):
+    async def open(self,incident,owner,challenge):
         if not self.owner or not owner or not hmac.compare_digest(self.owner,owner):
             return response({'error':'forbidden'},403)
         if not incident:
             return response({'error':'invalid_incident_id'},400)
+        if not valid_proof(challenge):
+            return response({'error':'invalid_viewer_challenge'},400)
         if not self.ready:
             return response({'error':'private_browser_transport_unavailable'},503)
         async with self.lock:
@@ -152,6 +156,7 @@ class WindowManager:
             except Exception:
                 return response({'error':'private_browser_transport_unavailable'},503)
             window = Window(wid,incident,expiry,target,revision,secrets.token_urlsafe(32),time.monotonic()+75)
+            window.challenge = challenge
             self.current = window
             try:
                 window.desktop = await self.desktop.start(*target)
@@ -188,7 +193,7 @@ class WindowManager:
         except Exception:
             pass
         finally:
-            window.viewer = window.ticket = ''
+            window.viewer = window.ticket = window.challenge = ''
             try:
                 await window.desktop.close()
             finally:
@@ -211,21 +216,28 @@ class WindowManager:
         return None
 
     async def admit(self,request):
-        if not self.same_origin(request):
+        if (not self.app_origin or request.headers.get('Origin')!=self.app_origin
+                or request.content_type!='application/x-www-form-urlencoded'
+                or request.content_length is None or request.content_length>512):
             return response({'error':'forbidden'},403)
-        body = await json_body(request)
+        try:
+            body = await request.post()
+        except (ValueError,UnicodeError):
+            return response({'error':'forbidden'},403)
         ticket = body.get('ticket')
+        verifier = body.get('verifier')
         window = self.current
-        if not (window and window.ticket and isinstance(ticket,str) and ticket.isascii()
-                and len(ticket)==len(window.ticket) and time.monotonic()<window.redeem_before
-                and hmac.compare_digest(ticket,window.ticket)):
+        if not (window and window.ticket and valid_proof(ticket) and valid_proof(verifier)
+                and len(body)==2 and time.monotonic()<window.redeem_before
+                and hmac.compare_digest(ticket,window.ticket)
+                and hmac.compare_digest(viewer_challenge(verifier),window.challenge)):
             return response({'error':'expired'},403)
-        window.ticket = ''
+        window.ticket = window.challenge = ''
         window.viewer = secrets.token_urlsafe(32)
-        result = response({'accepted':True})
+        result = web.HTTPSeeOther(location=PREFIX,headers=HEADERS)
         result.set_cookie(COOKIE,window.viewer,httponly=True,secure=True,samesite='Strict',
                           path=PREFIX,max_age=max(1,int((window.expires-datetime.now(timezone.utc)).total_seconds())))
-        return result
+        raise result
 
     async def verify(self,request):
         window = self.authorized(request)
@@ -294,6 +306,14 @@ class WindowManager:
         return web.FileResponse(path,headers={**HEADERS,'Content-Type':'text/javascript'})
 
 
+def valid_proof(value):
+    return isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_-]{43}',value) is not None
+
+
+def viewer_challenge(verifier):
+    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('ascii')).digest()).rstrip(b'=').decode('ascii')
+
+
 async def json_body(request):
     if request.content_type!='application/json' or request.content_length is None or request.content_length>1024:
         raise web.HTTPBadRequest(headers=HEADERS)
@@ -309,7 +329,8 @@ async def json_body(request):
 def register_window(application,store,active):
     owner = uuid_value(os.environ.get('COINGLASS_OPERATOR_ID'))
     origin = https_origin(os.environ.get('COINGLASS_OPERATOR_ORIGIN') or os.environ.get('RENDER_EXTERNAL_URL',''))
-    manager = WindowManager(Database(store),owner,origin,active and
+    app_origin = https_origin(os.environ.get('COINGLASS_APP_ORIGIN',''))
+    manager = WindowManager(Database(store),owner,origin,app_origin,active and
                             os.environ.get('COINGLASS_OPERATOR_DESKTOP_ENABLED','').lower()=='true')
     application.cleanup_ctx.append(manager.lifecycle)
     async def static(request):

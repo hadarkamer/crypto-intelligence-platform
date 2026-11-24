@@ -1,18 +1,38 @@
 """Validate public CoinGlass labels and sample an observed Viridis price grid."""
 from __future__ import annotations
 
+import colorsys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import ceil, floor, isfinite
 import re
 
-from heatmap_hover import classic_colour, prominent_runs
+from heatmap_hover import MODEL2_GREEN_BLUE_HUE
 from model1_execution import StageFailure
 
 PRICE = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
 AMOUNT = PRICE + r'[KMB]?'
 SCALE = {'K': Decimal(1000), 'M': Decimal(1000000), 'B': Decimal(1000000000)}
+
+
+# This DOM/Measure adapter uses the same Viridis thresholds as the pinned
+# legacy hover reader. It groups pixels before the values are measured.
+def classic_colour(rgb, model):
+    green_blue = MODEL2_GREEN_BLUE_HUE if model == 2 else .48
+    h, s, v = colorsys.rgb_to_hsv(*(c/255 for c in rgb))
+    if .13 <= h < .24 and s >= .45 and v >= .55: return 'yellow'
+    if .24 <= h < green_blue and s >= .45 and v >= .4: return 'green'
+    if green_blue <= h < .66 and s >= .45 and v >= .35: return 'blue'
+    return None
+
+
+def prominent_runs(groups):
+    prominent = any(label == 'yellow' or (label == 'green' and len(rows) > 1)
+                    for label, rows in groups)
+    return [(label, rows) for label, rows in groups
+            if label == 'yellow' or (label == 'green' and len(rows) > 1)
+            or (label == 'blue' and not prominent)]
 
 
 def check(value):

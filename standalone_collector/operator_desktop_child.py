@@ -8,6 +8,7 @@ disappear when its PID 1 exits.
 import os
 from pathlib import Path
 import re
+import resource
 import select
 import socket
 import subprocess
@@ -19,6 +20,7 @@ PROFILE='/tmp/browser'
 PROXY='--proxy-server=http://127.0.0.1:3128'
 HOME_TITLE='CoinGlass | Crypto, Stocks, Macro & Global Market Data'
 CHROME_FLAGS=[PROXY,'--disable-quic','--no-first-run','--no-default-browser-check',
+              '--disable-background-networking','--renderer-process-limit=3',
               '--disable-sync','--disable-breakpad','--disable-crash-reporter',
               '--window-position=0,0','--window-size=1200,800']
 
@@ -51,6 +53,7 @@ def main():
     devnull=os.open('/dev/null',os.O_RDONLY)
     os.dup2(devnull,0);os.close(devnull)
     os.umask(0o077)
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     for path in ('/tmp/home','/tmp/xdg',PROFILE):
         Path(path).mkdir(mode=0o700,exist_ok=True)
     # Namespace must have just loopback and a private /proc; this process never
@@ -61,7 +64,8 @@ def main():
         return 1
     display=spawn(['/usr/bin/Xtigervnc',':19','-geometry','1200x800','-depth','24',
                    '-rfbport','-1','-rfbunixpath','/channel/display','-rfbunixmode','0600',
-                   '-SecurityTypes','None','-nolisten','tcp','-AcceptCutText=0','-SendCutText=0'])
+                   '-SecurityTypes','None','-nolisten','tcp','-AcceptCutText=0','-SendCutText=0',
+                   '-FrameRate','15','-NeverShared=1','-DisconnectClients=0','-AcceptSetDesktopSize=0'])
     for _ in range(40):
         if display.poll() is not None:
             return 1

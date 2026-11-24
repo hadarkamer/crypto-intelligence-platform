@@ -248,6 +248,7 @@ class StoreTests(unittest.TestCase):
     def test_existing_lock_required_for_begin_and_complete(self):
         self.store.bootstrap(STATE)
         self.db.execute('SELECT pg_advisory_unlock_all()')
+        self.assertIsInstance(self.store.revision(), int)  # only an opaque CAS version is visible here
         self.assert_code('state_coordination_required', lambda: self.store.begin(str(uuid4())))
         self.db.execute('SELECT pg_advisory_lock_shared(%s)', (WORK_LOCK,))
         self.assert_code('state_coordination_required', lambda: self.store.begin(str(uuid4())))
