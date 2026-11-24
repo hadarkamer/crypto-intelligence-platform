@@ -1,0 +1,22 @@
+# Build from the collector repository root. QA only: no collector/DB worker,
+# account login, job routes, viewer route, diagnostics screenshots or scheduler.
+FROM python:3.11-slim-bookworm
+COPY standalone_collector/install_operator_packages.sh /tmp/install-operator-packages.sh
+RUN sh /tmp/install-operator-packages.sh && rm /tmp/install-operator-packages.sh \
+ && useradd --no-create-home --uid 10003 --user-group cg-qa-status
+WORKDIR /opt/coinglass-qa
+RUN pip install --no-cache-dir playwright==1.55.0 Pillow==12.3.0 pycryptodome==3.21.0
+COPY standalone_collector/operator_qa_preflight.py standalone_collector/test_operator_container_capabilities.py \
+     standalone_collector/operator_desktop.py standalone_collector/operator_desktop_child.py \
+     standalone_collector/session_capture.py standalone_collector/session_state.py \
+     standalone_collector/modern_map_reader.py standalone_collector/modern_map_evidence.py \
+     standalone_collector/heatmap_hover.py standalone_collector/model1_execution.py \
+     standalone_collector/collection_metrics.py standalone_collector/capture_failure_diagnostics.py \
+     standalone_collector/capture_failure_observer.py standalone_collector/capture_readiness.py \
+     standalone_collector/heatmap_models.py standalone_collector/image_detail.py \
+     standalone_collector/model1_price_range.py standalone_collector/price_detail_input.py \
+     standalone_collector/operator_chromium_policy.json ./
+RUN python -I -B operator_qa_preflight.py --prepare-offline-policy
+USER 0:0
+ENTRYPOINT ["python","-I","-B","/opt/coinglass-qa/operator_qa_preflight.py"]
+CMD []

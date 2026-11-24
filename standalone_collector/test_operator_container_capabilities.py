@@ -58,11 +58,12 @@ def _private_access_denied(collector, pid, fd):
 
 class _OfflineProxy:
     """Never resolves or forwards anything. Record only the two synthetic outcomes."""
-    def __init__(self):
+    def __init__(self,port=0,source_host='www.coinglass.com'):
+        self.source = (source_host + ':443').encode('ascii')
         self.source_seen = self.forbidden_seen = False
         self.listener = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-        self.listener.bind(('127.0.0.1',0))
+        self.listener.bind(('127.0.0.1',port))
         self.listener.listen(12)
         self.listener.settimeout(.2)
         self.port = self.listener.getsockname()[1]
@@ -81,7 +82,7 @@ class _OfflineProxy:
                 try:
                     line = client.recv(16384).split(b'\r\n',1)[0].split()
                     if len(line)>=2 and line[0]==b'CONNECT':
-                        self.source_seen |= line[1]==b'www.coinglass.com:443'
+                        self.source_seen |= line[1]==self.source
                         self.forbidden_seen |= line[1]==b'denied.invalid:443'
                     client.sendall(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
                 except OSError:
@@ -96,7 +97,7 @@ class _OfflineProxy:
         self.thread.join(3)
 
 
-def _browser_fixture(collector,pid,fd,home,proxy_port):
+def _browser_fixture(collector,pid,fd,home,proxy_port,source_host):
     if not _private_access_denied(collector,pid,fd):
         return 'collector_boundary_failed'
     print('collector_boundary_verified',flush=True)
@@ -120,7 +121,7 @@ def _browser_fixture(collector,pid,fd,home,proxy_port):
                 # The test container has --network none and the local fixture
                 # returns 403. No actual DNS or provider connection can occur.
                 with suppress(Error):
-                    page.goto('https://www.coinglass.com/offline-operator-fixture',timeout=5000)
+                    page.goto('https://'+source_host+'/offline-operator-fixture',timeout=5000)
                 with suppress(Error):
                     page.goto('https://denied.invalid/offline-operator-fixture',timeout=5000)
                 body = page.locator('body').inner_text(timeout=3000)
@@ -140,10 +141,24 @@ def _browser_fixture(collector,pid,fd,home,proxy_port):
     return 'verified'
 
 
-def _result():
+def _result(networked_qa=False):
     if os.getuid()!=0 or pwd.getpwuid(COLLECTOR).pw_name!='collector' or pwd.getpwuid(DESKTOP).pw_name!='cg-window':
         return {'status':'fixture_image_or_supervisor_user_invalid'}
-    if {name for _,name in socket.if_nameindex()}!={'lo'}:
+    source_host = 'qa-source.invalid' if networked_qa else 'www.coinglass.com'
+    qa_port = 31497
+    if networked_qa:
+        # Only the dedicated QA image declares the fixed loopback sink and
+        # disallows every real source/identity origin. Fail before Chromium
+        # if a networked run points at an ordinary collector installation.
+        try:
+            policy = json.loads(Path('/etc/chromium/policies/managed/operator.json').read_text())
+        except (OSError,ValueError):
+            return {'status':'qa_network_guard_missing'}
+        if (policy.get('ProxyMode')!='fixed_servers' or policy.get('ProxyServer')!=f'http://127.0.0.1:{qa_port}'
+                or policy.get('URLBlocklist')!=['*'] or policy.get('URLAllowlist')!=['about:blank','https://qa-source.invalid']
+                or policy.get('QuicAllowed') is not False or policy.get('DnsOverHttpsMode')!='off'):
+            return {'status':'qa_network_guard_missing'}
+    elif {name for _,name in socket.if_nameindex()}!={'lo'}:
         return {'status':'fixture_requires_no_external_network'}
     env = {'PATH':'/usr/local/bin:/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1'}
     with tempfile.TemporaryDirectory(dir='/dev/shm',prefix='dual-uid-proof-') as temp:
@@ -158,9 +173,9 @@ def _result():
             stderr=subprocess.DEVNULL,env={**env,'HOME':str(collector),'FIXTURE_COLLECTOR_ONLY':'fixture'},close_fds=True)
         try:
             marker = json.loads(writer.stdout.readline())
-            with _OfflineProxy() as proxy:
+            with _OfflineProxy(qa_port if networked_qa else 0,source_host) as proxy:
                 runner = subprocess.run([sys.executable,'-B',str(HERE),'--desktop',str(collector),
-                    str(marker['pid']),str(marker['fd']),str(desktop),str(proxy.port)],
+                    str(marker['pid']),str(marker['fd']),str(desktop),str(proxy.port),source_host],
                     user=DESKTOP,group=DESKTOP,extra_groups=(),stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=35,
                     env={**env,'HOME':str(desktop),'TMPDIR':str(desktop),'XDG_RUNTIME_DIR':str(desktop)},
@@ -185,12 +200,12 @@ def _result():
 if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--collector':
         _confidential_collector(Path(sys.argv[2]))
-    elif len(sys.argv)==7 and sys.argv[1]=='--desktop':
-        stage = _browser_fixture(Path(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),Path(sys.argv[5]),int(sys.argv[6]))
+    elif len(sys.argv)==8 and sys.argv[1]=='--desktop' and sys.argv[7] in ('qa-source.invalid','www.coinglass.com'):
+        stage = _browser_fixture(Path(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),Path(sys.argv[5]),int(sys.argv[6]),sys.argv[7])
         print(stage,flush=True)
         raise SystemExit(0 if stage=='verified' else 1)
-    elif sys.argv[1:]==['--check']:
-        result = _result()
+    elif sys.argv[1:] in (['--check'],['--networked-qa']):
+        result = _result(networked_qa=sys.argv[1]=='--networked-qa')
         print(json.dumps(result,sort_keys=True))
         raise SystemExit(0 if result['status']=='verified' else 1)
     else:
