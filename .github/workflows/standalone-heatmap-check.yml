@@ -106,26 +106,7 @@ jobs:
       - name: Build the dedicated browser image
         id: operator_image
         run: docker build --file standalone_collector/Dockerfile.operator --tag coinglass-operator-test .
-      - name: Test a private browser without provider access or host privileges
+      - name: Verify collector confidentiality and Chromium across two real container UIDs
         run: |
-          docker run --rm --network none \
-            coinglass-operator-test python standalone_collector/operator_desktop.py --check-runtime
-
-      - name: Test the same private browser on stock Linux as the unprivileged runner
-        if: always() && steps.operator_image.outcome == 'success'
-        run: |
-          set -euo pipefail
-          test "$(id -u)" != 0
-          if ! test -x /usr/bin/bwrap; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends bubblewrap
-          fi
-          desktop_root="$(mktemp -d "$RUNNER_TEMP/coinglass-fixture.XXXXXX")"
-          desktop_image="$(docker create coinglass-operator-test)"
-          trap 'docker rm -f "$desktop_image" >/dev/null' EXIT
-          docker export "$desktop_image" | tar --extract --file=- --directory="$desktop_root" \
-            --no-same-owner --no-same-permissions -- usr etc/ssl etc/chromium etc/fonts
-          if docker cp "$desktop_image:/etc/chromium.d" "$desktop_root/etc/chromium.d"; then
-            test -d "$desktop_root/etc/chromium.d"
-          fi
-          python3 standalone_collector/operator_desktop.py --check-native-fixture "$desktop_root"
+          docker run --rm --network none --user 0:0 coinglass-operator-test \
+            python standalone_collector/test_operator_container_capabilities.py --check
