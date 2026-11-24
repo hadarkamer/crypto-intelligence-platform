@@ -66,7 +66,8 @@ class Database:
             raise LoginIncidentError('collector_busy')
 
     def reserve(self,incident):
-        with self.store.connect() as conn:
+        # The lease may be exposed only after its target and revision are known.
+        with self.store.connect() as conn, conn.transaction():
             window_id,expires = begin_window(conn,incident)
             row = conn.execute("""
                 SELECT symbol, model, timeframe FROM collector_private.coinglass_login_jobs
@@ -108,6 +109,7 @@ class Window:
     connected_once: bool = False
     verification_requested: bool = False
     task: object = None
+    cleanup_task: asyncio.Task | None = None
 
 
 class WindowManager:
@@ -130,13 +132,47 @@ class WindowManager:
             self.ready = False
             checker.cancel()
             await asyncio.gather(checker,return_exceptions=True)
-            if self.current is not None:
-                await self.stop(self.current)
+            async with self.lock:
+                if self.current is not None:
+                    await self.stop(self.current)
 
     async def stop(self,window):
         if window.task:
-            window.task.cancel()
-            await asyncio.gather(window.task,return_exceptions=True)
+            if window.cleanup_task is None and not window.task.cancelling():
+                window.task.cancel()
+            try:
+                await asyncio.shield(asyncio.gather(window.task, return_exceptions=True))
+            finally:
+                # A watcher cancelled before its first step never enters its finally block.
+                await self._cleanup(window)
+
+    async def _cleanup(self,window):
+        if window.cleanup_task is None:
+            window.viewer = window.ticket = window.challenge = ''
+            window.cleanup_task = asyncio.create_task(self._release(window))
+        await asyncio.shield(window.cleanup_task)
+
+    async def _release(self,window):
+        try:
+            await window.desktop.close()
+        finally:
+            try:
+                await asyncio.to_thread(self.db.release,window)
+            finally:
+                if self.current is window:
+                    self.current = None
+
+    def _reserve_window(self,incident,challenge):
+        wid,expiry,target,revision = self.db.reserve(incident)
+        return Window(wid,incident,expiry,target,revision,secrets.token_urlsafe(32),
+                      time.monotonic()+75,challenge=challenge)
+
+    async def _release_unclaimed(self,reservation):
+        try:
+            window = await reservation
+        except Exception:
+            return
+        await asyncio.to_thread(self.db.release,window)
 
     async def open(self,incident,owner,challenge):
         if not self.owner or not owner or not hmac.compare_digest(self.owner,owner):
@@ -145,22 +181,32 @@ class WindowManager:
             return response({'error':'invalid_incident_id'},400)
         if not valid_proof(challenge):
             return response({'error':'invalid_viewer_challenge'},400)
-        if not self.ready:
-            return response({'error':'private_browser_transport_unavailable'},503)
         async with self.lock:
+            if not self.ready:
+                return response({'error':'private_browser_transport_unavailable'},503)
             if self.current is not None:
                 return response({'error':'login_window_in_progress'},409)
+            reservation = asyncio.create_task(asyncio.to_thread(self._reserve_window,incident,challenge))
             try:
-                wid,expiry,target,revision = await asyncio.to_thread(self.db.reserve,incident)
+                window = await asyncio.shield(reservation)
+            except asyncio.CancelledError:
+                # Cancelling a handler cannot cancel its SQL thread. Hold the
+                # admission lock until its eventual claim has been released.
+                cleanup = asyncio.create_task(self._release_unclaimed(reservation))
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
+                raise
             except LoginIncidentError as exc:
                 return response({'error':str(exc)},409)
             except Exception:
                 return response({'error':'private_browser_transport_unavailable'},503)
-            window = Window(wid,incident,expiry,target,revision,secrets.token_urlsafe(32),time.monotonic()+75)
-            window.challenge = challenge
             self.current = window
             try:
-                window.desktop = await self.desktop.start(*target)
+                window.desktop = await self.desktop.start(*window.target)
             except BaseException as exc:
                 try:
                     await asyncio.to_thread(self.db.release,window)
@@ -170,7 +216,7 @@ class WindowManager:
                     raise
                 return response({'error':'private_browser_transport_unavailable'},503)
             window.task = asyncio.create_task(self._watch(window))
-            return response({'path':PREFIX+'#'+window.ticket,'expires_at':expiry.isoformat()})
+            return response({'path':PREFIX+'#'+window.ticket,'expires_at':window.expires.isoformat()})
 
     async def _watch(self,window):
         async def run():
@@ -195,15 +241,7 @@ class WindowManager:
         except Exception:
             pass
         finally:
-            window.viewer = window.ticket = window.challenge = ''
-            try:
-                await window.desktop.close()
-            finally:
-                try:
-                    await asyncio.to_thread(self.db.release,window)
-                finally:
-                    if self.current is window:
-                        self.current = None
+            await self._cleanup(window)
 
     def same_origin(self,request):
         return self.origin and request.headers.get('Origin')==self.origin

@@ -11,8 +11,9 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import threading
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from aiohttp import web
@@ -155,6 +156,119 @@ class PrivateViewerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.35)
         self.assertIsNone(self.manager.current)
         self.assertEqual((self.db.saved,self.db.released),(0,1))
+
+    async def test_shutdown_before_watcher_first_step_closes_window_and_lease(self):
+        result = await self.manager.open(INCIDENT, OWNER, self.body['viewer_challenge'])
+        self.assertEqual(result.status, 200)
+        window = self.manager.current
+        self.addCleanup(window.desktop.parent.close)
+        self.addCleanup(window.desktop.peer.close)
+        await self.manager.stop(window)
+        self.assertIsNone(self.manager.current)
+        self.assertEqual(self.db.released, 1)
+        self.assertEqual(window.desktop.peer.fileno(), -1)
+        self.assertEqual((window.ticket, window.challenge, window.viewer), ('', '', ''))
+
+    async def test_overlapping_disconnect_and_shutdown_wait_for_same_cleanup(self):
+        await self.ticket()
+        window = self.manager.current
+        close = window.desktop.close
+        entered = asyncio.Event()
+        proceed = asyncio.Event()
+        closed = []
+        async def close_after_signal():
+            entered.set()
+            await proceed.wait()
+            await close()
+            closed.append(True)
+        window.desktop.close = close_after_signal
+        self.addCleanup(window.desktop.parent.close)
+        self.addCleanup(window.desktop.peer.close)
+        disconnected = asyncio.create_task(self.manager.stop(window))
+        await asyncio.wait_for(entered.wait(), 2)
+        shutdown = asyncio.create_task(self.manager.stop(window))
+        await asyncio.sleep(0)
+        proceed.set()
+        await asyncio.wait_for(asyncio.gather(disconnected, shutdown), 2)
+        self.assertEqual(closed, [True])
+        self.assertEqual(self.db.released, 1)
+        self.assertIsNone(self.manager.current)
+        self.assertEqual((await self.manager.open(INCIDENT, OWNER, self.body['viewer_challenge'])).status, 200)
+
+    async def test_shutdown_waits_for_launch_and_rejects_queued_open(self):
+        starting = asyncio.Event()
+        proceed = asyncio.Event()
+
+        class SlowDisplay(LocalDisplay):
+            @classmethod
+            async def start(cls, *target):
+                starting.set()
+                await proceed.wait()
+                return await super().start(*target)
+
+        manager = WindowManager(self.db, OWNER, ORIGIN, APP_ORIGIN, True, SlowDisplay,
+                                AsyncMock(return_value=True))
+        lifecycle = manager.lifecycle(None)
+        await anext(lifecycle)
+        await asyncio.sleep(0)
+        launch = asyncio.create_task(manager.open(INCIDENT, OWNER, self.body['viewer_challenge']))
+        await asyncio.wait_for(starting.wait(), 2)
+        queued = asyncio.create_task(manager.open(INCIDENT, OWNER, self.body['viewer_challenge']))
+        closing = asyncio.create_task(anext(lifecycle, None))
+        await asyncio.sleep(0)
+        proceed.set()
+        opened, rejected, _ = await asyncio.wait_for(asyncio.gather(launch, queued, closing), 2)
+        self.assertEqual((opened.status, rejected.status), (200, 503))
+        self.assertIsNone(manager.current)
+        self.assertEqual(self.db.released, 1)
+
+    async def test_cancel_during_reserve_releases_late_claim_before_next_open(self):
+        original = self.db.reserve
+        entered = asyncio.Event()
+        proceed = threading.Event()
+        self.addCleanup(proceed.set)
+        loop = asyncio.get_running_loop()
+        observations = []
+
+        def reserve(incident):
+            observations.append(self.db.released)
+            if len(observations) == 1:
+                loop.call_soon_threadsafe(entered.set)
+                if not proceed.wait(timeout=3):
+                    raise AssertionError('fixture was not released')
+            return original(incident)
+        self.db.reserve = reserve
+        launch = asyncio.create_task(self.manager.open(INCIDENT, OWNER, self.body['viewer_challenge']))
+        await asyncio.wait_for(entered.wait(), 2)
+        launch.cancel()
+        await asyncio.sleep(0)
+        launch.cancel()
+        queued = asyncio.create_task(self.manager.open(INCIDENT, OWNER, self.body['viewer_challenge']))
+        proceed.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(launch, 2)
+        result = await asyncio.wait_for(queued, 2)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(observations, [0, 1])
+        self.assertEqual(self.db.saved, 0)
+        await self.manager.stop(self.manager.current)
+        self.assertEqual(self.db.released, 2)
+
+    def test_missing_target_rolls_back_complete_reservation(self):
+        store = MagicMock()
+        conn = store.connect.return_value.__enter__.return_value
+        transaction = conn.transaction.return_value
+        conn.execute.return_value.fetchone.return_value = None
+
+        def claim(connection, incident):
+            self.assertIs(connection, conn)
+            self.assertEqual(incident, INCIDENT)
+            transaction.__enter__.assert_called_once()
+            return str(uuid4()), datetime.now(timezone.utc) + timedelta(minutes=10)
+        with patch.object(operator_window, 'begin_window', side_effect=claim):
+            with self.assertRaisesRegex(LoginIncidentError, 'login_window_unavailable'):
+                Database(store).reserve(INCIDENT)
+        self.assertIs(transaction.__exit__.call_args.args[0], LoginIncidentError)
 
     async def test_verified_receipt_after_private_server_closes_display(self):
         headers = await self.viewer()
