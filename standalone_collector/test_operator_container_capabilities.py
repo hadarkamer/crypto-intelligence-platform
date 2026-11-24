@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import suppress
 from threading import Thread
 
@@ -56,11 +57,59 @@ def _private_access_denied(collector, pid, fd):
             and _expect_denied(lambda:Path(f'/proc/{pid}/fd/{fd}').read_bytes()))
 
 
+QA_SOURCE = 'qa-source.invalid'
+QA_DENIED = 'denied.invalid'
+NAVIGATION_ERRORS = {
+    'ERR_NAME_NOT_RESOLVED':'name_not_resolved',
+    'ERR_PROXY_CONNECTION_FAILED':'proxy_connection_failed',
+    'ERR_TUNNEL_CONNECTION_FAILED':'tunnel_connection_failed',
+    'ERR_CONNECTION_REFUSED':'connection_refused',
+    'ERR_BLOCKED_BY_ADMINISTRATOR':'blocked_by_policy',
+}
+NAVIGATION_RESULTS = frozenset((*NAVIGATION_ERRORS.values(),'completed','timeout','other_error','not_attempted'))
+
+
+def _qa_navigation(page, hostname):
+    from playwright.sync_api import Error, TimeoutError as NavigationTimeout
+    if hostname not in (QA_SOURCE, QA_DENIED):
+        raise ValueError('invalid_qa_origin')
+    try:
+        page.goto('https://'+hostname+'/offline-operator-fixture',timeout=5000)
+        return 'completed'
+    except NavigationTimeout:
+        return 'timeout'
+    except Error as exc:
+        # Never send Playwright messages, addresses or stack traces to /status.
+        for chromium_code,outcome in NAVIGATION_ERRORS.items():
+            if 'net::'+chromium_code in str(exc):
+                return outcome
+        return 'other_error'
+
+
+def _request_line(client):
+    # The TCP stream can split CONNECT anywhere. Bound both bytes and total time.
+    deadline = time.monotonic()+2
+    data = bytearray()
+    while len(data)<4096:
+        remaining = deadline-time.monotonic()
+        if remaining<=0:
+            return b''
+        client.settimeout(remaining)
+        part = client.recv(4096-len(data))
+        if not part:
+            return b''
+        data.extend(part)
+        end = data.find(b'\r\n')
+        if end>=0:
+            return bytes(data[:end])
+    return b''
+
+
 class _OfflineProxy:
     """Never resolves or forwards anything. Record only the two synthetic outcomes."""
     def __init__(self,port=0,source_host='www.coinglass.com'):
         self.source = (source_host + ':443').encode('ascii')
-        self.source_seen = self.forbidden_seen = False
+        self.accepted = self.source_seen = self.forbidden_seen = False
         self.listener = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
         self.listener.bind(('127.0.0.1',port))
@@ -78,12 +127,13 @@ class _OfflineProxy:
             except OSError:
                 return
             with client:
-                client.settimeout(2)
+                self.accepted = True
                 try:
-                    line = client.recv(16384).split(b'\r\n',1)[0].split()
-                    if len(line)>=2 and line[0]==b'CONNECT':
-                        self.source_seen |= line[1]==self.source
-                        self.forbidden_seen |= line[1]==b'denied.invalid:443'
+                    line = _request_line(client).split()
+                    if len(line)==3 and line[0]==b'CONNECT' and line[2] in (b'HTTP/1.0',b'HTTP/1.1'):
+                        authority = line[1].lower()
+                        self.source_seen |= authority==self.source
+                        self.forbidden_seen |= authority==b'denied.invalid:443'
                     client.sendall(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
                 except OSError:
                     pass
@@ -104,12 +154,17 @@ def _browser_fixture(collector,pid,fd,home,proxy_port,source_host):
     from playwright.sync_api import Error, sync_playwright
     failing_phase = 'ordinary_chromium_sandbox_failed'
     try:
+        # The networked QA policy fixes a non-forwarding proxy at this numeric
+        # loopback address. Keep resolution of every other host denied.
+        resolver = 'MAP * ~NOTFOUND'
+        if source_host == QA_SOURCE:
+            resolver += ', EXCLUDE 127.0.0.1'
         with sync_playwright() as runtime:
             browser = runtime.chromium.launch(executable_path=CHROMIUM,
                 chromium_sandbox=True, headless=True,
                 args=[f'--proxy-server=http://127.0.0.1:{proxy_port}',
                       '--disable-background-networking','--disable-quic','--disable-sync',
-                      '--host-resolver-rules=MAP * ~NOTFOUND'])
+                      '--host-resolver-rules='+resolver])
             try:
                 failing_phase = 'neutral_browser_navigation_failed'
                 page = browser.new_page()
@@ -118,12 +173,15 @@ def _browser_fixture(collector,pid,fd,home,proxy_port,source_host):
                     return 'neutral_browser_navigation_failed'
                 print('browser_sandbox_verified',flush=True)
                 failing_phase = 'mandatory_browser_url_policy_unconfirmed'
-                # The test container has --network none and the local fixture
-                # returns 403. No actual DNS or provider connection can occur.
-                with suppress(Error):
-                    page.goto('https://'+source_host+'/offline-operator-fixture',timeout=5000)
-                with suppress(Error):
-                    page.goto('https://denied.invalid/offline-operator-fixture',timeout=5000)
+                if source_host == QA_SOURCE:
+                    for field,host in (('allowed_navigation',QA_SOURCE),('forbidden_navigation',QA_DENIED)):
+                        print(field+'='+_qa_navigation(page,host),flush=True)
+                else:
+                    # Original --network none candidate fixture.
+                    with suppress(Error):
+                        page.goto('https://'+source_host+'/offline-operator-fixture',timeout=5000)
+                    with suppress(Error):
+                        page.goto('https://denied.invalid/offline-operator-fixture',timeout=5000)
                 body = page.locator('body').inner_text(timeout=3000)
                 if 'ERR_BLOCKED_BY_ADMINISTRATOR' not in body:
                     return 'mandatory_browser_url_policy_unconfirmed'
@@ -188,10 +246,16 @@ def _result(networked_qa=False):
                 outcome = next((value for value in states if value in lines),'fixture_incomplete')
                 if outcome=='verified' and (not proxy.source_seen or proxy.forbidden_seen):
                     outcome = 'restricted_proxy_unconfirmed'
-                return {'status':outcome,'two_uid_confidential_boundary':'collector_boundary_verified' in lines,
-                        'ordinary_chromium_sandbox':'browser_sandbox_verified' in lines,
-                        'source_requested_local_proxy':proxy.source_seen,'forbidden_origin_reached_proxy':proxy.forbidden_seen,
-                        'provider_requests':0}
+                result = {'status':outcome,'two_uid_confidential_boundary':'collector_boundary_verified' in lines,
+                          'ordinary_chromium_sandbox':'browser_sandbox_verified' in lines,
+                          'source_requested_local_proxy':proxy.source_seen,'forbidden_origin_reached_proxy':proxy.forbidden_seen,
+                          'provider_requests':0}
+                if networked_qa:
+                    result['proxy_accepted_connection'] = proxy.accepted
+                    for field in ('allowed_navigation','forbidden_navigation'):
+                        observed = [entry for entry in NAVIGATION_RESULTS if field+'='+entry in lines]
+                        result[field] = observed[0] if len(observed)==1 else 'not_attempted'
+                return result
         finally:
             writer.stdin.close()
             writer.wait(timeout=5)

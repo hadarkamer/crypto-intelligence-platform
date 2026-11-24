@@ -27,7 +27,9 @@ VIEWER_STATES = frozenset(('ready','service_user_must_be_nonroot','image_binarie
     'window_manager_failed','native_browser_failed','native_browser_close_failed','reader_import_failed',
     'sandboxed_verifier_failed','local_verification_failed','check_timed_out','check_failed'))
 BOOL_FIELDS = ('two_uid_confidential_boundary','ordinary_chromium_sandbox',
-               'source_requested_local_proxy','forbidden_origin_reached_proxy')
+               'source_requested_local_proxy','forbidden_origin_reached_proxy','proxy_accepted_connection')
+NAVIGATION_RESULTS = frozenset(('completed','timeout','other_error','not_attempted','name_not_resolved',
+    'proxy_connection_failed','tunnel_connection_failed','connection_refused','blocked_by_policy'))
 
 
 def prepare_offline_policy():
@@ -53,6 +55,10 @@ def checked_result(value,kind):
         for key in BOOL_FIELDS:
             if type(value.get(key)) is bool:
                 result[key] = value[key]
+        for key in ('allowed_navigation','forbidden_navigation'):
+            outcome = value.get(key)
+            if isinstance(outcome,str) and outcome in NAVIGATION_RESULTS:
+                result[key] = outcome
     else:
         result = {'reason':value.get('reason') if value.get('reason') in VIEWER_STATES else 'check_failed',
                   'isolated_operator_browser':value.get('isolated_operator_browser') is True}
