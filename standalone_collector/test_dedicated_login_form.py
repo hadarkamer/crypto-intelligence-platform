@@ -126,6 +126,33 @@ class TestOfficialForm(unittest.TestCase):
         self.page.goto.assert_not_called()
         self.loader.assert_not_called()
 
+    def test_only_missing_direct_route_can_open_login_from_map(self):
+        for status, challenge, expected in (
+            (401, '', 'login_form_unavailable'), (403, '', 'login_form_unavailable'),
+            (429, '', 'login_rate_limited'), (404, form._CAPTCHA, 'login_captcha_required'),
+            (410, form._VERIFY, 'login_verification_required'), (503, '', 'login_network_transient'),
+        ):
+            with self.subTest(status=status, challenge=challenge), patch.object(form, '_open_login_from_map') as fallback:
+                self.page.status = status
+                self.page.challenge = challenge
+                self.assertEqual(self.call().code, expected)
+                fallback.assert_not_called()
+        self.loader.assert_not_called()
+        self.reserve.assert_not_called()
+
+    def test_missing_direct_route_opens_map_once_before_one_login(self):
+        for status in (404, 410):
+            with self.subTest(status=status), patch.object(form, '_open_login_from_map', return_value=None) as fallback:
+                self.page = Page(self.clock)
+                self.page.status = status
+                self.loader.reset_mock()
+                self.reserve.reset_mock()
+                self.assertEqual(self.call(), form.LoginFormResult('login_submitted', True))
+                fallback.assert_called_once()
+                self.loader.assert_called_once_with()
+                self.reserve.assert_called_once_with()
+                self.assertEqual(self.page.submissions, 1)
+
     def test_duplicate_fields_and_missing_form_are_not_network_failures(self):
         for count in (0, 2):
             with self.subTest(count=count):

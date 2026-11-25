@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 
 LOGIN_URL = 'https://www.coinglass.com/login'
+LOGIN_MAP_URL = 'https://www.coinglass.com/LiquidationHeatMap/BTC?mode=coin'
 _EMAIL = 'input[type=email], input[autocomplete=username], input[placeholder="Email" i]'
 _PASSWORD = 'input[type=password]:not([autocomplete=new-password])'
 _BUTTON = re.compile(r'^(?:login|log in|sign in)$', re.I)
@@ -188,6 +189,59 @@ def _find_fields(page, end):
     return 'login_form_unavailable', None
 
 
+def _http_failure(response):
+    if response is not None:
+        if response.status == 429:
+            return LoginFormResult('login_rate_limited', False, retry_after_seconds(response.header_value('retry-after')))
+        if response.status in (502, 503, 504):
+            return LoginFormResult('login_network_transient')
+        if response.status >= 400:
+            return LoginFormResult('login_form_unavailable')
+    return None
+
+
+def _open_login_from_map(page, end):
+    if monotonic() >= end:
+        return LoginFormResult('login_form_unavailable')
+    response = page.goto(LOGIN_MAP_URL, wait_until='domcontentloaded', timeout=_remaining(end))
+    if page.url != LOGIN_MAP_URL:
+        return LoginFormResult('login_form_untrusted')
+    failure = _http_failure(response)
+    if failure:
+        return failure
+    if response is None or response.status != 200:
+        return LoginFormResult('login_form_unavailable')
+
+    links = page.get_by_role('link', name=_BUTTON).and_(page.locator('a[href="/login"]'))
+    while monotonic() < end and page.url == LOGIN_MAP_URL:
+        signal = _challenge(page)
+        if signal:
+            return LoginFormResult(signal)
+        link = _one_visible(links)
+        if link:
+            anchor = link.element_handle(timeout=_remaining(end))
+            if not anchor or not anchor.evaluate(
+                '''(a, url) => a instanceof HTMLAnchorElement && a.href === url &&
+                   (!a.target || a.target.toLowerCase() === '_self') && !a.hasAttribute('download') &&
+                   !a.ownerDocument.querySelector('base[target]')''', LOGIN_URL,
+            ):
+                return LoginFormResult('login_form_untrusted')
+            anchor.click(timeout=_remaining(end))
+            while monotonic() < end and page.url == LOGIN_MAP_URL:
+                signal = _challenge(page)
+                if signal:
+                    return LoginFormResult(signal)
+                page.wait_for_timeout(min(100, _remaining(end)))
+            if not official_login_url(page.url):
+                return LoginFormResult('login_form_unavailable' if page.url == LOGIN_MAP_URL else 'login_form_untrusted')
+            # A client-side route retains the map document. A new document must not authorize credentials.
+            if anchor.evaluate('a => a.ownerDocument === document'):
+                return None
+            return LoginFormResult('login_form_untrusted')
+        page.wait_for_timeout(min(100, _remaining(end)))
+    return LoginFormResult('login_form_unavailable')
+
+
 def submit_official_login(page, *, timeout_ms=12000, credentials=None, before_submit=None):
     """One credential-bearing action. Caller owns locking, retry and auth proof.
 
@@ -222,13 +276,15 @@ def submit_official_login(page, *, timeout_ms=12000, credentials=None, before_su
         response = page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=_remaining(end))
         if not official_login_url(page.url):
             return LoginFormResult('login_form_untrusted')
-        if response is not None:
-            if response.status == 429:
-                return LoginFormResult('login_rate_limited', False, retry_after_seconds(response.header_value('retry-after')))
-            if response.status in (502, 503, 504):
-                return LoginFormResult('login_network_transient')
-            if response.status >= 400:
-                return LoginFormResult('login_form_unavailable')
+        if response is not None and response.status in (404, 410):
+            blocker = _challenge(page)
+            if blocker:
+                return LoginFormResult(blocker)
+            failure = _open_login_from_map(page, end)
+        else:
+            failure = _http_failure(response)
+        if failure:
+            return failure
         signal, fields = _find_fields(page, end)
         if signal:
             return LoginFormResult(signal)

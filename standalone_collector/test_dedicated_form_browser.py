@@ -1,4 +1,5 @@
 """Offline official-form contract in sandboxed Chromium. All page traffic is fulfilled locally."""
+import json
 import os
 from pathlib import Path
 import secrets
@@ -8,7 +9,7 @@ from unittest.mock import Mock
 
 from playwright.sync_api import sync_playwright
 
-from dedicated_login_form import LOGIN_URL, LoginFormResult, submit_official_login
+from dedicated_login_form import LOGIN_MAP_URL, LOGIN_URL, LoginFormResult, submit_official_login
 
 
 HOME_URL = 'https://www.coinglass.com/'
@@ -146,6 +147,40 @@ class DedicatedFormBrowser(unittest.TestCase):
         credentials.assert_called_once_with()
         fence.assert_called_once_with()
         self.assertEqual(stats, {'loads': 3, 'post': 1, 'valid': 1, 'other': 0})
+
+        context.unroute('**/*', local_only)
+        requests = []
+        def missing_document(route):
+            request = route.request
+            requests.append((request.method, request.url))
+            if request.url == LOGIN_URL and request.method == 'GET':
+                route.fulfill(status=404, content_type='text/html', body='<p>Not found</p>')
+            elif request.url == LOGIN_MAP_URL and request.method == 'GET':
+                # Mount the same form in the current document, as the client router does.
+                body = FORM.split('<form', 1)[1].split('<script>', 1)
+                markup = json.dumps('<form' + body[0])
+                script = body[1].split('</script>', 1)[0]
+                html = ('<!doctype html><link rel="icon" href="data:,"><a href="/login"><button>Login</button></a>'
+                        "<script>document.querySelector('a').addEventListener('click', event => {"
+                        "event.preventDefault(); history.pushState(null, '', '/login');"
+                        f"document.body.innerHTML = {markup}; {script} }});</script>")
+                route.fulfill(status=200, content_type='text/html', body=html)
+            elif request.url == SUBMIT_URL and request.method == 'POST':
+                valid = parse_qs(request.post_data or '') == {'email': [email], 'password': [password]}
+                route.fulfill(status=204 if valid else 400, body='')
+            else:
+                route.abort('blockedbyclient')
+
+        credentials.reset_mock()
+        fence.reset_mock()
+        context.route('**/*', missing_document)
+        recovered = submit_official_login(page, credentials=credentials, before_submit=fence)
+        self.assertEqual(recovered, LoginFormResult('login_submitted', True))
+        self.assertEqual(page.url, HOME_URL)
+        self.assertEqual(requests, [('GET', LOGIN_URL), ('GET', LOGIN_MAP_URL), ('POST', SUBMIT_URL)])
+        self.assertEqual(page.evaluate('window.fixtureEvents'), {'input': 2, 'change': 2, 'submit': 1})
+        credentials.assert_called_once_with()
+        fence.assert_called_once_with()
 
 
 if __name__ == '__main__':
