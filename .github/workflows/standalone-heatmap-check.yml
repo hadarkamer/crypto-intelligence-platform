@@ -74,7 +74,11 @@ jobs:
           pg_config --bindir >> "$GITHUB_PATH"
           echo "PG_BIN_FOR_OPERATOR_TESTS=$(pg_config --bindir)" >> "$GITHUB_ENV"
       - name: Prepare actual runtime and run collector contracts
-        run: python standalone_collector/prepare.py
+        env:
+          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
+        run: |
+          /opt/google/chrome/chrome --version
+          python standalone_collector/prepare.py
       - name: Check the dedicated account flow against synthetic pages and a private test database
         working-directory: standalone_collector
         run: |

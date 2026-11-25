@@ -2,6 +2,7 @@
 from datetime import datetime,timezone
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 import unittest
 
@@ -100,6 +101,11 @@ class BrowserReplay(unittest.TestCase):
         with sync_playwright() as pw:
             bundled = Path(pw.chromium.executable_path)
             binary = str(bundled) if bundled.is_file() else shutil.which('chromium')
+            # The hosted Ubuntu runner ships a sandbox profile for its signed
+            # Chrome package. This selector applies only to the offline replay.
+            if os.environ.get('COINGLASS_QA_USE_SYSTEM_CHROME') == '1':
+                binary = '/opt/google/chrome/chrome'
+                self.assertTrue(Path(binary).is_file(), 'CI system Chrome is missing')
             if not binary:self.skipTest('Chromium is required for offline browser replay')
             browser=pw.chromium.launch(executable_path=binary,headless=True,chromium_sandbox=True,args=['--disable-dev-shm-usage'])
             try:
