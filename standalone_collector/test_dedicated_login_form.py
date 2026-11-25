@@ -133,6 +133,33 @@ class TestOfficialForm(unittest.TestCase):
                 self.assertEqual(self.call().code, 'login_form_unavailable')
         self.loader.assert_not_called()
 
+    def test_multiple_visible_login_buttons_require_one_shared_form_owner(self):
+        for ownership, expected in (
+            ([False, True], 'login_submitted'),
+            ([True, True], 'login_form_unavailable'),
+            ([False, False], 'login_form_unavailable'),
+        ):
+            with self.subTest(ownership=ownership):
+                self.page = Page(self.clock)
+                self.loader.reset_mock()
+                self.reserve.reset_mock()
+                nodes = []
+                for owns_fields in ownership:
+                    button = Locator(self.page, 1, 'button')
+                    evaluate = button.evaluate
+                    def operation(script, args, owned=owns_fields, guarded=evaluate):
+                        if 'op' in args:
+                            return guarded(script, args)
+                        self.assertEqual((args['email'].field, args['password'].field), ('email', 'password'))
+                        return owned
+                    button.evaluate = operation
+                    nodes.append(button)
+                self.page.get_by_role = Mock(return_value=Mock(count=lambda: len(nodes), nth=nodes.__getitem__))
+                self.assertEqual(self.call().code, expected)
+                self.assertEqual(self.page.submissions, int(expected == 'login_submitted'))
+                self.assertEqual(self.loader.call_count, self.page.submissions)
+                self.assertEqual(self.reserve.call_count, self.page.submissions)
+
     def test_guarded_inputs_and_submit(self):
         for op in ('check', 'email', 'password', 'submit'):
             with self.subTest(op=op):

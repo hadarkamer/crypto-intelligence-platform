@@ -89,12 +89,32 @@ def _remaining(end):
     return max(1, ceil((end - monotonic()) * 1000))
 
 
-def _one_visible(locator):
+def _visible_matches(locator):
     count = locator.count()
     if count > 12:
-        return None
-    visible = [locator.nth(i) for i in range(count) if locator.nth(i).is_visible()]
+        return []
+    return [node for i in range(count) if (node := locator.nth(i)).is_visible()]
+
+
+def _one_visible(locator):
+    visible = _visible_matches(locator)
     return visible[0] if len(visible) == 1 else None
+
+
+def _login_button(page, email, password, end):
+    buttons = _visible_matches(page.get_by_role('button', name=_BUTTON))
+    if len(buttons) == 1:
+        # The guarded form operation also validates the legacy form-less layout.
+        return buttons[0].element_handle(timeout=_remaining(end))
+    matches = []
+    for node in buttons:
+        handle = node.element_handle(timeout=_remaining(end))
+        if handle and handle.evaluate(
+            '(button, {email, password}) => !!email.form && email.form === password.form && button.form === email.form',
+            {'email': email, 'password': password},
+        ):
+            matches.append(handle)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _visible(locator):
@@ -157,12 +177,13 @@ def _find_fields(page, end):
         signal = _challenge(page)
         if signal:
             return signal, None
-        nodes = [_one_visible(locator) for locator in (page.locator(_EMAIL), page.locator(_PASSWORD),
-                                                        page.get_by_role('button', name=_BUTTON))]
+        nodes = [_one_visible(page.locator(selector)) for selector in (_EMAIL, _PASSWORD)]
         if all(nodes):
             handles = [node.element_handle(timeout=_remaining(end)) for node in nodes]
             if all(handles):
-                return None, handles
+                button = _login_button(page, *handles, end)
+                if button:
+                    return None, [*handles, button]
         page.wait_for_timeout(min(100, _remaining(end)))
     return 'login_form_unavailable', None
 

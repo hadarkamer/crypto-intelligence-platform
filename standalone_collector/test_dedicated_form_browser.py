@@ -16,6 +16,7 @@ SUBMIT_URL = HOME_URL + '__offline_fixture__/login'
 SYSTEM_CHROME = Path('/opt/google/chrome/chrome')
 FORM = '''<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>Offline fixture</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'">
+<nav><button type="button">Login</button></nav>
 <form method="post" action="/__offline_fixture__/login">
   <input type="email" name="email" placeholder="Email" required>
   <input type="password" name="password" placeholder="Password" required>
@@ -106,9 +107,10 @@ class DedicatedFormBrowser(unittest.TestCase):
             request = route.request
             if request.url == LOGIN_URL and request.method == 'GET':
                 stats['loads'] += 1
-                # The first page has a foreign submit override. It must never get credentials.
                 html = FORM
                 if stats['loads'] == 1:
+                    html = html.replace('</form>', '<button type="submit">Login</button></form>')
+                elif stats['loads'] == 2:
                     html = html.replace('type="submit" disabled',
                                         'type="submit" formaction="https://unused.invalid/login" disabled')
                 route.fulfill(status=200, content_type='text/html; charset=utf-8', body=html)
@@ -128,6 +130,10 @@ class DedicatedFormBrowser(unittest.TestCase):
         def reserve():
             return page.evaluate('window.fixtureEvents.input === 2 && window.fixtureEvents.change === 2 && window.fixtureEvents.submit === 0')
         fence = Mock(side_effect=reserve)
+        ambiguous = submit_official_login(page, timeout_ms=1200, credentials=credentials, before_submit=fence)
+        self.assertEqual(ambiguous, LoginFormResult('login_form_unavailable'))
+        credentials.assert_not_called()
+        fence.assert_not_called()
         refused = submit_official_login(page, credentials=credentials, before_submit=fence)
         self.assertEqual(refused, LoginFormResult('login_form_untrusted'))
         credentials.assert_not_called()
@@ -139,7 +145,7 @@ class DedicatedFormBrowser(unittest.TestCase):
         self.assertEqual(page.evaluate('window.fixtureEvents'), {'input': 2, 'change': 2, 'submit': 1})
         credentials.assert_called_once_with()
         fence.assert_called_once_with()
-        self.assertEqual(stats, {'loads': 2, 'post': 1, 'valid': 1, 'other': 0})
+        self.assertEqual(stats, {'loads': 3, 'post': 1, 'valid': 1, 'other': 0})
 
 
 if __name__ == '__main__':
