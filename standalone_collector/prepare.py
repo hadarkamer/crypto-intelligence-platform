@@ -37,7 +37,7 @@ def validator_ast(text):
     return ast.dump(node,include_attributes=False)
 
 
-def prepare():
+def prepare(run_contract=subprocess.run):
     prepare_browser()
     # Generated Python modules must not reuse bytecode from a previously
     # installed adapter. Deployment builds may restore this directory from a
@@ -82,13 +82,13 @@ def prepare():
     if actual.count('page.screenshot(')!=original.count('page.screenshot('):
         raise RuntimeError('Range support must not add a source screenshot')
     # First verify the known Model1 baseline before adding the identity dimension.
-    subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
+    run_contract([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
         'test_page_flow','test_48h_execution','test_image_detail','test_price_range','test_legend_popup',
         'test_cache_policy','-q'],cwd=HERE,check=True,timeout=60)
     from install_heatmap_models import install as install_models
     install_models(RUNTIME)
     # A fresh interpreter ensures each child's actual model configuration is tested.
-    subprocess.run([sys.executable,'-m','unittest','test_heatmap_models','-v'],
+    run_contract([sys.executable,'-m','unittest','test_heatmap_models','-v'],
         cwd=HERE,check=True,timeout=90)
     from install_prominent_levels import install as install_prominent
     install_prominent(RUNTIME)
@@ -98,7 +98,7 @@ def prepare():
     install_capture_readiness(RUNTIME)
     from install_store_diagnostics import install as install_store_diagnostics
     install_store_diagnostics(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
+    run_contract([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
         'test_capture_diagnostics','test_source_login_required','test_timeout_retention',
         'test_source_compatibility','test_store_diagnostics','test_execution_progress','test_capture_efficiency',
         'test_capture_failure_observer','-v'],
@@ -109,11 +109,11 @@ def prepare():
     install_rendering(RUNTIME)
     # The rendering suite pins the pre-reload capture AST. Run that unchanged
     # contract before adding the separately tested common recovery wrapper.
-    subprocess.run([sys.executable,'-m','unittest','test_model3_rendering','-v'],
+    run_contract([sys.executable,'-m','unittest','test_model3_rendering','-v'],
         cwd=HERE,check=True,timeout=90)
     from install_capture_readiness import install_reload
     install_reload(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
+    run_contract([sys.executable,'-m','unittest','test_heatmap_hover','test_heatmap_calibration','test_prominent_levels',
         'test_response_shape','test_capture_diagnostics','test_capture_readiness',
         'test_source_login_required','test_timeout_retention','test_source_compatibility',
         'test_store_diagnostics','test_execution_progress','test_capture_efficiency',
@@ -125,13 +125,13 @@ def prepare():
     from install_heatmap_models import install_session_bridge
     install_session_capture(RUNTIME)
     install_session_bridge(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_session_capture','test_session_state',
+    run_contract([sys.executable,'-m','unittest','test_session_capture','test_session_state',
         'test_session_runtime','-v'],cwd=HERE,check=True,timeout=90)
     from install_modern_map import install as install_modern_map
     install_modern_map(RUNTIME)
     from install_symbol_jobs import install as install_symbol_jobs
     install_symbol_jobs(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_symbol_jobs','test_modern_map','-v'],
+    run_contract([sys.executable,'-m','unittest','test_symbol_jobs','test_modern_map','-v'],
         cwd=HERE,check=True,timeout=120)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -160,4 +160,13 @@ def prepare():
         'bot_started':False,'automatic_source_checks':False},indent=2))
     print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
 
-if __name__=='__main__':prepare()
+if __name__ == '__main__':
+    import os
+    if os.environ.get('RENDER') == 'true':
+        from native_pilot_host import build_contract_already_run_in_ci, isolate, require_runtime
+        isolate('build')
+        prepare(run_contract=build_contract_already_run_in_ci)
+        require_runtime(HERE)
+        print('PINNED_NATIVE_PILOT_RUNTIME_READY', flush=True)
+    else:
+        prepare()

@@ -3,6 +3,13 @@
 --probe checks configuration only. Diagnostic PNG creation does not prove
 readability; actual jobs require strict visual and numeric validation.
 """
+if __name__ == '__main__':
+    from pathlib import Path
+    import sys
+    from native_pilot_host import entry
+    entry(sys.argv[1:], Path(__file__).resolve().parent)
+    raise SystemExit(0)
+
 import asyncio
 import contextlib
 import hmac
