@@ -1,6 +1,8 @@
 """Read the public, rendered CoinGlass map with a single isolated browser page."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from io import BytesIO
 import math
@@ -17,6 +19,28 @@ RANGES = {'12H':'12 hour', '24H':'24 hour', '48H':'48 hour'}
 GATE = re.compile(r'sign in to view (?:the )?liquidation heatmap', re.I)
 
 
+_DEADLINE = ContextVar('protected_probe_deadline', default=None)
+
+
+@contextmanager
+def map_access_budget(seconds):
+    token = _DEADLINE.set(time.monotonic() + seconds)
+    try:
+        yield
+    finally:
+        _DEADLINE.reset(token)
+
+
+def limited_timeout(milliseconds):
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return milliseconds
+    remaining = int((deadline - time.monotonic()) * 1000)
+    if remaining <= 0:
+        raise StageFailure('source_timeout')
+    return min(remaining, milliseconds)
+
+
 def map_url(symbol):
     if not isinstance(symbol,str) or not re.fullmatch('[A-Z0-9]{1,20}',symbol):
         raise ValueError('Invalid configured symbol')
@@ -24,6 +48,7 @@ def map_url(symbol):
 
 
 def visible(items):
+    limited_timeout(3000)
     return [items.nth(index) for index in range(min(60,items.count())) if items.nth(index).is_visible()]
 
 
@@ -39,8 +64,9 @@ def gate(page):
 
 
 def wait_for(page, read, timeout=8, *, requested=True):
-    end = time.monotonic()+timeout
+    end = time.monotonic()+limited_timeout(timeout*1000)/1000
     while True:
+        limited_timeout(3000)
         if requested:gate(page)
         try:
             value = read()
@@ -51,7 +77,7 @@ def wait_for(page, read, timeout=8, *, requested=True):
                 raise
         if time.monotonic() >= end:
             raise StageFailure('source_not_readable')
-        page.wait_for_timeout(120)
+        page.wait_for_timeout(limited_timeout(120))
 
 
 def label(page, text):
@@ -85,7 +111,7 @@ def symbol_control(page,symbol):
 
 def select_choice(page,wanted,*,requested=True):
     if not choice(page,wanted):
-        choice_target(page,wanted).click(timeout=2500)
+        choice_target(page,wanted).click(timeout=limited_timeout(2500))
     wait_for(page,lambda:choice(page,wanted),requested=requested)
 
 
@@ -111,11 +137,11 @@ def select_option(page, name, value):
         text = option_control(page,name).inner_text().strip()
         return text == value or (name == 'Colours' and re.fullmatch('Viridis(?:\\s*Default)?',text))
     if not matches():
-        control.click(timeout=2500)
+        control.click(timeout=limited_timeout(2500))
         menu = visible(page.get_by_role('listbox')) or visible(page.get_by_role('menu'))
         scope = menu[0] if len(menu)==1 else page
         option = scope.get_by_text(value, exact=True)
-        one(option).click(timeout=2500)
+        one(option).click(timeout=limited_timeout(2500))
     wait_for(page,matches)
 
 
@@ -143,19 +169,33 @@ def prefer_dark(page):
     # independently checked plot pixels below remain authoritative.
     options = visible(page.get_by_role('button',name=re.compile(
         r'^(?:switch to dark(?: mode| theme)?|use dark (?:theme|mode)|dark (?:theme|mode))$',re.I)))
-    if len(options)==1:options[0].click(timeout=2500)
+    if len(options)==1:options[0].click(timeout=limited_timeout(2500))
 
 
 from collection_metrics import phase
 
 
 @phase('map_access')
-def open_verified_map(page, symbol, model, timeframe):
+def open_verified_map(page, symbol, model, timeframe, *, guard=None):
     if type(model) is not int or model not in (1,2,3) or timeframe not in RANGES:
         raise ValueError('Invalid requested heatmap identity')
     url = map_url(symbol)
-    page.goto(url,wait_until='domcontentloaded',timeout=40000)
-    page.set_default_timeout(3000)
+    response = page.goto(url,wait_until='domcontentloaded',timeout=limited_timeout(40000))
+    if guard:
+        if response and response.status == 429 and page.url == url:
+            from dedicated_login_form import retry_after_seconds
+            error = StageFailure('source_rate_limited')
+            error.retry_after_seconds = retry_after_seconds(response.header_value('retry-after'))
+            raise error
+        if response and response.status == 404 and page.url == url:
+            raise StageFailure('source_map_unavailable')
+        if response and response.status >= 500:
+            raise StageFailure('source_capture_failed')
+        # Controls can initially show a different, gated horizon. Handle
+        # redirects now. Apply the access gate after switching to the request.
+        if page.url != url:
+            guard()
+    page.set_default_timeout(limited_timeout(1000 if _DEADLINE.get() is not None else 3000))
     wait_for(page,lambda: choice_target(page, f'Model {model}'),timeout=25,requested=False)
     prefer_dark(page)
     select_choice(page,f'Model {model}',requested=False)
@@ -179,7 +219,7 @@ def open_verified_map(page, symbol, model, timeframe):
         rail_anchor(page)
         x,y,w,h=chart_box(page)
         check(x>=0 and y>=0)
-        shot=page.screenshot(clip={'x':x,'y':y,'width':w,'height':h},animations='disabled')
+        shot=protected_clip(page, {'x':x,'y':y,'width':w,'height':h}, guard)
         with Image.open(BytesIO(shot)) as chart:
             pixels=chart.convert('RGB')
             try:
@@ -193,6 +233,7 @@ def open_verified_map(page, symbol, model, timeframe):
                 return False
             finally:pixels.close()
     wait_for(page,plotted,timeout=10)
+    if guard:guard()
     if timeframe=='12H':
         from session_capture import note_protected_map_ready
         note_protected_map_ready(page)
@@ -369,6 +410,43 @@ def save_evidence(screen,box,controls,output):
         for strip in strips:strip.close()
 
 
+def protected_clip(page, box, guard):
+    if guard:
+        guard()
+    # Inputs, dialogs, and third-party frames never belong to market evidence.
+    masks = [page.locator('input,textarea,iframe,dialog,[role=dialog],[contenteditable=true]')]
+    options = {'timeout': limited_timeout(3000)} if _DEADLINE.get() is not None else {}
+    image = page.screenshot(clip=box, animations='disabled', mask=masks, **options)
+    if guard:
+        guard()
+    return image
+
+
+def market_surface(page, box, controls, guard):
+    # Numeric routines use viewport coordinates. Build that coordinate space
+    # from just the chart and identified map controls, leaving all else blank.
+    viewport = page.viewport_size
+    check(viewport and 0 < viewport['width'] <= 4096 and 0 < viewport['height'] <= 4096)
+    screen = Image.new('RGB', (viewport['width'],viewport['height']), (10,13,18))
+    left, top, width, height = box
+    rectangles = [dict(x=left,y=top,width=width,height=height), *controls]
+    try:
+        for rect in rectangles:
+            check(rect)
+            x, y = math.floor(rect['x']), math.floor(rect['y'])
+            right = math.ceil(rect['x']+rect['width'])
+            bottom = math.ceil(rect['y']+rect['height'])
+            check(0 <= x < right <= screen.width and 0 <= y < bottom <= screen.height)
+            area = dict(x=x,y=y,width=right-x,height=bottom-y)
+            with Image.open(BytesIO(protected_clip(page,area,guard))) as part:
+                check(part.size == (right-x,bottom-y))
+                screen.paste(part,(x,y))
+        return screen
+    except BaseException:
+        screen.close()
+        raise
+
+
 def read_map(page, symbol, model, timeframe, output):
     from model1_execution import capture_operation
     with capture_operation('capture'):
@@ -377,14 +455,15 @@ def read_map(page, symbol, model, timeframe, output):
 
 
 @phase('map_read')
-def read_selected_map(page,symbol,model,timeframe,output):
+def read_selected_map(page,symbol,model,timeframe,output,*,guard=None):
+    if guard:guard()
     display_ready(page)
     before = details(page)
     box = chart_box(page)
     left,top,width,height=box
     page.mouse.move(max(0,left-2),max(0,top-2))
     controls=evidence_controls(page,symbol,model)
-    screen = Image.open(BytesIO(page.screenshot(animations='disabled'))).convert('RGB')
+    screen = market_surface(page,box,controls,guard)
     try:
         check(0<=left and left+width<=screen.width and 0<=top and top+height<=screen.height)
         bounds = dark_bounds(screen,box)
@@ -440,6 +519,7 @@ def read_selected_map(page,symbol,model,timeframe,output):
         check(choice(page,f'Model {model}') and choice(page,'Coin'))
         check(option_control(page,'Range').inner_text().strip()==RANGES[timeframe])
         gate(page)
+        if guard:guard()
         save_evidence(screen,box,controls,output)
     finally:
         screen.close()

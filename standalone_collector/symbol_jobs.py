@@ -14,15 +14,65 @@ MAX_ATTEMPTS = 3
 MEASURE_SCHEMA = 'coinglass.right-edge-measure.v1'
 SYMBOL = re.compile(r'[A-Z0-9]{1,16}\Z')
 RETRYABLE_ERRORS = frozenset({
-    'source_capture_failed', 'source_timeout', 'source_not_readable', 'source_login_required',
+    'source_capture_failed', 'source_timeout', 'source_rate_limited', 'source_not_readable', 'source_login_required',
     'session_observation_failed', 'session_transport_failed', 'session_snapshot_failed',
     'session_conflict', 'analysis_timeout', 'analysis_rate_limited', 'analysis_http_error',
-    'scan_timeout', 'interrupted', 'evidence_store_failed', 'worker_crashed', 'scan_failed',
+    'auth_in_progress', 'auth_retry_pending', 'scan_timeout', 'interrupted', 'evidence_store_failed', 'worker_crashed', 'scan_failed',
 })
 
 
 def modern_enabled():
     return os.getenv('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true'
+
+
+def canonical_auth_failure(connection, store, jid, code):
+    """Keep the worksheet's existing durable wake contract for bound login events."""
+    reasons = {'auth_challenge', 'auth_code_required', 'auth_invalid_credentials', 'auth_rate_limited',
+               'auth_unconfirmed', 'auth_gate_after_verification', 'auth_retry_exhausted',
+               'auth_form_unavailable', 'auth_configuration_invalid'}
+    if code not in reasons:
+        return code
+    from dedicated_auth_state import incident_status
+    event = incident_status(connection, store.slot, job_id=jid)
+    return 'source_login_required' if event.get('incident_id') else code
+
+
+def _source_retry(connection):
+    """Read only the private deadline. No browser, credential submission or attempt reservation."""
+    if not modern_enabled():
+        return None
+    from session_runtime import ManagedSession
+    session = ManagedSession.from_environment(connection, str(uuid4()))
+    row = connection.execute("""
+        SELECT due AS retry_at,ceil(extract(epoch FROM due-clock_timestamp()))::bigint AS seconds
+        FROM (
+            SELECT CASE WHEN map_retry_after>='9999-01-01 UTC'::timestamptz
+                        THEN clock_timestamp()+interval '6 hours' ELSE map_retry_after END AS due
+            FROM collector_private.coinglass_dedicated_sessions
+            WHERE slot=%s AND map_retry_after>clock_timestamp()
+        ) cooldown""", (session.store.slot,)).fetchone()
+    if not row or row['seconds'] <= 0:
+        return None
+    from datetime import timezone
+    return {'retry_at': row['retry_at'].astimezone(timezone.utc).isoformat(),
+            'retry_after_seconds':row['seconds']}
+
+
+def _allow_new_source_work(connection):
+    retry = _source_retry(connection)
+    if retry:
+        from collection_bridge import BridgeError
+        error = BridgeError('source_rate_limited', 'CoinGlass requested a pause before another read',429)
+        error.retry_at, error.retry_after_seconds = retry['retry_at'], retry['retry_after_seconds']
+        raise error
+
+
+def _job_envelope(connection, row):
+    from collection_bridge import envelope
+    response = envelope(row)
+    if row.get('error_code') == 'source_rate_limited' and response.get('error'):
+        response['error'].update(_source_retry(connection) or {})
+    return response
 
 
 def verified_symbols():
@@ -82,12 +132,22 @@ def _continue_attempt(connection, prior, rid, attempt):
             or str(prior['logical_request_id']) != rid or prior['error_code'] not in RETRYABLE_ERRORS):
         raise BridgeError('invalid_retry', 'Cannot advance the requested attempt', 409)
     if prior['error_code'] == 'source_login_required' and os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true':
-        confirmed = connection.execute("""SELECT 1 FROM collector_private.coinglass_login_jobs j
+        if modern_enabled():
+            from dedicated_auth_state import incident_status
+            from session_runtime import ManagedSession
+            session = ManagedSession.from_environment(connection, str(uuid4()))
+            # A pre-upgrade job can reference an old operator incident only.
+            # Reuse that logical job with the current account's durable attempt fence.
+            status = incident_status(connection, session.store.slot, job_id=prior['id'])
+            confirmed = status['status'] in ('none', 'resolved')
+        else:
+            confirmed = connection.execute("""SELECT 1 FROM collector_private.coinglass_login_jobs j
             JOIN collector_private.coinglass_login_incidents i ON i.id=j.incident_id
             WHERE j.job_id=%s AND i.resolved_at IS NOT NULL AND i.resolved_revision IS NOT NULL""",
             (prior['id'],)).fetchone()
         if not confirmed:
-            raise BridgeError('login_pending', 'The collector is waiting for verified operator sign-in', 409)
+            raise BridgeError('login_pending', 'The source login event has not been resolved', 409)
+    _allow_new_source_work(connection)
     connection.execute('DELETE FROM public.ai_collection_bridge_evidence WHERE job_id=%s', (prior['id'],))
     return connection.execute("""UPDATE public.ai_collection_bridge_jobs
         SET status='queued',attempt=%s,started_at=NULL,finished_at=NULL,
@@ -111,7 +171,7 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
         if prior:
             if (prior['symbol'], prior['heatmap_model'], prior['timeframe']) != (symbol, store.heatmap_model, timeframe):
                 raise BridgeError('idempotency_conflict', 'Request id belongs to another CoinGlass map', 409)
-            return envelope(_continue_attempt(connection, prior, rid, attempt))
+            return _job_envelope(connection,_continue_attempt(connection, prior, rid, attempt))
         if attempt != 1:
             raise BridgeError('invalid_retry', 'A new request must begin at attempt 1', 409)
         connection.execute("""UPDATE public.ai_collection_bridge_jobs SET status='failed',
@@ -136,6 +196,7 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
                 ORDER BY created_at DESC LIMIT 1""",
                 (symbol, store.heatmap_model, timeframe, modern_enabled(), MEASURE_SCHEMA)).fetchone()
         if row is None:
+            _allow_new_source_work(connection)
             row = connection.execute("""INSERT INTO public.ai_collection_bridge_jobs
                 (id,timeframe,status,heatmap_model,symbol,logical_request_id)
                 VALUES(%s,%s,'queued',%s,%s,%s) RETURNING *""",
@@ -166,7 +227,7 @@ def get_job(store, jid, symbol='BTC'):
                    symbol,attempt,logical_request_id FROM public.ai_collection_bridge_jobs
             WHERE id=%s AND heatmap_model=%s AND symbol=%s""",
             (jid, store.heatmap_model, verify_symbol(symbol))).fetchone()
-    return envelope(row) if row else None
+        return _job_envelope(connection,row) if row else None
 
 
 def get_evidence(store, jid, symbol='BTC'):

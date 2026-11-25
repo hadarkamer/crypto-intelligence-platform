@@ -100,14 +100,17 @@ class Lease:
 
 class PgSessionStore:
     """Use the parent's held PostgreSQL connection; never acquire a new lock."""
+    # These identifiers are fixed by trusted store implementations.
+    table = 'collector_private.coinglass_session_state'
+    slot = SLOT
+
     def __init__(self, connection, key: bytes):
         if type(key) is not bytes or len(key) != 32:
             raise SessionStateError('state_key_invalid')
         self.connection, self._key = connection, key
 
-    @staticmethod
-    def _aad(revision):
-        return f'{FORMAT}:{SLOT}:{revision}'.encode('ascii')
+    def _aad(self, revision):
+        return f'{FORMAT}:{self.slot}:{revision}'.encode('ascii')
 
     def _seal(self, state, revision, *, allow_empty=False):
         try:
@@ -161,8 +164,8 @@ class PgSessionStore:
         try:
             with self.connection.transaction():
                 self._require_lock()
-                row = self.connection.execute("""SELECT revision,status,encrypted_payload
-                    FROM collector_private.coinglass_session_state WHERE slot=%s""", (SLOT,)).fetchone()
+                row = self.connection.execute(f"""SELECT revision,status,encrypted_payload
+                    FROM {self.table} WHERE slot=%s""", (self.slot,)).fetchone()
                 if row is None:
                     raise SessionStateError('state_missing')
                 if row['status'] != 'ready':
@@ -179,10 +182,10 @@ class PgSessionStore:
         try:
             with self.connection.transaction():
                 self._require_lock()
-                row = self.connection.execute("""INSERT INTO collector_private.coinglass_session_state
+                row = self.connection.execute(f"""INSERT INTO {self.table}
                     (slot,revision,status,run_id,encrypted_payload)
                     VALUES(%s,1,'ready',NULL,%s) ON CONFLICT(slot) DO NOTHING RETURNING revision""",
-                    (SLOT, payload)).fetchone()
+                    (self.slot, payload)).fetchone()
                 if row is None:
                     raise SessionStateError('state_exists')
                 return row['revision']
@@ -196,8 +199,8 @@ class PgSessionStore:
         try:
             with self.connection.transaction():
                 row = self.connection.execute(
-                    'SELECT revision FROM collector_private.coinglass_session_state WHERE slot=%s',
-                    (SLOT,)).fetchone()
+                    f'SELECT revision FROM {self.table} WHERE slot=%s',
+                    (self.slot,)).fetchone()
                 return row['revision'] if row else 0
         except SessionStateError:
             raise
@@ -226,18 +229,18 @@ class PgSessionStore:
             with self.connection.transaction():
                 self._require_lock()
                 row = self.connection.execute(
-                    'SELECT revision,status,run_id FROM collector_private.coinglass_session_state '
-                    'WHERE slot=%s FOR UPDATE', (SLOT,)).fetchone()
+                    f'SELECT revision,status,run_id FROM {self.table} '
+                    'WHERE slot=%s FOR UPDATE', (self.slot,)).fetchone()
                 if not row or row['revision'] != expected_revision:
                     raise SessionStateError('state_revision_conflict')
                 if row['status'] == 'in_use' and not self._previous_run_inactive(row):
                     raise SessionStateError('state_not_ready')
                 revision = row['revision'] + 1
                 self.connection.execute(
-                    "UPDATE collector_private.coinglass_session_state SET status='ready',"
+                    f"UPDATE {self.table} SET status='ready',"
                     " revision=%s,run_id=NULL,encrypted_payload=%s,updated_at=now()"
                     " WHERE slot=%s AND revision=%s",
-                    (revision, self._seal(state, revision), SLOT, expected_revision))
+                    (revision, self._seal(state, revision), self.slot, expected_revision))
                 return revision
         except SessionStateError:
             raise
@@ -253,15 +256,15 @@ class PgSessionStore:
         try:
             with self.connection.transaction():
                 self._require_lock()
-                row = self.connection.execute("""SELECT revision,status,run_id,encrypted_payload
-                    FROM collector_private.coinglass_session_state WHERE slot=%s FOR UPDATE""",
-                    (SLOT,)).fetchone()
+                row = self.connection.execute(f"""SELECT revision,status,run_id,encrypted_payload
+                    FROM {self.table} WHERE slot=%s FOR UPDATE""",
+                    (self.slot,)).fetchone()
                 if row is None:
                     if not allow_initial_probe:
                         raise SessionStateError('state_missing')
-                    self.connection.execute("""INSERT INTO collector_private.coinglass_session_state
+                    self.connection.execute(f"""INSERT INTO {self.table}
                         (slot,revision,status,run_id,encrypted_payload) VALUES(%s,1,'in_use',%s,%s)""",
-                        (SLOT, run_id, self._seal(empty, 1, allow_empty=True)))
+                        (self.slot, run_id, self._seal(empty, 1, allow_empty=True)))
                     return Lease(1, run_id, empty)
                 status = row['status']
                 if status == 'blocked' and allow_initial_probe:
@@ -285,10 +288,10 @@ class PgSessionStore:
                     state = empty
                 revision = row['revision'] + 1
                 payload = self._seal(state, revision, allow_empty=True)
-                updated = self.connection.execute("""UPDATE collector_private.coinglass_session_state
+                updated = self.connection.execute(f"""UPDATE {self.table}
                     SET revision=%s,status='in_use',run_id=%s,encrypted_payload=%s,updated_at=now()
                     WHERE slot=%s AND revision=%s AND status=%s RETURNING revision""",
-                    (revision, run_id, payload, SLOT, row['revision'], status)).fetchone()
+                    (revision, run_id, payload, self.slot, row['revision'], status)).fetchone()
                 if updated is None:
                     raise SessionStateError('state_revision_conflict')
                 return Lease(revision, run_id, state)
@@ -315,10 +318,10 @@ class PgSessionStore:
         try:
             with self.connection.transaction():
                 self._require_lock()
-                row = self.connection.execute("""UPDATE collector_private.coinglass_session_state
+                row = self.connection.execute(f"""UPDATE {self.table}
                     SET revision=%s,status=%s,run_id=NULL,encrypted_payload=%s,updated_at=now()
                     WHERE slot=%s AND revision=%s AND run_id=%s AND status='in_use' RETURNING revision""",
-                    (revision, outcome, payload, SLOT, lease.revision, lease.run_id)).fetchone()
+                    (revision, outcome, payload, self.slot, lease.revision, lease.run_id)).fetchone()
                 if row is None:
                     raise SessionStateError('state_revision_conflict')
                 return row['revision']

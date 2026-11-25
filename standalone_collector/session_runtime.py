@@ -1,7 +1,7 @@
-"""Parent-only session persistence and one bounded private child pipe.
+"""Parent-owned persistence and bounded private communication with the map worker.
 
-The existing worker owns WORK_LOCK. Browser state never enters result/evidence
-files, stdout, or stderr. This module neither authenticates nor calls a source.
+The owner holds the existing WORK_LOCK. The dedicated worker requests state,
+credentials and database acknowledgments over an inherited Unix socket.
 """
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ import base64
 import json
 import os
 import select
+import socket
+
+import session_channel
 import struct
 import threading
 
@@ -20,7 +23,18 @@ MAX_FRAME = STATE_LIMIT + 1024
 KEY_ENV = 'COINGLASS_SESSION_KEY'
 ENABLED_ENV = 'COINGLASS_SESSION_STORE_ENABLED'
 CHILD_KEYS = ('COINGLASS_SESSION_RETURN_FD', 'COINGLASS_SESSION_RUN_ID',
-              'COINGLASS_SESSION_REVISION')
+              'COINGLASS_SESSION_REVISION', 'COINGLASS_SESSION_CONTROL_FD')
+CREDENTIAL_ENV = ('COINGLASS_LOGIN_EMAIL', 'COINGLASS_LOGIN_PASSWORD')
+# The task calls the existing AI scanner after Chromium exits. Only its own
+# analysis key and the OS/browser runtime settings are needed in this process.
+WORKER_ENV = frozenset((
+    'PATH', 'HOME', 'TMPDIR', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ',
+    'LD_LIBRARY_PATH', 'VIRTUAL_ENV', 'PYTHONPATH', 'PYTHONHOME', 'PYTHONDONTWRITEBYTECODE',
+    'PLAYWRIGHT_BROWSERS_PATH', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'FONTCONFIG_PATH',
+    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS',
+    'OPENAI_API_KEY', 'OPENAI_MARKET_SCANNER_MODEL', 'COLLECTION_HEATMAP_MODEL',
+    'COLLECTION_HEATMAP_SYMBOL', 'COINGLASS_MODERN_UI_ENABLED',
+))
 
 
 def _read_chunk(fd, count, stop):
@@ -61,11 +75,17 @@ def _read_frame(fd, stop):
 
 
 class SessionTransport:
-    def __init__(self, environment, lease):
-        self.env = dict(environment)
+    def __init__(self, environment, lease, owner=None):
+        self.owner = owner
+        self.control = self.peer = None
+        self.control_task = None
+        self.active_incident = None
+        self.credentials_sent = False
+        self.env = (dict(environment) if owner is None else
+                    {key: environment[key] for key in WORKER_ENV if key in environment})
         # The database writer/key remain in the parent. Neither is needed by
         # the browser/AI task. A legacy header can never override managed state.
-        for key in (KEY_ENV, 'DATABASE_URL', ENABLED_ENV, *CHILD_KEYS):
+        for key in (KEY_ENV, 'DATABASE_URL', ENABLED_ENV, *CHILD_KEYS, *CREDENTIAL_ENV):
             self.env.pop(key, None)
         encoded = json.dumps(lease.state, separators=(',', ':'), allow_nan=False)
         # Reserve room for the fixed receipt envelope and its run identity.
@@ -75,21 +95,112 @@ class SessionTransport:
         self.read_fd, self.write_fd = os.pipe2(os.O_CLOEXEC)
         self.pass_fds = (self.write_fd,)
         self.env.update(
-            COINGLASS_COOKIE_HEADER='',
-            COINGLASS_STORAGE_STATE_JSON=encoded,
             COINGLASS_SESSION_RETURN_FD=str(self.write_fd),
             COINGLASS_SESSION_RUN_ID=lease.run_id,
             COINGLASS_SESSION_REVISION=str(lease.revision),
         )
+        if owner is None:
+            self.env.update(COINGLASS_COOKIE_HEADER='', COINGLASS_STORAGE_STATE_JSON=encoded)
+        else:
+            try:
+                self.control, self.peer = socket.socketpair()
+                self.env['COINGLASS_SESSION_CONTROL_FD'] = str(self.peer.fileno())
+                self.pass_fds += (self.peer.fileno(),)
+                self.control_task = asyncio.create_task(asyncio.to_thread(self._serve))
+            except BaseException:
+                self.env.clear()
+                os.close(self.read_fd)
+                os.close(self.write_fd)
+                session_channel.disconnect(self.control)
+                session_channel.disconnect(self.peer)
+                raise
         self.stop = threading.Event()
         self.reader = asyncio.create_task(asyncio.to_thread(_read_frame, self.read_fd, self.stop))
         self.closed = False
+
+    def _dispatch(self, message):
+        owner, lease = self.owner, self.owner.lease
+        op = message.pop('op', None)
+        revision = message.pop('revision', None)
+        if type(revision) is not int or revision != lease.revision:
+            raise SessionError('state_revision_conflict')
+        if op == 'load' and not message:
+            return {'state': lease.state}
+        if op == 'source_cooldown' and set(message) == {'limited', 'retry_after_seconds'}:
+            if type(message['limited']) is not bool:
+                raise SessionError('session_transport_failed')
+            return owner.store.source_cooldown(lease, **message)
+        if op == 'auth_start' and set(message) in (set(), {'observed_code', 'retry_after_seconds'}):
+            observed = message.get('observed_code')
+            if message and observed not in ('auth_challenge', 'auth_code_required', 'auth_rate_limited', 'auth_invalid_credentials'):
+                raise SessionError('session_transport_failed')
+            result = owner.store.auth_start(lease, **message)
+            self.credentials_sent = False
+            self.active_incident = result['incident_id'] if result['code'] == 'allowed' and not observed else None
+            if observed and result['code'] == 'allowed':
+                raise SessionError('session_transport_failed')
+            return result
+        incident = message.pop('incident_id', None)
+        if op == 'checkpoint' and set(message) == {'state'}:
+            if incident != self.active_incident:
+                raise SessionError('state_revision_conflict')
+            new = owner.store.checkpoint(lease, message['state'], incident_id=incident)
+            owner.lease = new
+            self.active_incident = None
+            return {'revision': new.revision}
+        if not self.active_incident or incident != self.active_incident:
+            raise SessionError('state_revision_conflict')
+        if op == 'credentials' and not message:
+            if self.credentials_sent:
+                raise SessionError('state_revision_conflict')
+            self.credentials_sent = True
+            email, password = (os.environ.get(key, '') for key in CREDENTIAL_ENV)
+            if len(email) > 320 or len(password) > 4096:
+                raise SessionError('auth_configuration_invalid')
+            return {'email': email, 'password': password}
+        if op == 'auth_submit' and not message:
+            if not self.credentials_sent:
+                raise SessionError('state_revision_conflict')
+            owner.store.auth_submit(lease, incident)
+            return {}
+        if op == 'auth_result' and set(message) == {'code', 'retry_after_seconds'}:
+            result = owner.store.auth_result(lease, incident, message['code'],
+                                           retry_after_seconds=message['retry_after_seconds'])
+            self.active_incident = None
+            return result
+        raise SessionError('session_transport_failed')
+
+    def _serve(self):
+        # The child has a deadline for each response and the job manager owns
+        # its overall deadline. Closing this socket wakes an idle reader.
+        try:
+            for _ in range(32):
+                message = session_channel.receive(self.control)
+                result = None
+                try:
+                    result = self._dispatch(message)
+                    session_channel.send(self.control, {'result': result})
+                except SessionError as error:
+                    session_channel.send(self.control, {'error': error.code})
+                finally:
+                    if result is not None:
+                        result.clear()
+                    message.clear()
+        except (EOFError, OSError, ValueError, TypeError, KeyError, SessionError):
+            pass
+        finally:
+            session_channel.disconnect(self.control)
 
     def spawned(self):
         """Call immediately after spawn; only the child retains the write end."""
         if self.write_fd is not None:
             os.close(self.write_fd)
             self.write_fd = None
+        if self.peer is not None:
+            # The child shares the same endpoint. shutdown() here would tear
+            # down its communication before the first request.
+            self.peer.close()
+            self.peer = None
         self.env.clear()
 
     async def receive(self):
@@ -108,6 +219,12 @@ class SessionTransport:
         finally:
             # A retained writer or cancellation cannot strand a blocking read.
             self.stop.set()
+            if self.control_task is not None:
+                try:
+                    self.control.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                await asyncio.shield(self.control_task)
             if not self.reader.done():
                 try:
                     await asyncio.shield(self.reader)
@@ -123,14 +240,22 @@ class ManagedSession:
 
     @classmethod
     def from_environment(cls, connection, run_id):
+        modern = os.environ.get('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true'
         if os.environ.get(ENABLED_ENV, '').lower() != 'true':
+            if modern:
+                raise SessionError('session_configuration_invalid')
             return None
         key = None
         try:
             key = base64.b64decode(os.environ.get(KEY_ENV, ''), validate=True)
             if len(key) != 32:
                 raise ValueError()
-            return cls(PgSessionStore(connection, key), run_id)
+            if modern:
+                from dedicated_auth_state import DedicatedSessionStore
+                store = DedicatedSessionStore(connection, key, os.environ.get(CREDENTIAL_ENV[0], ''))
+            else:
+                store = PgSessionStore(connection, key)
+            return cls(store, run_id)
         except SessionError:
             raise
         except Exception:
@@ -149,7 +274,8 @@ class ManagedSession:
     async def open_transport(self, environment):
         if self.lease is None or self.finished:
             raise SessionError('session_conflict')
-        return SessionTransport(environment, self.lease)
+        owner = self if callable(getattr(self.store, 'auth_start', None)) else None
+        return SessionTransport(environment, self.lease, owner)
 
     async def finish(self, transport):
         if self.finished:
@@ -201,3 +327,4 @@ class ManagedSession:
                 receipt.clear()
             self.lease.state.clear()
             self.lease = None
+

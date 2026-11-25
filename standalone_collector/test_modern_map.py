@@ -101,7 +101,7 @@ class BrowserReplay(unittest.TestCase):
             bundled = Path(pw.chromium.executable_path)
             binary = str(bundled) if bundled.is_file() else shutil.which('chromium')
             if not binary:self.skipTest('Chromium is required for offline browser replay')
-            browser=pw.chromium.launch(executable_path=binary,headless=True,args=['--disable-dev-shm-usage'])
+            browser=pw.chromium.launch(executable_path=binary,headless=True,chromium_sandbox=True,args=['--disable-dev-shm-usage'])
             try:
                 page=browser.new_page(viewport={'width':1440,'height':1280},timezone_id='UTC')
                 url=map_url('BTC')
@@ -147,8 +147,13 @@ class ReaderReplay(unittest.TestCase):
         for price,value,col in levels:
             y=100+(120-price)*10
             draw.rectangle((480,y-4,719,y+4),fill=col)
-        stream=io.BytesIO();chart.save(stream,format='PNG')
-        page.screenshot.return_value=stream.getvalue()
+        page.viewport_size={'width':chart.width,'height':chart.height}
+        def screenshot(*,clip,animations,mask):
+            x,y,w,h=(clip[k] for k in ('x','y','width','height'))
+            with chart.crop((x,y,x+w,y+h)) as part:
+                image=io.BytesIO();part.save(image,format='PNG')
+                return image.getvalue()
+        page.screenshot.side_effect=screenshot
         def measure(page,bounds,upper,lower):
             lo,hi=(120-(v-100)/10 for v in (lower,upper))
             points=[(p,v) for p,v,_ in levels if lo<=p<=hi]

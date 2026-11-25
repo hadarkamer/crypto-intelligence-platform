@@ -88,35 +88,49 @@ def normalized(raw, snapshot, run_id, image):
                 quality='visual_estimate',quantity_status='unavailable',quantity_reason='source_usd_unverified')
 
 
-def capture(symbol,model,timeframe,image_path):
+def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=None):
+    from contextlib import ExitStack
+    from dedicated_map_flow import collect_with_dedicated_session, MapTarget
+    from model1_execution import capture_operation
     from playwright.sync_api import sync_playwright
-    from modern_map_reader import read_map
     from session_capture import CaptureSession
-    session=CaptureSession.from_environment()
+
     if session is None:
+        session = CaptureSession.from_environment()
+    if session is None or not session.dedicated:
         raise StageFailure('session_input_invalid')
-    context=None
-    with sync_playwright() as pw:
-        browser=None
-        try:
-            with phase('browser_context'):
-                browser=pw.chromium.launch(headless=True,args=['--disable-dev-shm-usage'])
-                context=browser.new_context(storage_state=session.state,locale='en-US',timezone_id='UTC',
-                                            color_scheme='dark',device_scale_factor=1,viewport={'width':1440,'height':1280})
-                prepare_context(context)
-                page=context.new_page()
-                session.attach(context,page)
-            return read_map(page,symbol,model,timeframe,image_path)
-        except Exception as error:
-            session.note_source_error(error)
-            raise
-        finally:
+    context = None
+    # The private session IPC removes credentials before this point. The AI
+    # client runs later in this process. Its key must not reach the driver
+    # or Chromium. Each capture already runs in a dedicated worker process.
+    ai_key = os.environ.pop('OPENAI_API_KEY', None)
+    try:
+        with ExitStack() as resources:
             try:
+                with phase('browser_context'):
+                    pw = resources.enter_context(sync_playwright())
+                    browser = pw.chromium.launch(headless=True, chromium_sandbox=True,
+                                                 args=['--disable-dev-shm-usage'])
+                    resources.callback(browser.close)
+                    context = browser.new_context(storage_state=session.state, locale='en-US',
+                        timezone_id='UTC', color_scheme='dark', device_scale_factor=1,
+                        viewport={'width': 1440, 'height': 1280})
+                    resources.callback(context.close)
+                    prepare_context(context)
+                    page = context.new_page()
+                    session.attach(context, page)
+                with capture_operation('capture'):
+                    return collect_with_dedicated_session(session, context, page,
+                        MapTarget(symbol, model, timeframe), image_path, allow_login=allow_login)
+            except Exception as error:
+                session.note_source_error(error)
+                raise
+            finally:
                 with phase('browser_checkpoint'):
                     session.finish(context)
-            finally:
-                if context is not None:context.close()
-                if browser is not None:browser.close()
+    finally:
+        if ai_key is not None:
+            os.environ['OPENAI_API_KEY'] = ai_key
 
 
 def run_modern_task(timeframe,run_id,output):

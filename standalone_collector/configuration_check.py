@@ -15,12 +15,22 @@ from urllib.parse import quote
 MAX_METADATA_BYTES = 32 * 1024
 
 
+def dedicated_account_requested(env):
+    return (env.get('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true' or
+            any(bool(env.get(key)) for key in ('COINGLASS_LOGIN_EMAIL', 'COINGLASS_LOGIN_PASSWORD')))
+
+
 def configuration_status(env: Mapping[str, str]) -> dict:
     present = lambda name: bool(env.get(name, '').strip())
+    modern = env.get('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true'
+    if dedicated_account_requested(env):
+        source = (modern and env.get('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true'
+                  and present('COINGLASS_SESSION_KEY') and present('COINGLASS_LOGIN_EMAIL'))
+    else:
+        source = present('COINGLASS_COOKIE_HEADER') or present('COINGLASS_STORAGE_STATE_JSON')
     return {
         'openai_key_present': present('OPENAI_API_KEY'),
-        'source_session_present': (present('COINGLASS_COOKIE_HEADER') or
-                                   present('COINGLASS_STORAGE_STATE_JSON')),
+        'source_session_present': source,
         'bridge_token_configured': len(env.get('COINGLASS_COLLECTOR_TOKEN', '').strip()) >= 32,
         'storage_configured': present('DATABASE_URL'),
         'collection_enabled': env.get('COLLECTION_BRIDGE_ENABLED', '').lower() == 'true',
@@ -34,6 +44,9 @@ def source_setting_structure(env: Mapping[str, str]) -> dict:
     having some non-empty tracking cookies is not equivalent to supplying it.
     This check neither modifies the header nor requests any website resource.
     """
+    if dedicated_account_requested(env):
+        return {'account_id_configured': bool(env.get('COINGLASS_LOGIN_EMAIL', '').strip()),
+                'form_secret_configured': bool(env.get('COINGLASS_LOGIN_PASSWORD'))}
     raw=env.get('COINGLASS_COOKIE_HEADER','').strip()
     reasonable=len(raw)<=65536
     session_present=False

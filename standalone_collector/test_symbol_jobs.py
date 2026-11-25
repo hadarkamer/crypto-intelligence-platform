@@ -1,5 +1,6 @@
 """Final generated bridge acceptance, with an ephemeral local PostgreSQL when available."""
 from concurrent.futures import ThreadPoolExecutor
+import base64
 import hashlib
 import os
 from pathlib import Path
@@ -18,6 +19,13 @@ from aiohttp.test_utils import TestClient, TestServer
 sys.path.insert(0, str(Path(__file__).resolve().parent/'runtime'))
 import collection_bridge as bridge
 import symbol_jobs
+
+
+MODERN_TEST_ENV = {
+    'COINGLASS_MODERN_UI_ENABLED':'true','COINGLASS_VERIFIED_SYMBOLS':'BTC,TESTCOIN',
+    'COINGLASS_SESSION_STORE_ENABLED':'true','COINGLASS_SESSION_KEY':base64.b64encode(bytes(32)).decode(),
+    'COINGLASS_LOGIN_EMAIL':'ledger-fixture@example.invalid',
+}
 
 
 class IdentityTests(unittest.TestCase):
@@ -141,6 +149,7 @@ class LedgerTests(unittest.TestCase):
             conn.execute("INSERT INTO public.ai_collection_bridge_jobs(id,timeframe,status) VALUES(%s,'12H','failed')",(cls.old_id,))
             conn.execute("CREATE SCHEMA collector_private")
             conn.execute(Path(__file__).with_name("operator_login.sql").read_text())
+            conn.execute(Path(__file__).with_name("dedicated_auth_state.sql").read_text())
         cls.store.initialize()
 
     def test_login_retry_requires_a_verified_incident_resolution(self):
@@ -163,7 +172,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_cycle_isolation_partial_completion_and_retry(self):
         store = self.store
-        with patch.dict(os.environ,{'COINGLASS_MODERN_UI_ENABLED':'true','COINGLASS_VERIFIED_SYMBOLS':'BTC,TESTCOIN'}):
+        with patch.dict(os.environ,MODERN_TEST_ENV):
             rid = str(uuid4())
             def start():
                 return store.start(rid,'24H','BTC',1)
@@ -205,6 +214,32 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(store.evidence(jid,'BTC'),b'PNG')
             self.assertIsNone(store.evidence(jid,'TESTCOIN'))
             self.assertEqual(store.start(rid,'24H','BTC',3)['status'],'ready')
+
+    def test_throttle_defers_new_work_without_spending_attempt_or_blocking_saved_reads(self):
+        from dedicated_auth_state import account_slot
+        rid=str(uuid4())
+        with patch.dict(os.environ, {**MODERN_TEST_ENV,'COINGLASS_LOGIN_EMAIL':'cooldown-fixture@example.invalid'}):
+            store=self.store
+            job=store.start(rid,'12H','BTC',1)
+            jid=job['job_id']
+            slot=account_slot(bytes(32),os.environ['COINGLASS_LOGIN_EMAIL'])
+            with store.connect() as conn:
+                conn.execute("UPDATE public.ai_collection_bridge_jobs SET status='failed',error_code='source_rate_limited' WHERE id=%s",(jid,))
+                conn.execute("""INSERT INTO collector_private.coinglass_dedicated_sessions
+                    (slot,revision,status,map_retry_after) VALUES(%s,1,'unconfirmed',now()+interval '4 hours')""",(slot,))
+            for run,attempt in ((rid,2),(str(uuid4()),1)):
+                with self.assertRaises(bridge.BridgeError) as deferred:
+                    store.start(run,'12H','BTC',attempt)
+                self.assertEqual(deferred.exception.code,'source_rate_limited')
+                self.assertGreater(deferred.exception.retry_after_seconds,3601)
+            poll=store.get(jid,'BTC')
+            self.assertEqual((poll['attempt'],poll['status']),(1,'failed'))
+            self.assertIn('retry_at',poll['error'])
+            self.assertEqual(store.start(rid,'12H','BTC',1)['error']['retry_at'],poll['error']['retry_at'])
+            with store.connect() as conn:
+                conn.execute("UPDATE collector_private.coinglass_dedicated_sessions SET map_retry_after=now()-interval '1 second' WHERE slot=%s",(slot,))
+            resumed=store.start(rid,'12H','BTC',2)
+            self.assertEqual((resumed['job_id'],resumed['attempt']),(jid,2))
 
     def test_migrated_rows_default_to_btc_and_only_explicit_work_retries(self):
         rid = str(uuid4())

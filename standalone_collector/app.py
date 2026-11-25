@@ -12,6 +12,8 @@ from pathlib import Path
 import sys
 from datetime import datetime, timezone
 
+from configuration_check import dedicated_account_requested
+
 HERE=Path(__file__).resolve().parent
 RUNTIME=HERE/'runtime'
 sys.path.insert(0,str(RUNTIME))
@@ -23,12 +25,15 @@ SAFE_REASONS={'loading-indicator','blur','no-canvas','wrong-label','invalid-sour
 
 
 def source_session_configured():
+    from symbol_jobs import modern_enabled
+    if dedicated_account_requested(os.environ):
+        return (modern_enabled() and os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true'
+                and bool(os.getenv('COINGLASS_SESSION_KEY', '').strip())
+                and bool(os.getenv('COINGLASS_LOGIN_EMAIL', '').strip()))
     if os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true':
         # Configuration presence is not a claim that stored authentication is
         # currently accepted. The worker checks the managed row before a scan.
         return bool(os.getenv('COINGLASS_SESSION_KEY', '').strip())
-    if os.getenv('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true':
-        return False
     return any(bool(os.getenv(name,'').strip()) for name in SESSION_KEYS)
 
 
@@ -54,6 +59,11 @@ def probe(*,capture_fn=None,directory=None):
     report={'timeframe_requested':'12H','source_attempts':0,'ai_calls':0,'sheet_writes':0,
             'time_utc':datetime.now(timezone.utc).isoformat(),'mode':'configured_session',
             'source_session_supplied':supplied,'status':'not_configured','code':'SOURCE_SESSION_MISSING'}
+    if dedicated_account_requested(os.environ):
+        # This historical diagnostic calls the classic capture directly. It cannot prove
+        # dedicated-account access. The bounded dedicated pilot uses the actual worker path.
+        report.update(mode='dedicated_account', status='skipped', code='DEDICATED_PILOT_REQUIRED')
+        return _save_report(directory, report)
     if not supplied:return _save_report(directory,report)
     previous_diagnostics=os.environ.get('MODEL1_NETWORK_DIAGNOSTICS')
     os.environ['MODEL1_NETWORK_DIAGNOSTICS']='false'
@@ -125,6 +135,7 @@ async def diagnostic_image(request):
 async def run_worker(store):
     from collection_bridge import run_existing_scanner,BridgeError
     from session_runtime import ManagedSession, SessionError
+    from symbol_jobs import canonical_auth_failure, modern_enabled
     from collection_metrics import logged_phase, queue_wait
     while True:
         held=None
@@ -142,35 +153,91 @@ async def run_worker(store):
                         session=ManagedSession.from_environment(held,jid)
                     except SessionError as exc:
                         raise BridgeError(exc.code,'Session state configuration failed',503) from None
+                    if dedicated_account_requested(os.environ) and (not modern_enabled() or session is None):
+                        raise BridgeError('session_configuration_invalid','Dedicated session store is required',503)
                     if session is None:
                         result,image=await run_existing_scanner(timeframe,jid,model,symbol=symbol)
                     else:
-                        from operator_login import waiting_incident
-                        if await asyncio.to_thread(waiting_incident, held, symbol, model, timeframe):
-                            raise BridgeError('source_login_required', 'Operator sign-in is pending', 409)
+                        if not modern_enabled():
+                            from operator_login import waiting_incident
+                            if await asyncio.to_thread(waiting_incident, held, symbol, model, timeframe):
+                                raise BridgeError('source_login_required', 'Operator sign-in is pending', 409)
                         result,image=await run_existing_scanner(timeframe,jid,model,session=session,symbol=symbol)
-                    with logged_phase(jid, 'collector_db_save_ms'):
-                        await asyncio.to_thread(store.finish,jid,result,image)
                 except asyncio.CancelledError:
                     with logged_phase(jid, 'collector_db_save_ms'):
                         await asyncio.to_thread(store.finish,jid,None,None,'interrupted')
                     raise
                 except BridgeError as exc:
+                    error_code = exc.code
                     try:
-                        if session is not None and exc.code == 'source_login_required':
+                        if modern_enabled() and session is not None:
+                            error_code = await asyncio.to_thread(canonical_auth_failure, held, session.store, jid, exc.code)
+                        elif session is not None and exc.code == 'source_login_required':
                             from operator_login import record_login_required
                             await asyncio.to_thread(record_login_required, held, symbol, model, timeframe, jid)
                     finally:
                         with logged_phase(jid, 'collector_db_save_ms'):
-                            await asyncio.to_thread(store.finish,jid,None,None,exc.code)
+                            await asyncio.to_thread(store.finish,jid,None,None,error_code)
                 except Exception:
                     with logged_phase(jid, 'collector_db_save_ms'):
                         await asyncio.to_thread(store.finish,jid,None,None,'scan_failed')
+                else:
+                    with logged_phase(jid, 'collector_db_save_ms'):
+                        # finish only updates a running job. A lost commit acknowledgement
+                        # can safely repeat the same result without recapturing the map.
+                        try:
+                            await asyncio.to_thread(store.finish, jid, result, image)
+                        except Exception:
+                            await asyncio.to_thread(store.finish, jid, result, image)
         except asyncio.CancelledError:raise
         except Exception:print('MODEL1_WORKER temporary store failure',flush=True)
         finally:
             if held is not None:await asyncio.to_thread(held.close)
         await asyncio.sleep(2)
+
+
+def register_dedicated_status(application, store, active):
+    """Expose account incident metadata to the authenticated application."""
+    from aiohttp import web
+    from uuid import UUID, uuid4
+
+    headers = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+               'X-Content-Type-Options': 'nosniff'}
+    empty = {'status': 'unavailable', 'incident_id': None, 'reason': None, 'can_launch': False}
+
+    def read(incident, job):
+        from dedicated_auth_state import incident_status
+        from session_runtime import ManagedSession
+        with store.connect() as conn:
+            managed = ManagedSession.from_environment(conn, str(uuid4()))
+            return incident_status(conn, managed.store.slot, incident_id=incident, job_id=job)
+
+    async def status(request):
+        token = os.getenv('COINGLASS_COLLECTOR_TOKEN', '')
+        presented = request.headers.get('Authorization', '')
+        if (len(token) < 32 or len(presented) > 1024 or
+                not hmac.compare_digest(presented.encode(), ('Bearer '+token).encode())):
+            raise web.HTTPUnauthorized(headers=headers)
+        if not active or store is None:
+            return web.json_response(empty, headers=headers, status=503)
+        incident = request.query.get('incident_id')
+        job = request.query.get('job_id')
+        try:
+            if (set(request.query) - {'incident_id', 'job_id'} or
+                    incident is not None and job is not None):
+                raise ValueError
+            for selector in (incident, job):
+                if selector is not None and str(UUID(selector)) != selector:
+                    raise ValueError
+        except ValueError:
+            return web.json_response({'error':'invalid_status_selector'}, headers=headers, status=400)
+        try:
+            data = await asyncio.to_thread(read, incident, job)
+        except Exception:
+            return web.json_response(empty, headers=headers, status=503)
+        return web.json_response({**data, 'auth_mode':'dedicated'}, headers=headers)
+
+    application.router.add_get('/api/collection/coinglass/session-status', status)
 
 
 def create_app():
@@ -182,6 +249,7 @@ def create_app():
     configured=bool(os.getenv('DATABASE_URL') and os.getenv('OPENAI_API_KEY')
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
     modern=modern_enabled()
+    dedicated=dedicated_account_requested(os.environ)
     try:
         declared=verified_symbols()
         supported_symbols=sorted(declared if modern else declared & {'BTC'})
@@ -204,14 +272,18 @@ def create_app():
         result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
         result['numeric_reader']=MEASURE_SCHEMA if modern else 'displayed-hover.v1'
         result['store_connectivity']=await asyncio.to_thread(store_readiness,store)
-        report=read_public_probe_report()
+        report=None if dedicated else read_public_probe_report()
         if report is not None:result['source_probe']=report
         return web.json_response(result,headers={'Cache-Control':'no-store'})
     application.router.add_get('/',health);application.router.add_get('/health',health)
-    application.router.add_get('/api/collection/model1/source-probe/evidence',diagnostic_image)
+    if not dedicated:
+        application.router.add_get('/api/collection/model1/source-probe/evidence',diagnostic_image)
     register_collection_routes(application,store=store,enabled=active,start_worker=False)
-    from operator_login import register_operator_login
-    register_operator_login(application, store, active)
+    if dedicated:
+        register_dedicated_status(application, store, active)
+    else:
+        from operator_login import register_operator_login
+        register_operator_login(application, store, active)
     if active:
         async def lifecycle(app):
             await asyncio.to_thread(store.initialize)
@@ -236,7 +308,7 @@ if __name__=='__main__':
     if '--probe' in sys.argv or '--check-config' in sys.argv:deployment_check()
     elif '--source-probe' in sys.argv:probe()
     else:
-        if os.getenv('COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START','').strip().lower()=='true':
+        if not dedicated_account_requested(os.environ) and os.getenv('COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START','').strip().lower()=='true':
             from source_account_diagnostic import main as check_source_account
             check_source_account()
         from aiohttp import web

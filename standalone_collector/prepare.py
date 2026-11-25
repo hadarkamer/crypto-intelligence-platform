@@ -60,7 +60,8 @@ def prepare():
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
                  'capture_readiness.py','capture_failure_observer.py','capture_failure_diagnostics.py',
                  'store_diagnostics.py','heatmap_hover.py',
-                 'session_state.py','session_runtime.py','session_capture.py'):
+                 'session_state.py','session_runtime.py','session_capture.py','session_channel.py',
+                 'dedicated_auth_state.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -152,7 +153,7 @@ def prepare():
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'existing source checks; one page reload after a source-readiness failure, then original validation',
         'source_reload':'one attempt per model/timeframe; no login, request-limit, numeric or AI retry',
-        'managed_session':'optional parent-only encrypted CAS store; existing worker lock; scoped cookie handoff in memory; no keepalive',
+        'managed_session':'modern Coin maps use an account-scoped encrypted checkpoint, the existing worker lock and the official email form when needed',
         'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,

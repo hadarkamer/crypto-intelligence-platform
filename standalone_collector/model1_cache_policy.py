@@ -30,7 +30,9 @@ def error_response(error):
     headers = {'Cache-Control': 'no-store'}
     seconds = getattr(error, 'retry_after_seconds', None)
     retry_at = getattr(error, 'retry_at', None)
-    if error.status == 429 and type(seconds) is int and 0 < seconds <= 3601 and isinstance(retry_at, str):
+    # The original local quota is hourly. A provider's own cooldown can be longer.
+    valid_seconds = type(seconds) is int and seconds > 0 and (seconds <= 3601 or error.code == 'source_rate_limited')
+    if error.status == 429 and valid_seconds and isinstance(retry_at, str):
         payload['error'].update(retry_after_seconds=seconds, retry_at=retry_at)
         headers['Retry-After'] = str(seconds)
     return payload, headers

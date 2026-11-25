@@ -6,10 +6,14 @@ that access was granted or revoked.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 import stat
+import socket
+
+import session_channel
 import struct
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
@@ -31,7 +35,10 @@ def note_protected_map_ready(page):
     """Called by the adapter after positive protected-target verification only."""
     session = _managed_pages.get(page)
     if session is not None:
-        session.verified = True
+        if page is session.page:
+            session.verified = True
+        elif page is session._proof_page:
+            session._proof_url = page.url
 
 
 def snapshot_coinglass(context, page, previous_state=None):
@@ -78,17 +85,22 @@ class CaptureSession:
         self.run_id, self.revision = run_id, revision
         self.page = self.context = None
         self.verified = self.blocked = self.finished = False
+        self.control = None
+        self.dedicated = False
+        self._proof_page = self._proof_url = None
 
     @classmethod
     def from_environment(cls):
         # Also protect direct legacy diagnostic processes from inheriting the
         # parent-only encryption key into a Playwright driver.
-        os.environ.pop('COINGLASS_SESSION_KEY', None)
+        for name in ('COINGLASS_SESSION_KEY', 'COINGLASS_LOGIN_EMAIL', 'COINGLASS_LOGIN_PASSWORD'):
+            os.environ.pop(name, None)
+        control_fd = os.environ.pop('COINGLASS_SESSION_CONTROL_FD', None)
         supplied = {name: os.environ.pop(name, None) for name in METADATA}
         raw_fd = supplied[METADATA[0]]
-        if all(value is None for value in supplied.values()):
+        if control_fd is None and all(value is None for value in supplied.values()):
             return None
-        descriptor = None
+        descriptor = control = None
         raw_state = None
         try:
             run_id = supplied[METADATA[1]]
@@ -105,12 +117,29 @@ class CaptureSession:
             fcntl.fcntl(descriptor, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
             if (not isinstance(run_id, str) or not isinstance(raw_revision, str)
                     or str(UUID(run_id)) != run_id or not raw_revision.isdecimal()
-                    or not 0 < int(raw_revision) < 2**63 or old_header != ''
-                    or not isinstance(raw_state, str) or len(raw_state.encode()) > FRAME_LIMIT):
+                    or not 0 < int(raw_revision) < 2**63):
+                raise ValueError()
+            if control_fd is not None:
+                if (not control_fd.isdecimal() or int(control_fd) <= 2 or int(control_fd) == descriptor
+                        or raw_state is not None or old_header is not None
+                        or not stat.S_ISSOCK(os.fstat(int(control_fd)).st_mode)):
+                    raise ValueError()
+                os.set_inheritable(int(control_fd), False)
+                control = socket.socket(fileno=int(control_fd))
+                if control.family != socket.AF_UNIX or control.type != socket.SOCK_STREAM:
+                    raise ValueError()
+                control.settimeout(12)
+                session = cls({}, descriptor, run_id, int(raw_revision))
+                session.control = control
+                session.dedicated = True
+                session.state = validate_state(session._request('load')['state'], allow_empty=True)
+                return session
+            if old_header != '' or not isinstance(raw_state, str) or len(raw_state.encode()) > FRAME_LIMIT:
                 raise ValueError()
             state = validate_state(json.loads(raw_state), allow_empty=True)
             return cls(state, descriptor, run_id, int(raw_revision))
-        except (OSError, ValueError, TypeError, SessionStateError):
+        except (OSError, ValueError, TypeError, KeyError, SessionStateError, StageFailure):
+            session_channel.disconnect(control)
             if descriptor is not None:
                 try: os.close(descriptor)
                 except OSError: pass
@@ -119,6 +148,95 @@ class CaptureSession:
             raw_state = None
             for name in (*METADATA, 'COINGLASS_STORAGE_STATE_JSON', 'COINGLASS_COOKIE_HEADER'):
                 os.environ.pop(name, None)
+
+    def _request(self, operation, **fields):
+        if not self.dedicated or self.control is None or self.finished:
+            raise StageFailure('session_transport_failed')
+        try:
+            session_channel.send(self.control, dict(op=operation, revision=self.revision, **fields))
+            response = session_channel.receive(self.control)
+            if set(response) == {'error'} and isinstance(response['error'], str):
+                raise StageFailure(response['error'])
+            if set(response) != {'result'} or not isinstance(response['result'], dict):
+                raise ValueError()
+            return response['result']
+        except (OSError, EOFError, ValueError, TypeError, SessionStateError):
+            raise StageFailure('session_transport_failed') from None
+
+    def source_cooldown(self, *, limited=False, retry_after_seconds=None):
+        return self._request('source_cooldown', limited=limited, retry_after_seconds=retry_after_seconds)
+
+    def auth_start(self, *, observed_code=None, retry_after_seconds=None):
+        if observed_code is None and retry_after_seconds is None:
+            return self._request('auth_start')
+        return self._request('auth_start', observed_code=observed_code,
+                             retry_after_seconds=retry_after_seconds)
+
+    def credentials(self, incident_id):
+        envelope = self._request('credentials', incident_id=incident_id)
+        return envelope.pop('email'), envelope.pop('password')
+
+    def auth_submit(self, incident_id):
+        self._request('auth_submit', incident_id=incident_id)
+        return True
+
+    def auth_result(self, incident_id, code, retry_after_seconds=None):
+        return self._request('auth_result', incident_id=incident_id, code=code,
+                             retry_after_seconds=retry_after_seconds)
+
+    def _snapshot(self, context, page):
+        try:
+            return snapshot_coinglass(context, page, self.state)
+        except Exception:
+            raise StageFailure('session_snapshot_failed') from None
+
+    def state_changed(self, context):
+        """Compare first-party cookie values and attributes without persisting them."""
+        if not self.dedicated or self.finished or self.blocked or context is not self.context:
+            raise StageFailure('session_observation_failed')
+        snapshot = self._snapshot(context, self.page)
+
+        def indexed(state):
+            return {(c['domain'], c['path'], c['name'], c.get('partitionKey')): c
+                    for c in state['cookies']}
+
+        return indexed(self.state) != indexed(snapshot)
+
+    @contextmanager
+    def observe_proof(self, page):
+        """Bind one temporary proof page in this worker's existing browser context."""
+        if (not self.dedicated or self.finished or self.blocked or self.context is None
+                or page.context is not self.context or page in _managed_pages
+                or self._proof_page is not None):
+            raise StageFailure('session_observation_failed')
+        _managed_pages[page] = self
+        self._proof_page, self._proof_url = page, None
+        try:
+            yield
+        finally:
+            _managed_pages.pop(page, None)
+            self._proof_page = self._proof_url = None
+
+    def checkpoint(self, context, incident_id=None, *, proof_page=None):
+        if self.finished or self.blocked or context is not self.context:
+            raise StageFailure('session_observation_failed')
+        if proof_page is None:
+            if not self.verified:
+                raise StageFailure('session_observation_failed')
+            page = self.page
+        else:
+            if proof_page is not self._proof_page or incident_id is not None or not self._proof_url:
+                raise StageFailure('session_observation_failed')
+            if proof_page.url != self._proof_url:
+                self._proof_url = None
+                raise StageFailure('session_observation_failed')
+            page = proof_page
+        state = self._snapshot(context, page)
+        result = self._request('checkpoint', state=state, incident_id=incident_id)
+        if type(result.get('revision')) is not int or result['revision'] <= self.revision:
+            raise StageFailure('session_transport_failed')
+        self.state = state
+        self.revision = result['revision']
 
     def attach(self, context, page):
         if self.finished or self.page is not None:
@@ -140,7 +258,10 @@ class CaptureSession:
         try:
             if self.page is not None:
                 _managed_pages.pop(self.page, None)
-            if self.verified and not self.blocked:
+            if self._proof_page is not None:
+                _managed_pages.pop(self._proof_page, None)
+                self._proof_page = self._proof_url = None
+            if not self.dedicated and self.verified and not self.blocked:
                 try:
                     state = snapshot_coinglass(context, self.page, self.state)
                     outcome = 'ready'
@@ -168,6 +289,8 @@ class CaptureSession:
             try: os.close(self.descriptor)
             except OSError: failure = failure or 'session_transport_failed'
             self.descriptor = None
+            session_channel.disconnect(self.control)
+            self.control = None
         if failure:
             # The work result and its independent session writeback are reported
             # separately. An unconfirmed snapshot never overwrites saved state.
@@ -175,3 +298,4 @@ class CaptureSession:
                 print('COINGLASS_SESSION session_snapshot_failed', flush=True)
             else:
                 raise StageFailure(failure) from None
+
