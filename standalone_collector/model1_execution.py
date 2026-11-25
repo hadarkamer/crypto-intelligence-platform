@@ -13,6 +13,12 @@ import re
 import time
 
 CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable','source_login_required',
+    'source_map_unavailable','source_navigation_changed','source_rate_limited',
+    'auth_configuration_invalid','auth_challenge','auth_code_required','auth_rate_limited','auth_invalid_credentials',
+    'auth_form_unavailable','auth_unconfirmed','auth_gate_after_verification','auth_retry_exhausted','auth_retry_pending',
+    'auth_in_progress','auth_attempt_not_reserved','auth_protected_proof_required','auth_result_invalid',
+    'session_conflict','state_revision_conflict','state_store_failed',
+    'session_input_invalid','session_transport_failed','session_snapshot_failed','session_observation_failed',
     'screenshot_identity_mismatch','image_evidence_invalid','analysis_timeout',
     'analysis_incomplete','analysis_response_invalid','analysis_unauthorized',
     'analysis_rate_limited','analysis_quota_exceeded','analysis_http_error',

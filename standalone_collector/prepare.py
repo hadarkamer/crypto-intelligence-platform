@@ -15,7 +15,7 @@ PINNED={
     'market_vision/coinglass_heatmap_capture.py':'d1d75f2c99ea3c1fd72c7e1f9cfb1ec29a0890ab',
     'market_vision/openai_heatmap_scanner.py':'9dd18b993d6d87cf326848720fa08d1d6a554087',
 }
-BROWSER_REQUIREMENTS={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0'}
+BROWSER_REQUIREMENTS={'playwright':'1.55.0','requests':'2.32.5','Pillow':'12.3.0','pycryptodome':'3.21.0'}
 
 
 def prepare_browser():
@@ -29,7 +29,7 @@ def prepare_browser():
     subprocess.run([sys.executable,'-m','playwright','install','chromium'],check=True,timeout=240)
     for package,expected in BROWSER_REQUIREMENTS.items():
         if version(package)!=expected:raise RuntimeError('Standalone dependency mismatch')
-    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0',flush=True)
+    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0 pycryptodome=3.21.0',flush=True)
 
 
 def validator_ast(text):
@@ -59,7 +59,9 @@ def prepare():
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
                  'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
                  'capture_readiness.py','capture_failure_observer.py','capture_failure_diagnostics.py',
-                 'store_diagnostics.py','heatmap_hover.py'):
+                 'store_diagnostics.py','heatmap_hover.py',
+                 'session_state.py','session_runtime.py','session_capture.py','session_channel.py',
+                 'dedicated_auth_state.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -119,17 +121,31 @@ def prepare():
         'test_candle_failure_diagnostics','test_render_observations','test_readiness_capture_contract',
         'test_failure_diagnostic_integration','test_source_reload','-v'],
         cwd=HERE,check=True,timeout=240)
+    from install_capture_readiness import install_session_capture
+    from install_heatmap_models import install_session_bridge
+    install_session_capture(RUNTIME)
+    install_session_bridge(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_session_capture','test_session_state',
+        'test_session_runtime','-v'],cwd=HERE,check=True,timeout=90)
+    from install_modern_map import install as install_modern_map
+    install_modern_map(RUNTIME)
+    from install_symbol_jobs import install as install_symbol_jobs
+    install_symbol_jobs(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_symbol_jobs','test_modern_map','-v'],
+        cwd=HERE,check=True,timeout=120)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
-        'capture_flow':'one requested model/horizon; existing session, PNG, one DOM hover column and same-image crop',
-        'numeric_reader':'displayed-hover.v1',
+        'capture_flows':{'modern':'Coin map, requested asset/model/horizon, verified right-edge measurements and cropped map PNG',
+            'legacy':'Model-specific BTC map, DOM hover column and same-image crop'},
+        'numeric_readers':{'modern':'coinglass.right-edge-measure.v1','legacy':'displayed-hover.v1'},
+        'reader_switch':'COINGLASS_MODERN_UI_ENABLED','symbol_configuration':'COINGLASS_VERIFIED_SYMBOLS (default BTC)',
         'quantity_scope':'displayed latest column; explicit units only; rounded source values',
         'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
         'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
         'identity':'strict model-specific source, schema, screenshot label and job',
-        'price_reference':'verified tooltip Close for Models 1/2; source-row candle envelope for Model 3; no fake midpoint',
+        'price_reference':{'modern':'observed Reference (last price) label','legacy':'verified tooltip Close for Models 1/2 or Model 3 candle envelope'},
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
-        'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
+        'cache_scope':['symbol','heatmap_model','timeframe'],'single_worker':True,
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
         'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
         'capture_diagnostics':'bounded per-operation duration and failure phase',
@@ -137,6 +153,7 @@ def prepare():
         'timeout_progress':'private stage/operation snapshot before existing outer deadline',
         'render_gate':'existing source checks; one page reload after a source-readiness failure, then original validation',
         'source_reload':'one attempt per model/timeframe; no login, request-limit, numeric or AI retry',
+        'managed_session':'modern Coin maps use an account-scoped encrypted checkpoint, the existing worker lock and the official email form when needed',
         'model3_rendering':'Pixi 8.21.0 init-hook discovery; chart-local paint; no source JS rewriting; original fallback; clean original PNG; original numerical reader',
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,

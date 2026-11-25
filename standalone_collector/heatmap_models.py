@@ -40,7 +40,11 @@ def schema_version(model):
 def child_environment(model):
     # Model is supplied by the trusted queue row, not page text. Each subprocess
     # receives its own mapping; no concurrent job changes the parent environment.
-    return {**os.environ,'COLLECTION_HEATMAP_MODEL':str(model_number(model))}
+    environment = dict(os.environ)
+    for key in ('COINGLASS_LOGIN_EMAIL', 'COINGLASS_LOGIN_PASSWORD'):
+        environment.pop(key, None)
+    environment['COLLECTION_HEATMAP_MODEL'] = str(model_number(model))
+    return environment
 
 
 raw_model=os.getenv('COLLECTION_HEATMAP_MODEL','1')
