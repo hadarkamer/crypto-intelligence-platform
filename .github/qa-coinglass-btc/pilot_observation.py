@@ -63,7 +63,8 @@ def install():
     except (KeyError,TypeError,ValueError):return
     data={'job_id':ident,'attached':False,'submit_reserved':False,'form_reported_submitted':False,
           'first_navigation':None,'initial_controls':None,'before_submit_controls':None,
-          'final_controls':None,'page_closed':False,'form_result':None,'stage_failure':None}
+          'final_controls':None,'page_closed':False,'form_result':None,'stage_failure':None,
+          'navigations':[],'login_responses':[]}
     private_write(data)
     attach, finish = CaptureSession.attach, CaptureSession.finish
     note, submit = CaptureSession.note_source_error, flow.submit_official_login
@@ -77,7 +78,11 @@ def install():
             except Exception:shot[key]=None
         for key,label in (('verification_prompt','Verify you are human'),
                           ('security_check','Performing security verification'),
-                          ('request_blocked','Sorry, you have been blocked')):
+                          ('request_blocked','Sorry, you have been blocked'),
+                          ('invalid_credentials','incorrect email or password'),
+                          ('invalid_password','invalid password'),
+                          ('verify_email','verify your email'),
+                          ('restricted_account','account has been restricted')):
             try: shot[key]=page.get_by_text(label,exact=False).first.is_visible()
             except Exception: shot[key]=None
         try: shot['interstitial_title']=page.title().strip().lower() in ('just a moment...', 'attention required! | cloudflare')
@@ -91,10 +96,17 @@ def install():
         def on_response(response):
             try:
                 req=response.request
-                if (data['first_navigation'] is None and req.is_navigation_request()
-                        and req.frame==page.main_frame and 100<=response.status<=599):
-                    data['first_navigation']={'path':path_kind(response.url),'http_status':int(response.status)}
+                if req.is_navigation_request() and req.frame==page.main_frame and len(data['navigations'])<8:
+                    nav={'path':path_kind(response.url),'http_status':int(response.status)}
+                    data['navigations'].append(nav)
+                    if data['first_navigation'] is None:
+                        data['first_navigation']=nav
                     private_write(data)
+                elif data['submit_reserved'] and req.method=='POST' and len(data['login_responses'])<4:
+                    url=urlsplit(response.url); host=(url.hostname or '').lower()
+                    if url.scheme=='https' and (host=='coinglass.com' or host.endswith('.coinglass.com')) and any(
+                            word in url.path.lower() for word in ('login','signin','sign-in','auth')):
+                        data['login_responses'].append(int(response.status));private_write(data)
             except Exception:pass
         def on_ready(*_):
             if data['initial_controls'] is None:observe('initial_controls',page)
