@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -86,6 +87,44 @@ class Routes(unittest.IsolatedAsyncioTestCase):
                                    'COINGLASS_COOKIE_HEADER':'offline-placeholder'}):
             self.assertFalse(service.source_session_configured())
 
+    async def test_session_status_survives_retirement_of_viewer_in_both_modes(self):
+        import app as service
+        from unittest.mock import MagicMock
+        from aiohttp.test_utils import make_mocked_request
+
+        path = '/api/collection/coinglass/session-status'
+        token = 'offline-bridge-authentication-fixture'
+        for modern in ('false', 'true'):
+            env = {'COINGLASS_MODERN_UI_ENABLED': modern, 'COINGLASS_OPERATOR_DESKTOP_ENABLED': 'true',
+                   'COINGLASS_COLLECTOR_TOKEN': token, 'COINGLASS_SESSION_STORE_ENABLED': 'true'}
+            with self.subTest(modern=modern), patch.dict(os.environ, env, clear=True):
+                application = service.create_app()
+                routes = {r.resource.canonical for r in application.router.routes()}
+                self.assertIn(path, routes)
+                self.assertNotIn('/api/collection/coinglass/session-window', routes)
+                self.assertFalse(any(r.startswith('/coinglass/operator') for r in routes))
+                async with TestClient(TestServer(application)) as client:
+                    for method, retired in (('post','/api/collection/coinglass/session-window'),
+                                            ('get','/coinglass/operator/display')):
+                        self.assertEqual((await client.request(method, retired)).status, 404)
+        from operator_login import register_legacy_status
+        with patch.dict(os.environ, {'COINGLASS_COLLECTOR_TOKEN':token,
+                                     'COINGLASS_SESSION_STORE_ENABLED':'true'}, clear=True):
+            application = web.Application()
+            register_legacy_status(application, MagicMock(), True)
+            route = next(r.handler for r in application.router.routes() if r.method == 'GET')
+            with self.assertRaises(web.HTTPUnauthorized):
+                await route(make_mocked_request('GET', path))
+            headers = {'Authorization': 'Bearer '+token}
+            denied = await route(make_mocked_request('GET', path+'?job_id=bad', headers=headers))
+            self.assertEqual(denied.status, 400)
+            job, incident = str(uuid4()), str(uuid4())
+            with patch('operator_login.incident_status', return_value={'status':'waiting','incident_id':incident}) as read:
+                response = await route(make_mocked_request('GET', path+'?job_id='+job, headers=headers))
+            self.assertEqual(read.call_args.args[1:], (None, job))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.body), {'status':'waiting', 'incident_id':incident, 'can_launch':False})
+
     async def test_normal_handlers_propagate_verified_job_dimensions(self):
         from unittest.mock import Mock
         store = Mock()
@@ -153,15 +192,19 @@ class LedgerTests(unittest.TestCase):
         cls.store.initialize()
 
     def test_login_retry_requires_a_verified_incident_resolution(self):
-        rid, incident = str(uuid4()), str(uuid4())
+        from operator_login import incident_status, record_login_required, waiting_incident
+        rid = str(uuid4())
         store = self.store
         with patch.dict(os.environ,{'COINGLASS_SESSION_STORE_ENABLED':'true'}):
             job = store.start(rid,'12H','BTC',1)
             jid = job['job_id']
             with store.connect() as conn:
                 conn.execute("UPDATE public.ai_collection_bridge_jobs SET status='failed',error_code='source_login_required' WHERE id=%s",(jid,))
-                conn.execute("INSERT INTO collector_private.coinglass_login_incidents(id) VALUES(%s)",(incident,))
-                conn.execute("INSERT INTO collector_private.coinglass_login_jobs VALUES (%s,%s,'BTC',1,'12H')",(jid,incident))
+                incident = record_login_required(conn, 'BTC', 1, '12H', jid)
+                self.assertEqual(record_login_required(conn, 'BTC', 1, '12H', jid), incident)
+                self.assertEqual(waiting_incident(conn, 'BTC', 1, '12H'), incident)
+                self.assertIsNone(waiting_incident(conn, 'BTC', 1, '48H'))
+                self.assertEqual(incident_status(conn, job_id=jid), {'status':'waiting', 'incident_id':incident})
             with self.assertRaises(bridge.BridgeError) as err:
                 store.start(rid,'12H','BTC',2)
             self.assertEqual(err.exception.code,'login_pending')

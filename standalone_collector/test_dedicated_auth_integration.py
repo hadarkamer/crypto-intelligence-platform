@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from dedicated_login_form import LOGIN_URL
+from dedicated_login_form import HOME_URL
 from test_dedicated_login_form import Clock, Locator, Page
 
 
@@ -37,11 +37,11 @@ class OfficialFixture(Page):
         self.after_submit = self.accept
 
     def goto(self, url, **kwargs):
-        if url == LOGIN_URL:
+        if url == HOME_URL:
             assert not self.authenticated
             self.form_opens += 1
-        else:
-            assert url == TARGET_URL and self.authenticated
+            return super().goto(url, **kwargs)
+        assert url == TARGET_URL and self.authenticated
         self.url = url
         return Mock(status=200)
 

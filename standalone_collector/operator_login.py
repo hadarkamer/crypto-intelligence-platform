@@ -1,10 +1,4 @@
-"""Private metadata for a verified CoinGlass login gate, independent of job leases.
-
-No network operation can mark a session ready or upload authentication material.
-The existing worker records an observed gate. Only a trusted local operator-channel
-implementation can complete it, with the verified protected page and encrypted
-session update committed together. The desktop transport is registered at the same service entry point.
-"""
+"""Private incident tracking and read-only status for classic collector jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -77,73 +71,13 @@ def incident_status(conn, incident_id=None, job_id=None):
     return data
 
 
-def begin_window(conn, incident_id):
-    """A short committed lease. Caller owns only its private interactive context.
-
-    No DB connection or work lock is retained against other jobs while the human
-    is present. The guard is shared by all service instances.
-    """
-    window_id = str(uuid4())
-    with conn.transaction():
-        row = conn.execute("""
-            UPDATE collector_private.coinglass_login_incidents
-            SET window_id=%s,window_expires_at=clock_timestamp()+interval '10 minutes'
-            WHERE id=%s AND resolved_at IS NULL
-              AND (window_id IS NULL OR window_expires_at<=clock_timestamp())
-            RETURNING window_expires_at
-            """, (window_id, incident_id)).fetchone()
-        if row is None:
-            raise LoginIncidentError('login_window_unavailable')
-    return window_id, row['window_expires_at']
-
-
-def close_window(conn, incident_id, window_id):
-    """Releases only this caller's lease: a late close cannot affect its successor."""
-    with conn.transaction():
-        conn.execute("""
-            UPDATE collector_private.coinglass_login_incidents
-            SET window_id=NULL,window_expires_at=NULL
-            WHERE id=%s AND window_id=%s AND resolved_at IS NULL
-            """, (incident_id, window_id))
-
-
-def finish_verified_window(session_store, incident_id, window_id, target, state, expected_revision, human_wait_ms=None):
-    """Private continuation invoked only after the reader opens the requested protected map.
-
-    The channel supplies the verified (symbol, model, timeframe) returned by the
-    collector's source reader. No browser-facing route accepts this proof or state.
-    session_store.renew requires the scanner's short exclusive work lock.
-    """
-    conn = session_store.connection
-    symbol, model, timeframe = target
-    with conn.transaction():
-        owner = conn.execute("""
-            SELECT id FROM collector_private.coinglass_login_incidents
-            WHERE id=%s AND window_id=%s AND window_expires_at>clock_timestamp()
-                AND resolved_at IS NULL FOR UPDATE
-            """, (incident_id, window_id)).fetchone()
-        if not owner or waiting_incident(conn, symbol, model, timeframe) != str(incident_id):
-            raise LoginIncidentError('login_window_stale')
-        revision = session_store.renew(state, expected_revision)
-        conn.execute("""
-            UPDATE collector_private.coinglass_login_incidents
-            SET resolved_at=clock_timestamp(),resolved_revision=%s,human_wait_ms=%s,window_id=NULL,window_expires_at=NULL
-            WHERE id=%s
-            """, (revision, human_wait_ms, incident_id))
-    return revision
-
-
-def register_operator_login(application, store, active):
+def register_legacy_status(application, store, active):
     from aiohttp import web
-    from operator_window import json_body, register_window, uuid_value
 
-    base = '/api/collection/coinglass'
     headers = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
                'X-Content-Type-Options': 'nosniff'}
     bridge_secret = os.getenv('COINGLASS_COLLECTOR_TOKEN', '')
     managed = os.getenv('COINGLASS_SESSION_STORE_ENABLED', '').lower() == 'true'
-
-    manager = register_window(application, store, bool(managed and active and store))
 
     def authorize(request):
         presented = request.headers.get('Authorization', '')
@@ -164,20 +98,18 @@ def register_operator_login(application, store, active):
             return respond({'status': 'unavailable', 'incident_id': None, 'can_launch': False})
         incident_id = request.query.get('incident_id')
         job_id = request.query.get('job_id')
-        if ((incident_id is not None and (job_id is not None or not uuid_value(incident_id)))
-                or (job_id is not None and not uuid_value(job_id))):
+        if incident_id is not None and job_id is not None:
             return respond({'error': 'invalid_status_selector'}, 400)
+        selector = incident_id if incident_id is not None else job_id
+        if selector is not None:
+            try:
+                UUID(selector)
+            except ValueError:
+                return respond({'error': 'invalid_status_selector'}, 400)
         try:
             data = await asyncio.to_thread(read_status, incident_id, job_id)
         except Exception:
             return respond({'status': 'unavailable', 'incident_id': None, 'can_launch': False}, 503)
-        return respond({**data, 'can_launch': manager.ready and data['status']=='waiting'})
+        return respond({**data, 'can_launch': False})
 
-    async def launch(request):
-        authorize(request)
-        body = await json_body(request)
-        return await manager.open(uuid_value(body.get('incident_id')),uuid_value(body.get('operator_id')),
-                                  body.get('viewer_challenge'))
-
-    application.router.add_get(base+'/session-status', status)
-    application.router.add_post(base+'/session-window', launch)
+    application.router.add_get('/api/collection/coinglass/session-status', status)

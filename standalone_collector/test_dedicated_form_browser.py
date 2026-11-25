@@ -1,5 +1,4 @@
 """Offline official-form contract in sandboxed Chromium. All page traffic is fulfilled locally."""
-import json
 import os
 from pathlib import Path
 import secrets
@@ -9,22 +8,29 @@ from unittest.mock import Mock
 
 from playwright.sync_api import sync_playwright
 
-from dedicated_login_form import LOGIN_MAP_URL, LOGIN_URL, LoginFormResult, submit_official_login
+from dedicated_login_form import inspect_official_login, submit_official_login
 
 
 HOME_URL = 'https://www.coinglass.com/'
+ENTRY_URL = HOME_URL + 'en/account/access?source=header'
+FINAL_URL = HOME_URL + 'account/sign-in?locale=en'
 SUBMIT_URL = HOME_URL + '__offline_fixture__/login'
+FOREIGN_URL = 'https://unused.invalid/login'
+HEADER = '<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,">'
+NAV = f'<header><nav><a href="{ENTRY_URL}">Login</a></nav></header>'
+
 SYSTEM_CHROME = Path('/opt/google/chrome/chrome')
 FORM = '''<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>Offline fixture</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'">
 <nav><button type="button">Login</button></nav>
-<form method="post" action="/__offline_fixture__/login">
+<aside><form><input type="email" placeholder="Newsletter"><button>Subscribe</button></form></aside>
+<form id="account" method="post" action="/__offline_fixture__/login">
   <input type="email" name="email" placeholder="Email" required>
   <input type="password" name="password" placeholder="Password" required>
   <button type="submit" disabled>Login</button>
 </form>
 <script>
-const form = document.querySelector('form');
+const form = document.getElementById('account');
 const button = form.querySelector('button');
 const inputs = Array.from(form.querySelectorAll('input'));
 const stats = window.fixtureEvents = { input: 0, change: 0, submit: 0 };
@@ -82,105 +88,152 @@ def browser_path():
 
 
 class DedicatedFormBrowser(unittest.TestCase):
-    def test_official_form_in_sandboxed_chromium(self):
+    @classmethod
+    def setUpClass(cls):
         if os.environ.get('PWDEBUG') or os.environ.get('DEBUG'):
-            self.skipTest('Offline credential fixture requires diagnostic tracing to be disabled')
+            raise unittest.SkipTest('Offline credential fixture requires diagnostic tracing to be disabled')
         executable = browser_path()
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(executable_path=executable, headless=True,
-                                                 chromium_sandbox=True)
-            try:
-                context = browser.new_context(offline=True, service_workers='block', locale='en-US')
-                try:
-                    self.exercise(context)
-                finally:
-                    context.close()
-            finally:
-                browser.close()
+        playwright = sync_playwright().start()
+        cls.addClassCleanup(playwright.stop)
+        cls.browser = playwright.chromium.launch(executable_path=executable, headless=True, chromium_sandbox=True)
+        cls.addClassCleanup(cls.browser.close)
 
-    def exercise(self, context):
-        email = secrets.token_hex(12) + '@example.invalid'
-        password = secrets.token_urlsafe(25)
-        credentials = Mock(return_value=(email, password))
-        stats = {'loads': 0, 'post': 0, 'valid': 0, 'other': 0}
+    def setUp(self):
+        self.context = self.browser.new_context(offline=True, service_workers='block', locale='en-US')
+        self.addCleanup(self.context.close)
+        self.page = self.context.new_page()
+        self.email = secrets.token_hex(12) + '@example.invalid'
+        self.password = secrets.token_urlsafe(25)
+        self.credentials = Mock(return_value=(self.email, self.password))
+        self.fence = Mock(return_value=True)
+        self.requests = []
 
+    def serve(self, home=HEADER + NAV, form=FORM, *, entry_status=200, redirect=False):
         def local_only(route):
             request = route.request
-            if request.url == LOGIN_URL and request.method == 'GET':
-                stats['loads'] += 1
-                html = FORM
-                if stats['loads'] == 1:
-                    html = html.replace('</form>', '<button type="submit">Login</button></form>')
-                elif stats['loads'] == 2:
-                    html = html.replace('type="submit" disabled',
-                                        'type="submit" formaction="https://unused.invalid/login" disabled')
-                route.fulfill(status=200, content_type='text/html; charset=utf-8', body=html)
-                return
-            if request.url == SUBMIT_URL and request.method == 'POST' and stats['post'] == 0:
-                stats['post'] += 1
-                matches = parse_qs(request.post_data or '') == {'email': [email], 'password': [password]}
-                stats['valid'] += int(matches)
-                route.fulfill(status=204 if matches else 400, body='')
-                return
-            # Never continue or forward an unexpected URL (including the foreign fixture).
-            stats['other'] += 1
-            route.abort('blockedbyclient')
-
-        context.route('**/*', local_only)
-        page = context.new_page()
-        def reserve():
-            return page.evaluate('window.fixtureEvents.input === 2 && window.fixtureEvents.change === 2 && window.fixtureEvents.submit === 0')
-        fence = Mock(side_effect=reserve)
-        ambiguous = submit_official_login(page, timeout_ms=1200, credentials=credentials, before_submit=fence)
-        self.assertEqual(ambiguous, LoginFormResult('login_form_unavailable'))
-        credentials.assert_not_called()
-        fence.assert_not_called()
-        refused = submit_official_login(page, credentials=credentials, before_submit=fence)
-        self.assertEqual(refused, LoginFormResult('login_form_untrusted'))
-        credentials.assert_not_called()
-        fence.assert_not_called()
-        accepted = submit_official_login(page, credentials=credentials, before_submit=fence)
-        self.assertEqual(accepted, LoginFormResult('login_submitted', True))
-        self.assertEqual(page.url, HOME_URL)
-        self.assertEqual(page.title(), 'Offline fixture home')
-        self.assertEqual(page.evaluate('window.fixtureEvents'), {'input': 2, 'change': 2, 'submit': 1})
-        credentials.assert_called_once_with()
-        fence.assert_called_once_with()
-        self.assertEqual(stats, {'loads': 3, 'post': 1, 'valid': 1, 'other': 0})
-
-        context.unroute('**/*', local_only)
-        requests = []
-        def missing_document(route):
-            request = route.request
-            requests.append((request.method, request.url))
-            if request.url == LOGIN_URL and request.method == 'GET':
-                route.fulfill(status=404, content_type='text/html', body='<p>Not found</p>')
-            elif request.url == LOGIN_MAP_URL and request.method == 'GET':
-                # Mount the same form in the current document, as the client router does.
-                body = FORM.split('<form', 1)[1].split('<script>', 1)
-                markup = json.dumps('<form' + body[0])
-                script = body[1].split('</script>', 1)[0]
-                html = ('<!doctype html><link rel="icon" href="data:,"><a href="/login"><button>Login</button></a>'
-                        "<script>document.querySelector('a').addEventListener('click', event => {"
-                        "event.preventDefault(); history.pushState(null, '', '/login');"
-                        f"document.body.innerHTML = {markup}; {script} }});</script>")
-                route.fulfill(status=200, content_type='text/html', body=html)
-            elif request.url == SUBMIT_URL and request.method == 'POST':
-                valid = parse_qs(request.post_data or '') == {'email': [email], 'password': [password]}
+            self.requests.append((request.method, request.url))
+            if request.method == 'GET':
+                if request.url == HOME_URL:
+                    route.fulfill(status=200, content_type='text/html', body=home)
+                    return
+                if request.url == ENTRY_URL and redirect:
+                    # A fresh official document sends the browser to its localized form.
+                    route.fulfill(status=200, content_type='text/html',
+                                  body=HEADER + f'<script>location.replace("{FINAL_URL}")</script>')
+                    return
+                if request.url in (ENTRY_URL, FINAL_URL, FOREIGN_URL):
+                    route.fulfill(status=entry_status, content_type='text/html', body=form)
+                    return
+            if request.method == 'POST' and request.url == SUBMIT_URL:
+                valid = parse_qs(request.post_data or '') == {'email': [self.email], 'password': [self.password]}
                 route.fulfill(status=204 if valid else 400, body='')
-            else:
-                route.abort('blockedbyclient')
+                return
+            route.abort('blockedbyclient')
+        self.context.route('**/*', local_only)
 
-        credentials.reset_mock()
-        fence.reset_mock()
-        context.route('**/*', missing_document)
-        recovered = submit_official_login(page, credentials=credentials, before_submit=fence)
-        self.assertEqual(recovered, LoginFormResult('login_submitted', True))
-        self.assertEqual(page.url, HOME_URL)
-        self.assertEqual(requests, [('GET', LOGIN_URL), ('GET', LOGIN_MAP_URL), ('POST', SUBMIT_URL)])
-        self.assertEqual(page.evaluate('window.fixtureEvents'), {'input': 2, 'change': 2, 'submit': 1})
-        credentials.assert_called_once_with()
-        fence.assert_called_once_with()
+    def submit(self, timeout=3500):
+        return submit_official_login(self.page, timeout_ms=timeout, credentials=self.credentials, before_submit=self.fence)
+
+    def test_passive_home_navigation_and_official_document(self):
+        self.serve(home=HEADER + NAV + f'<footer><a href="{ENTRY_URL}">Login</a></footer>')
+        result = inspect_official_login(self.page, timeout_ms=3500)
+        self.assertEqual(result.code, 'login_form_ready')
+        self.assertEqual(self.requests, [('GET', HOME_URL), ('GET', ENTRY_URL)])
+        self.assertEqual(self.page.evaluate('window.fixtureEvents'), {'input': 0, 'change': 0, 'submit': 0})
+        self.assertTrue(self.page.locator('input').evaluate_all("fields => fields.every(f => f.value === '')"))
+
+    def test_official_form_in_sandboxed_chromium(self):
+        self.serve(redirect=True)
+        result = self.submit()
+        self.assertEqual(result.code, 'login_submitted')
+        self.assertTrue(result.submitted)
+        self.assertEqual(self.page.url, HOME_URL)
+        self.assertEqual(self.page.title(), 'Offline fixture home')
+        self.assertEqual(self.page.evaluate('window.fixtureEvents'), {'input': 2, 'change': 2, 'submit': 1})
+        self.assertEqual(self.page.locator('aside input').input_value(), '')
+        self.credentials.assert_called_once_with()
+        self.fence.assert_called_once_with()
+        self.assertEqual(self.requests, [('GET', HOME_URL), ('GET', ENTRY_URL), ('GET', FINAL_URL), ('POST', SUBMIT_URL)])
+
+    def test_same_document_login_control_opens_the_form(self):
+        # The application renders the form in place. The HTML URL never changes.
+        home = FORM.replace('<nav><button type="button">Login</button></nav>',
+                            '<header><nav><button type="button" onclick="document.getElementById(\'account\').hidden=false">'
+                            'Login</button></nav></header>').replace('<form id="account"', '<form hidden id="account"')
+        self.serve(home)
+        result = inspect_official_login(self.page, timeout_ms=3500)
+        self.assertEqual(result.code, 'login_form_ready')
+        self.assertEqual(self.page.url, HOME_URL)
+        self.assertEqual(self.requests, [('GET', HOME_URL)])
+        self.assertEqual(self.page.evaluate('window.fixtureEvents'), {'input': 0, 'change': 0, 'submit': 0})
+
+    def test_official_popup_form_is_inspected_without_credentials(self):
+        self.serve(home=HEADER + NAV.replace('<a ', '<a target="_blank" '))
+        result = inspect_official_login(self.page, timeout_ms=3500)
+        self.assertEqual(result.code, 'login_form_ready')
+        self.assertEqual(self.requests, [('GET', HOME_URL), ('GET', ENTRY_URL)])
+
+    def test_ambiguous_controls_are_refused_before_loading_credentials(self):
+        form = FORM.replace('<button type="submit" disabled>', '<button type="submit">Login</button><button type="submit" disabled>')
+        self.serve(form=form)
+        self.assert_refused()
+
+    def test_foreign_form_action_is_refused_before_loading_credentials(self):
+        form = FORM.replace('type="submit" disabled', f'type="submit" formaction="{FOREIGN_URL}" disabled')
+        self.serve(form=form)
+        self.assert_refused()
+
+    def test_javascript_only_button_in_form_is_refused(self):
+        self.serve(form=FORM.replace('<button type="submit" disabled>', '<button type="button">'))
+        self.assert_refused()
+
+    def test_submit_without_form_owner_is_refused(self):
+        form = FORM.replace('<form id="account" method="post"', '<section id="account" method="post"')
+        self.serve(form=form.replace('</form>\n<script>', '</section>\n<script>'))
+        self.assert_refused()
+
+    def test_get_submit_override_is_refused(self):
+        self.serve(form=FORM.replace('type="submit" disabled', 'type="submit" formmethod="get" disabled'))
+        self.assert_refused()
+
+    def test_empty_method_override_on_post_form_uses_get_and_is_refused(self):
+        self.serve(form=FORM.replace('type="submit" disabled', 'type="submit" formmethod="" disabled'))
+        self.assert_refused()
+
+    def test_native_post_override_on_get_form_is_accepted_for_inspection(self):
+        form = FORM.replace('method="post"', 'method="get"')
+        self.serve(form=form.replace('type="submit" disabled', 'type="submit" formmethod="post" disabled'))
+        result = inspect_official_login(self.page, timeout_ms=3500)
+        self.assertEqual(result.code, 'login_form_ready')
+        self.assertEqual(self.page.evaluate('window.fixtureEvents'), {'input': 0, 'change': 0, 'submit': 0})
+
+    def test_foreign_browsing_context_on_form_is_refused(self):
+        self.serve(form=FORM.replace('id="account" method="post"', 'id="account" target="_blank" method="post"'))
+        self.assert_refused()
+
+    def test_external_destination_is_refused_before_loading_credentials(self):
+        self.serve(home=HEADER + NAV.replace(ENTRY_URL, FOREIGN_URL))
+        self.assert_refused()
+
+    def test_error_document_with_visible_fields_is_refused(self):
+        self.serve(entry_status=404)
+        result = self.assert_refused()
+        self.assertEqual((result.phase, result.http_status), ('login_document', 404))
+        self.assertIn(('GET', ENTRY_URL), self.requests)
+
+    def test_empty_popup_error_document_reports_its_http_status(self):
+        self.serve(home=HEADER + NAV.replace('<a ', '<a target="_blank" '), form=HEADER, entry_status=404)
+        result = self.assert_refused()
+        self.assertEqual((result.phase, result.http_status), ('login_document', 404))
+
+    def assert_refused(self):
+        result = self.submit(1600)
+        self.assertFalse(result.submitted)
+        self.assertNotIn(result.code, ('login_submitted', 'login_form_ready'))
+        self.credentials.assert_not_called()
+        self.fence.assert_not_called()
+        self.assertTrue(all(method == 'GET' for method, _ in self.requests))
+        return result
 
 
 if __name__ == '__main__':

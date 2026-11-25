@@ -137,6 +137,11 @@ class Flow(TestCase):
         self.assertEqual(self.account.events,['incident','submit',('open','BTC',1,'12H'),'checkpoint',
                                              ('open','ETH',2,'48H'),('read','ETH',2,'48H')])
 
+    def test_login_navigation_gets_only_the_remaining_account_budget(self):
+        with patch.object(flow, 'monotonic', side_effect=(100, 102.5)):
+            self.run_map(BTC12)
+        self.assertEqual(flow.submit_official_login.call_args.kwargs['timeout_ms'], 27500)
+
     def test_unavailable_requested_range_does_not_poison_verified_account(self):
         self.select_errors=[None,StageFailure('source_map_unavailable')]
         self.assert_code('source_map_unavailable',BTC24)

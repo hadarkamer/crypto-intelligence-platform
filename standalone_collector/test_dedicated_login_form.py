@@ -1,7 +1,6 @@
 import os
-import re
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import dedicated_login_form as form
 
@@ -28,12 +27,31 @@ class Locator:
     def is_visible(self):
         return bool(self.matches)
 
+    def as_element(self):
+        return self
+
     def element_handle(self, *, timeout):
         assert timeout > 0
         return self
 
-    def evaluate(self, operation, args):
-        assert self.field == 'button' and operation is form._FORM_OPERATION
+    def evaluate_handle(self, script):
+        assert self.field == 'button' and 'button.form' in script
+        return self
+
+    def click(self, *, timeout, no_wait_after):
+        assert self.field == 'entry' and timeout > 0 and no_wait_after
+        self.page.entries_clicked += 1
+        self.page.url = self.page.form_destination
+        self.page.emit_document(self.page.login_status)
+
+    def evaluate(self, operation, args=None):
+        if self.field == 'entry':
+            return self.page.entry_destination
+        assert self.field == 'button'
+        if args is None:
+            assert 'isConnected' in operation
+            return True
+        assert operation is form._FORM_OPERATION and args['binding'] is self
         op = args['op']
         self.page.ops.append(op)
         if self.page.fail_op == op:
@@ -44,48 +62,80 @@ class Locator:
         return 'ok'
 
 
-class Page:
+class Events:
+    def __init__(self):
+        self.handlers = {}
+
+    def on(self, event, listener):
+        self.handlers[event] = listener
+
+    def remove_listener(self, event, listener):
+        assert self.handlers.pop(event) == listener
+
+
+class Page(Events):
     def __init__(self, clock):
+        super().__init__()
+        self.context = Events()
+        self.main_frame = Mock(page=self)
         self.clock = clock
-        self.url = form.LOGIN_URL
-        self.status = 200
-        self.email_count = 1
+        self.url = 'about:blank'
+        self.home_destination = form.HOME_URL
+        self.form_destination = self.entry_destination = 'https://www.coinglass.com/en/account/access?from=home'
+        self.status = self.login_status = 200
+        self.entries_clicked = 0
+        self.entry_count = self.email_count = 1
         self.challenge = ''
         self.error_text = ''
         self.ops = []
         self.fail_op = None
         self.submissions = 0
-        self.listener = None
-        self.after_submit = lambda page: setattr(page, 'url', 'https://www.coinglass.com/')
+        self.after_submit = lambda page: setattr(page, 'url', form.HOME_URL)
+
+    @property
+    def listener(self):
+        return self.handlers.get('response')
+
+    def emit_document(self, status):
+        request = Mock(url=self.url, redirected_from=None, is_navigation_request=lambda: True, frame=self.main_frame)
+        response = Mock(url=self.url, status=status, request=request,
+                        header_value=lambda name: '65')
+        listener = self.context.handlers.get('response')
+        if listener:
+            listener(response)
+        return response
 
     def goto(self, url, **kwargs):
-        assert url == form.LOGIN_URL
-        return Mock(status=self.status, header_value=lambda name: '65')
+        assert url == form.HOME_URL
+        self.url = self.home_destination
+        return self.emit_document(self.status)
 
     def locator(self, selector):
-        if selector == form._EMAIL:
-            return Locator(self, self.email_count, 'email')
-        if selector == form._PASSWORD:
-            return Locator(self, 1, 'password')
+        if selector == 'input[type=password], [role=dialog] input[type=email]':
+            return Locator(self, int(self.url == self.form_destination))
         return Locator(self, int(selector == self.challenge))
 
     def get_by_text(self, pattern):
         return Locator(self, int(bool(pattern.search(self.error_text))))
 
     def get_by_role(self, role, *, name):
-        assert role == 'button' and name.fullmatch('Login') and not name.search('Continue with Google')
-        return Locator(self, 1, 'button')
+        assert role in ('link', 'button') and name.fullmatch('Login') and not name.search('Continue with Google')
+        return Locator(self, self.entry_count if role == 'link' else 0, 'entry')
+
+    def evaluate_handle(self, script, selectors):
+        assert script == form._SCOPED_FIELDS
+        assert selectors == {'emailSelector': form._EMAIL, 'passwordSelector': form._PASSWORD}
+        fields = {}
+        if self.url == self.form_destination and self.email_count == 1:
+            fields = {name: Locator(self, 1, name) for name in ('email', 'password', 'button')}
+        return Mock(get_properties=lambda: fields)
+
+    def evaluate(self, script):
+        assert 'responseStatus' in script
+        return [self.url, self.login_status]
 
     def wait_for_timeout(self, ms):
         self.clock.now += ms / 1000
-
-    def on(self, event, listener):
-        assert event == 'response'
-        self.listener = listener
-
-    def remove_listener(self, event, listener):
-        assert event == 'response' and listener == self.listener
-        self.listener = None
 
 
 class TestOfficialForm(unittest.TestCase):
@@ -109,12 +159,12 @@ class TestOfficialForm(unittest.TestCase):
         self.assertEqual(self.page.submissions, 1)
         self.assertIsNone(self.page.listener)
 
-    def test_refuses_other_origins_and_login_lookalikes_before_loader(self):
+    def test_foreign_and_non_https_entry_redirects_stop_before_loader(self):
         for url in ('https://accounts.google.com/login', 'http://www.coinglass.com/login',
-                    'https://www.coinglass.com@untrusted.invalid/login', 'https://www.coinglass.com/reset',
-                    'https://extra.coinglass.com/login', 'https://www.coinglass.com/login?next=unsafe'):
+                    'https://www.coinglass.com@untrusted.invalid/login', 'https://www.coinglass.com.invalid/account',
+                    'https://other.coinglass.com/account'):
             with self.subTest(url=url):
-                self.page.url = url
+                self.page.form_destination = url
                 self.assertEqual(self.call().code, 'login_form_untrusted')
                 self.loader.assert_not_called()
                 self.reserve.assert_not_called()
@@ -126,66 +176,71 @@ class TestOfficialForm(unittest.TestCase):
         self.page.goto.assert_not_called()
         self.loader.assert_not_called()
 
-    def test_only_missing_direct_route_can_open_login_from_map(self):
-        for status, challenge, expected in (
-            (401, '', 'login_form_unavailable'), (403, '', 'login_form_unavailable'),
-            (429, '', 'login_rate_limited'), (404, form._CAPTCHA, 'login_captcha_required'),
-            (410, form._VERIFY, 'login_verification_required'), (503, '', 'login_network_transient'),
-        ):
-            with self.subTest(status=status, challenge=challenge), patch.object(form, '_open_login_from_map') as fallback:
-                self.page.status = status
-                self.page.challenge = challenge
-                self.assertEqual(self.call().code, expected)
-                fallback.assert_not_called()
-        self.loader.assert_not_called()
-        self.reserve.assert_not_called()
+    def test_home_and_login_document_failures_identify_actual_status_and_phase(self):
+        for attribute, phase in [('status', 'home_document'), ('login_status', 'login_document')]:
+            for status, expected in ((401, 'login_form_unavailable'), (403, 'login_form_unavailable'),
+                                     (404, 'login_form_unavailable'), (429, 'login_rate_limited'),
+                                     (503, 'login_network_transient')):
+                with self.subTest(status=status, phase=phase):
+                    self.page = Page(self.clock)
+                    setattr(self.page, attribute, status)
+                    result = self.call()
+                    self.assertEqual((result.code, result.phase, result.http_status), (expected, phase, status))
+                    self.assertEqual(self.page.entries_clicked, int(phase == 'login_document'))
+                    self.loader.assert_not_called()
+                    self.reserve.assert_not_called()
 
-    def test_missing_direct_route_opens_map_once_before_one_login(self):
-        for status in (404, 410):
-            with self.subTest(status=status), patch.object(form, '_open_login_from_map', return_value=None) as fallback:
+    def test_missing_entry_or_scoped_form_reports_ui_timeout_without_http_failure(self):
+        for field, count, expected_phase in (('entry_count', 0, 'entry_control'), ('email_count', 0, 'form'),
+                                               ('email_count', 2, 'form')):
+            with self.subTest(field=field, count=count):
                 self.page = Page(self.clock)
-                self.page.status = status
-                self.loader.reset_mock()
-                self.reserve.reset_mock()
-                self.assertEqual(self.call(), form.LoginFormResult('login_submitted', True))
-                fallback.assert_called_once()
-                self.loader.assert_called_once_with()
-                self.reserve.assert_called_once_with()
-                self.assertEqual(self.page.submissions, 1)
+                setattr(self.page, field, count)
+                result = self.call()
+                self.assertEqual((result.code, result.phase, result.http_status), ('login_form_unavailable', expected_phase, None))
+                self.loader.assert_not_called()
+                self.reserve.assert_not_called()
 
-    def test_duplicate_fields_and_missing_form_are_not_network_failures(self):
-        for count in (0, 2):
-            with self.subTest(count=count):
-                self.page.email_count = count
-                self.assertEqual(self.call().code, 'login_form_unavailable')
-        self.loader.assert_not_called()
+    def test_passive_entry_uses_one_official_control_and_guard_without_mutation(self):
+        self.page.entry_count = 2
+        result = form.inspect_official_login(self.page, timeout_ms=350)
+        self.assertEqual(result.code, 'login_form_ready')
+        self.assertEqual(self.page.entries_clicked, 1)
+        self.assertEqual(self.page.ops, ['check'])
+        self.assertEqual(self.page.submissions, 0)
+        self.assertEqual(self.page.context.handlers, {})
+        self.assertEqual(self.page.handlers, {})
 
-    def test_multiple_visible_login_buttons_require_one_shared_form_owner(self):
-        for ownership, expected in (
-            ([False, True], 'login_submitted'),
-            ([True, True], 'login_form_unavailable'),
-            ([False, False], 'login_form_unavailable'),
+    def test_popup_form_requires_one_matching_document_and_an_official_redirect_chain(self):
+        url = self.page.form_destination
+        for documents, previous, expected in (
+            ([], None, 'login_form_unavailable'),
+            ([(url + '&other=1', 200)], None, 'login_form_unavailable'),
+            ([(url, 201)], None, 'login_form_unavailable'),
+            ([(url, 200), (url, 200)], None, 'login_form_unavailable'),
+            ([(url, 200)], 'https://other.invalid/sign-in', 'login_form_untrusted'),
+            ([(url, 200)], form.HOME_URL, 'login_form_ready'),
         ):
-            with self.subTest(ownership=ownership):
-                self.page = Page(self.clock)
-                self.loader.reset_mock()
-                self.reserve.reset_mock()
-                nodes = []
-                for owns_fields in ownership:
-                    button = Locator(self.page, 1, 'button')
-                    evaluate = button.evaluate
-                    def operation(script, args, owned=owns_fields, guarded=evaluate):
-                        if 'op' in args:
-                            return guarded(script, args)
-                        self.assertEqual((args['email'].field, args['password'].field), ('email', 'password'))
-                        return owned
-                    button.evaluate = operation
-                    nodes.append(button)
-                self.page.get_by_role = Mock(return_value=Mock(count=lambda: len(nodes), nth=nodes.__getitem__))
-                self.assertEqual(self.call().code, expected)
-                self.assertEqual(self.page.submissions, int(expected == 'login_submitted'))
-                self.assertEqual(self.loader.call_count, self.page.submissions)
-                self.assertEqual(self.reserve.call_count, self.page.submissions)
+            with self.subTest(documents=documents, previous=previous):
+                popup = Page(self.clock)
+                popup.url = url
+                popup.close = Mock()
+                def open_popup(control, *, timeout, no_wait_after):
+                    for request_url, status in documents:
+                        redirect = Mock(url=previous, redirected_from=None) if previous else None
+                        request = Mock(url=request_url, redirected_from=redirect, is_navigation_request=lambda: True)
+                        type(request).frame = PropertyMock(side_effect=RuntimeError('frame not attached yet'))
+                        self.page.context.handlers['response'](Mock(url=request_url, status=status, request=request))
+                    self.page.handlers['popup'](popup)
+                with patch.object(Locator, 'click', open_popup):
+                    if expected == 'login_form_ready':
+                        result = form.inspect_official_login(self.page, timeout_ms=350)
+                    else:
+                        result = self.call()
+                self.assertEqual(result.code, expected)
+                popup.close.assert_called_once_with()
+                self.loader.assert_not_called()
+                self.reserve.assert_not_called()
 
     def test_guarded_inputs_and_submit(self):
         for op in ('check', 'email', 'password', 'submit'):
@@ -254,6 +309,7 @@ class TestOfficialForm(unittest.TestCase):
         self.assertEqual(self.page.submissions, 2)
 
     def test_chart_capture_guard(self):
+        self.page.url = self.page.form_destination
         self.assertEqual(form.visible_login_blocker(self.page), 'login_form_visible')
         self.page.url = 'https://www.coinglass.com/LiquidationHeatMap/BTC'
         self.assertIsNone(form.visible_login_blocker(self.page))

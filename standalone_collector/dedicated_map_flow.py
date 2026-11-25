@@ -128,7 +128,7 @@ def _authenticate(session, context, page):
         if remaining < 1000:
             raise StageFailure(_settle(session, incident, 'auth_network_transient'))
         outcome = submit_official_login(
-            page, timeout_ms=min(12000, remaining),
+            page, timeout_ms=remaining,
             credentials=lambda: session.credentials(incident),
             before_submit=lambda: session.auth_submit(incident),
         )

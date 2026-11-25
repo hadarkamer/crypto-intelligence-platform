@@ -72,7 +72,6 @@ jobs:
           PYTEST
           echo "$RUNNER_TEMP/coinglass-test/bin" >> "$GITHUB_PATH"
           pg_config --bindir >> "$GITHUB_PATH"
-          echo "PG_BIN_FOR_OPERATOR_TESTS=$(pg_config --bindir)" >> "$GITHUB_ENV"
       - name: Prepare actual runtime and run collector contracts
         env:
           COINGLASS_QA_USE_SYSTEM_CHROME: "1"
@@ -88,7 +87,7 @@ jobs:
           python -m unittest discover -v -p 'test_dedicated*.py'
       - name: Exercise protected-map fixture and restart the browser against saved local state
         working-directory: standalone_collector
-        run: python -m unittest test_session_browser_restart test_operator_login test_collection_metrics -v
+        run: python -m unittest test_session_browser_restart test_collection_metrics -v
       - name: Verify read-only startup and source configuration checks
         working-directory: standalone_collector
         run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v
@@ -107,60 +106,3 @@ jobs:
           name: hover-source-evidence
           path: hover-source-evidence
           retention-days: 7
-
-
-  operator-runtime:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build the dedicated browser image
-        id: operator_image
-        run: docker build --file standalone_collector/Dockerfile.operator --tag coinglass-operator-test .
-      - name: Verify collector confidentiality and Chromium across two real container UIDs
-        run: |
-          docker run --rm --network none --user 0:0 coinglass-operator-test \
-            python standalone_collector/test_operator_container_capabilities.py --check
-
-  qa-preflight-service:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build the inert Render QA image
-        run: docker build --file standalone_collector/Dockerfile.operator-qa --tag coinglass-qa-preflight .
-      - name: Verify one-shot status on an isolated bridge with a real network interface
-        run: |
-          set -euo pipefail
-          qa_network="$(docker network create --internal coinglass-qa-fixture)"
-          qa_container="$(docker run --detach --network "$qa_network" coinglass-qa-preflight)"
-          trap 'docker rm -f "$qa_container" >/dev/null; docker network rm "$qa_network" >/dev/null' EXIT
-          docker exec --interactive --user 10003:10003 "$qa_container" python -I - <<'PYTEST'
-          import json, time, urllib.error, urllib.request
-          deadline = time.monotonic() + 135
-          base = "http://127.0.0.1:10000"
-          while time.monotonic() < deadline:
-              try:
-                  with urllib.request.urlopen(base + "/status", timeout=2) as response:
-                      status = json.load(response)
-              except (OSError, urllib.error.URLError):
-                  time.sleep(.5)
-                  continue
-              if status.get("phase") == "complete":
-                  break
-              time.sleep(.5)
-          else:
-              raise AssertionError("QA status did not complete")
-          assert status["dual_uid"]["two_uid_confidential_boundary"] is True
-          assert status["dual_uid"]["provider_requests"] == 0
-          assert status["private_viewer"]["provider_requests"] == 0
-          assert type(status["private_viewer"]["isolated_operator_browser"]) is bool
-          assert json.load(urllib.request.urlopen(base + "/health", timeout=2)) == status
-          try:
-              urllib.request.urlopen(base + "/login", timeout=2)
-          except urllib.error.HTTPError as error:
-              assert error.code == 404
-          else:
-              raise AssertionError("QA image exposed an unexpected route")
-          print(json.dumps(status,sort_keys=True))
-          PYTEST

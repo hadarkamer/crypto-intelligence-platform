@@ -282,8 +282,8 @@ def create_app():
     if dedicated:
         register_dedicated_status(application, store, active)
     else:
-        from operator_login import register_operator_login
-        register_operator_login(application, store, active)
+        from operator_login import register_legacy_status
+        register_legacy_status(application, store, active)
     if active:
         async def lifecycle(app):
             await asyncio.to_thread(store.initialize)
