@@ -81,6 +81,8 @@ jobs:
           python standalone_collector/prepare.py
       - name: Check the dedicated account flow against synthetic pages and a private test database
         working-directory: standalone_collector
+        env:
+          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
         run: |
           export COINGLASS_TEST_POSTGRES_BIN="$(pg_config --bindir)"
           python -m unittest discover -v -p 'test_dedicated*.py'

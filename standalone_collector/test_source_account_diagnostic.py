@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock,patch
 
 import source_account_diagnostic as diagnostic
+from configuration_check import dedicated_account_requested
 
 SESSION='synthetic-session-never-a-real-credential'
 PRIVATE='PRIVATE_ACCOUNT_PROFILE_AND_ERROR'
@@ -160,16 +161,18 @@ class AccountDiagnosticTests(unittest.TestCase):
 
 
 class StartupFlagTests(unittest.TestCase):
-    def startup(self,flag=None,argv=None):
+    def startup(self,flag=None,argv=None,extra_env=None):
         # Execute only the real app entrypoint with fake service/provider modules.
         # No database, model, browser or session is imported by the test.
         source=Path(__file__).with_name('app.py').read_text(encoding='utf-8')
         entrypoint=ast.parse(source).body[-1];events=[]
         environment={} if flag is None else {'COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START':flag}
+        environment.update(extra_env or {})
         fake_diagnostic=types.SimpleNamespace(main=lambda:events.append('account'))
         fake_web=types.SimpleNamespace(run_app=lambda *args,**kwargs:events.append('serve'))
         namespace={'__name__':'__main__','sys':types.SimpleNamespace(argv=argv or ['app.py']),
-            'os':types.SimpleNamespace(getenv=environment.get),
+            'os':types.SimpleNamespace(getenv=environment.get, environ=environment),
+            'dedicated_account_requested':dedicated_account_requested,
             'create_app':lambda:events.append('create') or object(),
             'deployment_check':lambda:events.append('config'),
             'probe':lambda:events.append('probe')}
@@ -186,6 +189,10 @@ class StartupFlagTests(unittest.TestCase):
         self.assertEqual(self.startup('true',['app.py','--source-probe']),['probe'])
         for mode in ('--probe','--check-config'):
             with self.subTest(mode=mode):self.assertEqual(self.startup('true',['app.py',mode]),['config'])
+
+    def test_dedicated_mode_excludes_legacy_account_probe_on_start(self):
+        events = self.startup('true', extra_env={'COINGLASS_MODERN_UI_ENABLED': 'true'})
+        self.assertEqual(events, ['create', 'serve'])
 
 
 if __name__=='__main__':unittest.main()
