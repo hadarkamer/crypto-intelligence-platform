@@ -8,15 +8,15 @@ from PIL import Image, ImageDraw
 from modern_map_axis import axis_scale
 
 # Row masks of printed digits, drawn from filtered market images on 24 and 26
-# November. The two charts use the same small price font. There are no price
+# November. The retained charts use the same small price font. There are no price
 # strings, positions or monetary values in the alphabet. Unknown masks abstain.
 _GLYPHS = {
     '0': '5x9:70f09898989898f070 5x9:70f89898989898f870 5x9:70f8c8c8c8c8c8f870 6x9:7878cccccccccc7878',
     '1': '3x9:60e0a0202020202020 3x9:60e0e0606060606060',
-    '2': '5x9:70f8c808183060e0f8',
+    '2': '5x9:70f8c808183060e0f8 5x9:70580808103060e0f8',
     '3': '5x9:70f88818381888f870',
     '4': '6x9:1030306060e8fc7c0c',
-    '5': '5x9:f8c080f0d81898f8f0',
+    '5': '5x9:f8c080f0d81898f8f0 5x9:f08080f0d01818f070',
     '6': '5x9:206040f0d89898f070 5x9:206060c0f0d098f070 5x9:30206040f0d898f870',
     '7': '5x9:f89890303020604040 5x9:f8d818181030302060',
     '8': '5x9:70d898f0f09888d870 5x9:70d8c8d878d8c8d870',

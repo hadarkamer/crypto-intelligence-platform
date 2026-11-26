@@ -96,7 +96,7 @@ def _normalized_result(raw, snapshot, run_id, image, scores):
                 quality='visual_estimate',quantity_status='unavailable',quantity_reason='source_usd_unverified')
 
 
-def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=None, observe=None):
+def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=None, observe=None, base_only=False):
     from contextlib import ExitStack
     from dedicated_map_flow import collect_with_dedicated_session, MapTarget
     from model1_execution import capture_operation
@@ -133,7 +133,8 @@ def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=N
                     session.attach(context, page)
                 with capture_operation('capture'):
                     return collect_with_dedicated_session(session, context, page,
-                        MapTarget(symbol, model, timeframe), image_path, allow_login=allow_login, observe=observe)
+                        MapTarget(symbol, model, timeframe), image_path, allow_login=allow_login, observe=observe,
+                        base_only=base_only)
             except Exception as error:
                 session.note_source_error(error)
                 raise
@@ -160,7 +161,7 @@ def _run(timeframe,run_id,root):
     if raw_model not in ('1','2','3') or timeframe not in ('12H','24H','48H'):
         raise ValueError('Invalid capture identity')
     if (symbol,raw_model,timeframe) == ('BTC','1','12H'):
-        return _run_basic_btc(root,run_id)
+        return _run_basic_btc(root,run_id,base_only=True)
     from market_vision.openai_heatmap_scanner import analyze_heatmap_images
     path=root/'image.png'
     stage('capture')
@@ -221,10 +222,10 @@ def numeric_result(snapshot, job_id, png_bytes):
                 evidence=dict(artifact_id=job_id,sha256=digest,content_type='image/png'),basic_snapshot=snapshot)
 
 
-def _run_basic_btc(root, run_id):
+def _run_basic_btc(root, run_id, *, base_only=True):
     from modern_map_checkpoint import acknowledgements
     with acknowledgements() as acknowledge:
-        return _process_basic_btc(root, run_id, acknowledge)
+        return _process_basic_btc(root, run_id, acknowledge, base_only=base_only)
 
 
 def _same_basic_observation(basic, later):
@@ -247,7 +248,7 @@ def same_basic_with_enrichment(basic, enriched):
             and _same_basic_observation(basic,enriched))
 
 
-def _process_basic_btc(root, run_id, acknowledge):
+def _process_basic_btc(root, run_id, acknowledge, *, base_only):
     from modern_map_checkpoint import SOURCE, UPGRADE, partial_record
     image_path = root / 'image.png'
     source_path, enriched_path = root / SOURCE, root / UPGRADE
@@ -262,6 +263,8 @@ def _process_basic_btc(root, run_id, acknowledge):
         result = numeric_result(snapshot,run_id,image_path.read_bytes())
         if basic is not None and not same_basic_with_enrichment(basic,snapshot):
             raise StageFailure('source_not_readable','basic_observation_changed')
+        if base_only and (snapshot['collection_tier']!='basic' or snapshot['enrichment']['observations']!=0):
+            raise StageFailure('source_not_readable','unexpected_enrichment_in_base_only')
         record = dict(run_id=run_id,snapshot=snapshot,image_sha256=result['evidence']['sha256'])
         if path.exists():
             if json.loads(path.read_text()) != record:
@@ -295,7 +298,7 @@ def _process_basic_btc(root, run_id, acknowledge):
                 result = persist(deepcopy(data),source_path,b'S')
         stage('capture')
         try:
-            snapshot = capture('BTC',1,'12H',image_path,observe=observe)
+            snapshot = capture('BTC',1,'12H',image_path,observe=observe,base_only=base_only)
         except Exception as error:
             if result is None:
                 if not source_path.exists() and (overview or hovers or stages):
@@ -312,6 +315,8 @@ def _process_basic_btc(root, run_id, acknowledge):
             if result is None:
                 result = persist(snapshot,source_path,b'S')
             elif snapshot!=result['basic_snapshot']:
+                if base_only:
+                    raise StageFailure('source_not_readable','basic_observation_changed')
                 basic = result['basic_snapshot']
                 if snapshot.get('collection_tier')=='basic':
                     # A repeated, previously known row is not a stronger observation.

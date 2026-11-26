@@ -14,7 +14,7 @@ import modern_map_reader as ui
 
 class BasicSourceReader(TestCase):
     def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, native=False, box_case=None,
-               optional_change=None, ack=True, observed=None):
+               optional_change=None, ack=True, observed=None, base_only=False, shifted=False):
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         stamp=clock.isoformat().replace('+00:00','Z')
         token=clock.strftime('%m/%d %H:%M')
@@ -47,29 +47,47 @@ class BasicSourceReader(TestCase):
         doc=page.evaluate_handle.return_value
         doc.evaluate.return_value=True
         page.url=ui.map_url('BTC')
+        page.viewport_size={'width':width+12,'height':height}
+        current_box=[box]
+        delta=(8,-7) if shifted else (0,0)
+        closing_box=(box[0]+delta[0],box[1]+delta[1],box[2],box[3])
+        closing_bounds=tuple(v+delta[i%2] for i,v in enumerate(bounds))
         control={'Range':'12 hour','Layout':'Single chart','Lens':'Heat','Colours':'Viridis Default'}
         events=[] if observed is None else observed
         with ExitStack() as stack:
             def stub(owner,k,**opts):
                 return stack.enter_context(patch.object(owner,k,**opts))
-            stub(ui,'chart_box',return_value=box)
+            stub(ui,'chart_box',side_effect=lambda _:current_box[0])
             stub(ui,'clear_cookie_notice');stub(ui,'display_ready');stub(ui,'gate');stub(ui,'select_choice')
             stub(ui,'choice',return_value=True);stub(ui,'symbol_control')
             stub(ui,'full_intensity',return_value=change!='intensity')
             stub(ui,'option_control',side_effect=lambda page,k:Mock(inner_text=lambda:control[k]))
             stub(ui,'evidence_controls',return_value=[dict(x=4,y=1,width=32,height=15)])
             @contextmanager
-            def position(*_):yield box
+            def position(*_):
+                prior=current_box[0]
+                if positions:current_box[0]=closing_box
+                positions.append(current_box[0])
+                try:yield current_box[0]
+                finally:current_box[0]=prior
+            positions=[]
             stub(ui,'position_chart',side_effect=position)
-            stub(basic,'prepare_surface',return_value=dict(unknown=[],covered=[],eligible=0,cards=0,close_attempts=0))
+            clean=dict(unknown=[],covered=[],eligible=0,cards=0,close_attempts=0)
+            obstructed=dict(clean,unknown=[(452,403,532,432)]) if change=='end_time_overlay' else clean
+            stub(basic,'prepare_surface',side_effect=[clean,obstructed])
             stub(ui,'market_surface',side_effect=lambda *_:chart.copy())
-            stub(basic,'source_screen',side_effect=lambda *_:chart.copy())
-            stub(ui,'dark_bounds',return_value=bounds)
+            def closing_image(*_):
+                image=Image.new('RGB',(width+12,height))
+                image.paste(chart,delta)
+                return image
+            stub(basic,'source_screen',side_effect=closing_image)
+            stub(ui,'dark_bounds',side_effect=lambda _,now:closing_bounds if now!=box else bounds)
             optional_time=prev if optional_change=='column' else token
             optional_paint=StageFailure('source_login_required') if optional_change=='auth' else (optional_time,[])
             paint=stub(ui,'read_paint',side_effect=[(prev,[]),(token,[]),(prev if change=='column' else token,[]),optional_paint])
             stub(basic,'axis_marks',return_value=[])
             scales=[None,None] if native else [('100.00',where),('101.00' if change=='reference' else '100.00',where)]
+            if shifted and not native:scales[-1]=('100.00',lambda p:where(p)+delta[1])
             scales.append(scales[-1])
             stub(basic,'axis_scale_live',side_effect=scales)
             measured=stub(basic,'from_native_box',return_value=('100.00',where))
@@ -107,11 +125,11 @@ class BasicSourceReader(TestCase):
                     tip.assert_not_called()
                     extra.assert_not_called()
                     return ack
-            result=ui.read_selected_map(page,'BTC',1,'12H',output,observe=collect)
+            result=ui.read_selected_map(page,'BTC',1,'12H',output,observe=collect,base_only=base_only)
             self.assertEqual(sum(k=='verified_basic' for k,_ in events),1)
-            self.assertEqual(paint.call_count,4 if box_case in ('leader','witness') else 3)
-            self.assertEqual(tip.call_count,1)
-            self.assertEqual(extra.call_count,2 if box_case in ('witness','wrong_witness') else 1)
+            self.assertEqual(paint.call_count,4 if not base_only and box_case in ('leader','witness') else 3)
+            self.assertEqual(tip.call_count,0 if base_only else 1)
+            self.assertEqual(extra.call_count,0 if base_only else 2 if box_case in ('witness','wrong_witness') else 1)
             self.assertEqual(measured.call_count,1 if native else 0)
             self.assertEqual(result['source_sha256'],sha256(output.getvalue()).hexdigest())
             self.assertEqual(doc.dispose.call_count,1)
@@ -200,17 +218,93 @@ class BasicSourceReader(TestCase):
         with patch.object(ui,'read_paint',side_effect=StageFailure('source_not_readable')), \
              patch.object(basic,'read_tooltip',return_value=empty) as tip:
             with self.assertRaises(StageFailure) as failed:
-                basic.closing_column(*args)
+                basic.displayed_column(*args)
             self.assertEqual(failed.exception.basic_reason,'closing_column_display_unavailable')
             base=dict(price_label_source='dom',raw_price_labels=['60,495','60,582','60,669'])
             # These calls model a new tooltip whose parser already verified its
             # dated title, regularly spaced times and row labels (separate tests).
             tip.return_value=dict(base,marks=[('11/26 16:05',640,680)])
-            self.assertEqual(basic.closing_column(*args),('11/26 16:05',[]))
+            self.assertEqual(basic.displayed_column(*args),('11/26 16:05',[]))
             for marks in [[('11/26 16:00',640,680)], [('11/26 16:05',640,680),('11/26 16:10',640,681)]]:
                 tip.return_value=dict(base,marks=marks)
-                with self.assertRaises(StageFailure):basic.closing_column(*args)
+                with self.assertRaises(StageFailure):basic.displayed_column(*args)
         with patch.object(ui,'read_paint',side_effect=StageFailure('source_login_required')), \
              patch.object(basic,'read_tooltip') as tip, self.assertRaises(StageFailure):
-            basic.closing_column(*args)
+            basic.displayed_column(*args)
         tip.assert_not_called()
+
+    def test_base_only_persists_then_stops_with_unpriced_areas(self):
+        events=[]
+        result=self.replay(base_only=True,box_case='leader',observed=events)
+        self.assertEqual('basic',result['collection_tier'])
+        self.assertEqual(1,result['coverage']['unpriced_bins'])
+        self.assertEqual(events[-1],('verified_basic',result))
+        self.assertFalse(any('optional' in v.get('name','') for k,v in events if k=='stage'))
+        self.assertTrue(any(v['name']=='basic_closing_geometry' for k,v in events if k=='stage'))
+
+    def test_base_only_repositions_from_measured_same_chart_after_translation(self):
+        for native in (False,True):
+            events=[]
+            result=self.replay(base_only=True,shifted=True,native=native,observed=events)
+            evidence=next(v for k,v in events if k=='stage' and v['name']=='basic_closing_geometry')
+            self.assertTrue(evidence['geometry_changed'])
+            self.assertEqual(evidence['plot_rect'],[18,42,488,393])
+            current=next(v for k,v in events if k=='stage' and v['name']=='closing_column_from_visible_crosshair')
+            self.assertEqual(current['pointer_x'],487)
+            self.assertEqual(result['collection_tier'],'basic')
+
+    def test_base_only_blocked_time_axis_is_not_replaced_with_latest_estimate(self):
+        events=[]
+        with self.assertRaises(StageFailure) as failure:
+            self.replay(change='end_time_overlay',base_only=True,observed=events)
+        self.assertEqual(failure.exception.basic_reason,'closing_price_or_time_axis_obstructed')
+        self.assertFalse(any(k=='verified_basic' for k,_ in events))
+        self.assertTrue(any(k=='stage' and v.get('name')=='basic_closing_geometry' and v['status']=='blocked'
+                            for k,v in events))
+
+    def test_base_only_alt_timestamp_requires_dated_spatial_header_and_printed_cadence(self):
+        from modern_map_tooltip import dated_column
+        page=Mock()
+        column=datetime(2026,11,26,15,0,tzinfo=timezone.utc)
+        box=(0,0,1074,850); bounds=(0,50,999,823)
+        args=(page,box,bounds,column,Mock(),Mock())
+        # Rendered headers retained in the real E market receipt.
+        labels=[('11/26 15:00',639,681),('14:40',634,728),('14:45',696,728),
+                ('14:50',758,728),('14:55',820,728),('15:00',882,728)]
+        structured=dated_column(labels,column)
+        self.assertEqual(structured['period_seconds'],300)
+        with patch.object(ui,'read_paint',side_effect=StageFailure('source_not_readable')), \
+             patch.object(ui,'chart_box',return_value=box),patch.object(basic,'read_tooltip') as tip:
+            tip.return_value={'column_evidence':[dict(structured,source='dom')]}
+            self.assertEqual(basic.displayed_column(*args,base_only=True,period='5m'),('11/26 15:00',[]))
+            for bad in ([],[dict(structured,dated_title='11/26 14:55')],[dict(structured,period_seconds=600)],
+                        [structured,dict(structured,dated_title='11/26 14:55')]):
+                tip.return_value={'column_evidence':bad}
+                with self.subTest(bad=bad), self.assertRaises(StageFailure):
+                    basic.displayed_column(*args,base_only=True,period='5m')
+        self.assertIsNone(dated_column([],column))  # actual F closing receipt
+        self.assertIsNone(dated_column(labels[:1],column))  # dated title alone
+        self.assertIsNone(dated_column(labels[:-1],column))  # historical headers
+
+    def test_base_only_does_not_select_other_job_or_change_defaults(self):
+        with patch.object(ui,'read_strict_selected_map') as legacy:
+            with self.assertRaises(ValueError):ui.read_selected_map(Mock(),'BTC',1,'48H',BytesIO(),base_only=True)
+            legacy.assert_not_called()
+            ui.read_selected_map(Mock(),'BTC',1,'48H',BytesIO())
+            legacy.assert_called_once()
+
+    def test_opening_alternate_returns_observed_time_not_source_clock(self):
+        page=Mock()
+        box=(0,0,1074,850);bounds=(0,50,999,823)
+        source=datetime(2026,11,26,16,8,tzinfo=timezone.utc)
+        args=(page,box,bounds,source,Mock(),Mock())
+        with patch.object(ui,'read_paint',side_effect=StageFailure('source_not_readable')), \
+             patch.object(ui,'chart_box',return_value=box),patch.object(basic,'read_tooltip') as tip:
+            tip.return_value={'column_evidence':[{'dated_title':'11/26 16:05','period_seconds':300}]}
+            stamp,_=basic.displayed_column(*args,base_only=True,period='5m',opening=True)
+            self.assertEqual(stamp,'11/26 16:05')
+            self.assertTrue(tip.call_args.kwargs['clock_only'])
+            for other in ('11/26 16:00','11/26 16:10'):
+                tip.return_value={'column_evidence':[{'dated_title':other,'period_seconds':300}]}
+                with self.subTest(other=other), self.assertRaises(StageFailure):
+                    basic.displayed_column(*args,base_only=True,period='5m',opening=True)

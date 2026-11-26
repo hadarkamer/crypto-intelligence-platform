@@ -13,8 +13,8 @@ from modern_map_evidence import AMOUNT, PRICE, number
 # Retain only bounded market quantities and times. Do not return DOM text,
 # links, attributes, page markup or account elements from the browser.
 _DOM = r"""box => {
-  const [x,y,w,h,budget]=box, out=[];
-  const stop=budget===undefined ? Infinity : performance.now()+budget;
+  const [x,y,w,h,budget,clockOnly]=box, out=[];
+  const stop=budget==null ? Infinity : performance.now()+budget;
   const token=/^(?:(?:\d{1,2}\/\d{1,2}\s+)?\d{1,2}:\d{2}|(?:\$\s*)?\d[\d,]*(?:\.\d+)?\s*[KMB]?)$/i;
   for (const e of document.querySelectorAll('th,td,span,div,strong,b,[role=gridcell],[role=columnheader]')) {
     if(performance.now()>stop)return [];
@@ -24,7 +24,7 @@ _DOM = r"""box => {
     if(rect.width===0 || rect.height===0 || rect.left<x-1 || rect.right>x+w+1 ||
        rect.top<y || rect.bottom>y+h)continue;
     const t=e.textContent.trim();
-    if(t.length<=32 && token.test(t))out.push([t,(rect.left+rect.right)/2,(rect.top+rect.bottom)/2]);
+    if(t.length<=32 && (!clockOnly || t.includes(':')) && token.test(t))out.push([t,(rect.left+rect.right)/2,(rect.top+rect.bottom)/2]);
     if(out.length>=512)break;
   }
   return out;
@@ -114,6 +114,35 @@ def _regular_ladder(points):
                 return False
     return upper > 0
 
+def dated_column(marks, column):
+    """Read a dated tooltip title corroborated by its ordered column headers."""
+    times = [(raw, _timestamp(raw,column), x, y) for raw,x,y in marks if _TIME.fullmatch(raw)]
+    titles = {(raw, stamp, x, y) for raw,stamp,x,y in times if '/' in raw and stamp}
+    if len(titles) != 1:
+        return None
+    raw, title, title_x, title_y = next(iter(titles))
+    short = [(stamp,x,y) for text,stamp,x,y in times if '/' not in text and stamp]
+    candidates = set()
+    for row_y in {y for _,_,y in short if 3 < y-title_y <= 120}:
+        header = sorted({(x,stamp) for stamp,x,y in short if abs(y-row_y)<=3})
+        if not 3<=len(header)<=12 or header[-1][1]!=title or not header[0][0]-145 <= title_x <= header[-1][0]+145:
+            continue
+        if not _regular_ladder([(x,1) for x,_ in header]):
+            continue
+        instants = []
+        for _,stamp in header:
+            clock=datetime.strptime(stamp[-5:],'%H:%M').time()
+            instants.append(min((datetime.combine(column.date()+timedelta(days=d),clock,column.tzinfo)
+                                 for d in (-1,0,1)),key=lambda t:abs(t-column)))
+        steps={b-a for a,b in zip(instants,instants[1:])}
+        if len(steps)==1 and next(iter(steps))>timedelta(0):
+            candidates.add((tuple(header),int(next(iter(steps)).total_seconds())))
+    if len(candidates)!=1:
+        return None
+    header,period=next(iter(candidates))
+    return dict(period_seconds=period,dated_title=raw, ordered_times=[stamp for _,stamp in header],
+                title_xy=[round(title_x),round(title_y)], column_count=len(header))
+
 def price_labels(marks, column):
     """Return actual row labels only for a tooltip explicitly tied to this column."""
     target = column.strftime('%m/%d %H:%M')
@@ -157,7 +186,7 @@ def price_labels(marks, column):
                 axes.add(tuple(raw for _,raw in rows))
     return list(next(iter(axes))) if len(axes)==1 else []
 
-def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None):
+def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None,clock_only=False):
     """Compare pointer-off and pointer-on DOM. Use Canvas only for painted labels."""
     page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
     def remaining():
@@ -169,7 +198,7 @@ def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None):
         return ms
     def read_dom():
         ms=remaining()
-        return page.evaluate(_DOM,[*box,ms] if ms is not None else list(box))
+        return page.evaluate(_DOM,[*box,ms,clock_only])
     off={tuple(v) for v in read_dom()}
     watcher=page.evaluate_handle(paint,list(box))
     try:
@@ -185,7 +214,7 @@ def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None):
             if not ready:
                 from model1_execution import StageFailure
                 raise StageFailure('source_timeout')
-        seen=watcher.evaluate('w=>w.labels')
+        seen=watcher.evaluate("w=>w.labels.filter(m=>m[0].includes(':'))" if clock_only else 'w=>w.labels')
         dom=[m for m in read_dom() if tuple(m) not in off]
     finally:
         watcher.evaluate('w=>w.restore()')
@@ -200,9 +229,16 @@ def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None):
     receipt={'source':'unresolved','rows':[],'marks':[],'dom_marks':0,'canvas_marks':0,
              'raw_price_labels':[],'price_label_source':None}
     label_sources={}
+    if clock_only:receipt['column_evidence']=[]
     for source,marks in marks_by_source:
         typed=sorted({(m[0],round(m[1]),round(m[2])) for m in marks})
         receipt[source+'_marks']=len(typed)
+        if clock_only:
+            dated=dated_column(typed,anchor)
+            if dated:
+                receipt['column_evidence'].append(dict(dated,source=source))
+            receipt['marks'].extend([list(t) for t in typed[:64] if _TIME.fullmatch(t[0])])
+            continue
         labels=price_labels(typed,anchor)
         if labels:
             label_sources[source]=labels

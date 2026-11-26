@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 import re
 
-from modern_map_cells import _agree, _numeric, _rounded, _verify_percent
+from modern_map_cells import _agree, _numeric, _percent, _rounded, _verify_percent
 from modern_map_evidence import equivalent, number
 from model1_execution import StageFailure
 
@@ -24,12 +24,50 @@ def require(condition, reason='evidence_number_mismatch'):
         raise StageFailure('source_not_readable', reason)
 
 
+def reject_observation(detail, reason='evidence_number_mismatch'):
+    error=StageFailure('source_not_readable',reason)
+    error.basic_reason=detail
+    raise error
+
+
 def stamp(raw):
-    require(isinstance(raw,str) and len(raw)<=32 and raw.endswith('Z'), 'hover_time_invalid')
+    require(isinstance(raw,str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z',raw), 'hover_time_invalid')
     try:
         return datetime.fromisoformat(raw.replace('Z','+00:00'))
     except ValueError:
         raise StageFailure('source_not_readable','hover_time_invalid') from None
+
+
+def period_seconds(raw):
+    match=re.fullmatch(r'([1-9]\d{0,3})(s|m|h|min|minutes?)',raw) if isinstance(raw,str) else None
+    if match is None:
+        reject_observation('column_period_missing_or_invalid','hover_time_invalid')
+    return int(match[1])*({'s':1,'h':3600}.get(match[2],60))
+
+
+def market_amounts(overview):
+    def read(name):
+        if name=='raw_largest_value' and overview.get(name) is None:
+            return None
+        if overview.get(name) in (None,''):
+            reject_observation(name.removeprefix('raw_')+'_missing')
+        return verified_number(overview[name],True)
+    values={name:read(name) for name in CORE_AMOUNTS}
+    if values['raw_total'][0]==0:
+        upper=values['raw_total'][1]
+        lower=lambda item:max(Decimal(0),item[0]-item[1])
+        if lower(values['raw_above_total'])+lower(values['raw_below_total'])>upper:
+            reject_observation('printed_zero_total_conflicts_with_sides')
+        values_to_check=[overview.get('raw_largest_value')]
+        rows=overview.get('sidebar_levels')
+        if isinstance(rows,list):
+            values_to_check.extend(row.get('raw_value') for row in rows if isinstance(row,dict))
+        if any(lower(verified_number(text,True))>upper for text in values_to_check if text is not None):
+            reject_observation('printed_zero_total_conflicts_with_levels')
+        # Even a consistent printed zero cannot provide the denominator that
+        # this result shape requires. Retain the source without inventing 0%.
+        reject_observation('printed_zero_total_percent_undefined')
+    return {name:values[name] if name in values else read(name) for name in AMOUNTS}
 
 
 def verified_number(raw, amount=False, *, positive=False):
@@ -59,7 +97,25 @@ def fact_rows(overview):
         require(isinstance(row,dict) and all(isinstance(row.get(k),str) for k in
                                             ('raw_price','raw_value','raw_distance_pct')), 'level_list_shape')
         out.append({k:row[k] for k in ('raw_price','raw_value','raw_distance_pct')})
-    return out
+    # The DOM reader returns unique rows as well as the raw, repeated triples.
+    # Preserve observed multiplicity for the existing source receipt and counter.
+    duplicates=overview.get('duplicate_sidebar_levels',0)
+    if not duplicates:
+        return out
+    original=overview.get('raw_sidebar_rows')
+    require(type(duplicates) is int and duplicates>0 and isinstance(original,list) and
+            len(original)==len(out)+duplicates and len(original)<=1600,'level_list_shape')
+    by_price={number(item['raw_price'])[0]:item for item in out}
+    expanded=[]
+    for triple in original:
+        require(isinstance(triple,list) and len(triple)==3 and all(isinstance(v,str) for v in triple),'level_list_shape')
+        price,amount,distance=(v.strip().replace(' ','').removeprefix('$') for v in triple)
+        item=by_price.get(number(price)[0])
+        require(item and number(amount,True)[0]==number(item['raw_value'],True)[0] and
+                _percent(distance,True)[0]==_percent(item['raw_distance_pct'],True)[0],'hover_evidence_mismatch')
+        expanded.append(dict(raw_price=price,raw_value=amount,raw_distance_pct=distance))
+    require({number(row['raw_price'])[0] for row in expanded}==by_price.keys(),'level_list_shape')
+    return expanded
 
 
 def raw_display(overview):
@@ -136,7 +192,6 @@ def collect_levels(sidebar, enrichment, ref, total):
 
 
 def _percent_equivalent(first,second):
-    from modern_map_cells import _percent
     return _agree(_percent(first,True),_percent(second,True))
 
 
@@ -201,8 +256,10 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
     source=stamp(source_time)
     col=stamp(column_time)
     captured=stamp(captured_at)
-    require(source_time_after==source_time and 0<=(source-col).total_seconds()<=1200 and
-            -120<=(captured-source).total_seconds()<=1200,'hover_snapshot_changed')
+    require(source_time_after==source_time and -120<=(captured-source).total_seconds()<=1200,'hover_snapshot_changed')
+    if not 0<=(source-col).total_seconds()<=period_seconds(overview.get('raw_column_period')):
+        reject_observation('column_outside_displayed_period','hover_source_stale')
+    nums=market_amounts(overview)
     require(end_observation is not None and isinstance(end_observation,dict),'hover_snapshot_changed')
     require(end_observation.get('source_time')==source_time_after,'hover_snapshot_changed')
     required_close=CORE_AMOUNTS
@@ -230,9 +287,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
         require(end_observation.get('chart_regions')==(len(chart_regions) if chart_regions is not None else None) and
                 end_observation.get('native_bins_inspected')==native_bins_inspected,'hover_snapshot_changed')
     raw={k:overview.get(k) for k in (*AMOUNTS,*PERCENTAGES,*REFERENCE)}
-    nums={k:verified_number(raw[k],True,positive=(k=='raw_total')) for k in AMOUNTS}
     step=verified_number(raw['raw_price_step'],positive=True)
-    require(isinstance(raw['raw_column_period'],str) and re.fullmatch(r'[1-9]\d{0,3}(?:s|m|h|min|minutes?)',raw['raw_column_period']))
     if raw['raw_largest_price'] is not None:
         verified_number(raw['raw_largest_price'],positive=True)
     equivalent(raw['raw_total'],[raw['raw_above_total'],raw['raw_below_total']])
@@ -261,8 +316,14 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
         values=[number(row['raw_value'],True) for row in levels if row['side']==side]
         maxval,delta=nums['raw_'+side+'_total']
         require(sum(v[0]-v[1] for v in values)<=maxval+delta, 'hover_evidence_mismatch')
-    maxval,maxerr=nums['raw_largest_value']
-    require(all(number(row['raw_value'],True)[0]-number(row['raw_value'],True)[1]<=maxval+maxerr for row in levels),'hover_evidence_mismatch')
+    maximum=nums['raw_largest_value']
+    if maximum is not None:
+        maxval,maxerr=maximum
+        require(all(number(row['raw_value'],True)[0]-number(row['raw_value'],True)[1]<=maxval+maxerr for row in levels),'hover_evidence_mismatch')
+        if raw['raw_largest_price'] is not None:
+            named=number(raw['raw_largest_price'])[0]
+            require(all(_agree(number(row['raw_value'],True),maximum) for row in levels
+                        if number(row['raw_price'])[0]==named),'hover_evidence_mismatch')
     regions=chart_groups(chart_regions,levels,step[0],ref[0],total,number(sidebar[0]['raw_price'])[0])
     if native_bins_inspected is not None:
         require(type(native_bins_inspected) is int and 0<native_bins_inspected<=1601)
@@ -295,7 +356,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
                 raw_last_price=raw_last_price,raw_last_price_after=raw_last_price_after,reference_price=_numeric(ref[0]),
                 source_sha256=source_sha256,provenance=provenance,end_reference_verified=end_ref is not None,
                 end_column_verified=column_time_after==column_time,metric_unit='source_metric',**raw,
-                parsed_amounts={k.removeprefix('raw_'):_numeric(v[0]) for k,v in nums.items()},
+                parsed_amounts={k.removeprefix('raw_'):_numeric(v[0]) if v is not None else None for k,v in nums.items()},
                 side_percent=sides,difference_above_minus_below=_numeric(nums['raw_above_total'][0]-nums['raw_below_total'][0]),
                 difference_percentage_points=ratio(nums['raw_above_total'][0]-nums['raw_below_total'][0],total),
                 strongest_observed_prices=strongest,levels=levels,chart_regions=regions,coverage=coverage,

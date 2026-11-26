@@ -120,6 +120,17 @@ class Flow(TestCase):
         with self.assertRaises(StageFailure) as caught:self.run_map(target,allow)
         self.assertEqual(caught.exception.code,code)
 
+    def test_requested_base_only_reaches_same_verified_document_and_observer(self):
+        account=Account(restored=True)
+        observe=Mock()
+        with patch.object(flow,'read_selected_map',return_value='numeric') as reader:
+            self.assertEqual(flow.collect_with_dedicated_session(account,self.context,self.page,BTC12,None,
+                allow_login=False,observe=observe,base_only=True),'numeric')
+        self.assertEqual(reader.call_args.args,(self.page,'BTC',1,'12H',None))
+        self.assertIs(reader.call_args.kwargs['base_only'],True)
+        self.assertIs(reader.call_args.kwargs['observe'],observe)
+        self.assertEqual(account.attempts,0)
+
     def test_bootstrap_checkpoint_before_failed_read_then_restore(self):
         self.read_errors=[StageFailure('source_timeout')]
         self.assert_code('source_timeout')

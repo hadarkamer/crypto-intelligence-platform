@@ -1,6 +1,7 @@
 """Acquire one BTC/1/12H basic snapshot from its rendered, protected Coin map."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
@@ -16,6 +17,7 @@ from model1_execution import StageFailure
 from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
 from modern_map_cells import _agree, merge_cells
+from modern_map_basic_numbers import market_amounts, period_seconds
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
 from modern_map_overview import _FIELDS, after_read_failure, overview
 from modern_map_surface import prepare_surface
@@ -66,12 +68,16 @@ def right_edge_regions(image, bounds, side, scale, model):
     return regions,counts['native_bins_inspected'],height
 
 
-def edge_open(surface,bounds,box):
+def edge_open(surface,bounds,box,*,include_time=False):
     # A historical-only card does not hide the current price column.
     _,top,right,bottom=bounds
     axis_end=box[0]+box[2]
-    return not any(r[0]<axis_end and r[2]>right-3 and r[1]<bottom+1 and r[3]>top
-                   for r in surface['unknown']+surface['covered'])
+    for x1,y1,x2,y2 in surface['unknown']+surface['covered']:
+        if x1<axis_end and x2>right-3 and y1<bottom+1 and y2>top:
+            return False
+        if include_time and x1<axis_end and x2>max(box[0],right-115) and y1<box[1]+box[3] and y2>bottom:
+            return False
+    return True
 
 
 def from_native_box(page, bounds, side):
@@ -102,20 +108,50 @@ def read_epoch(stamp, update):
 
 
 
-def closing_column(page,box,bounds,column,same_document,emit):
-    """Reobserve the latest displayed time; a source-update clock alone cannot prove it."""
+def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False,period=None,opening=False):
+    """Observe a displayed time. At opening the supplied date is an anchor only."""
+    phase='opening' if opening else 'closing'
+    def verify(stamp):
+        actual=read_epoch(stamp,iso(column))
+        if opening:
+            require(0<=(column-actual).total_seconds()<=period_seconds(period),'latest_column_not_within_period')
+        else:
+            require(actual==column,'closing_column_changed')
     _,top,right,bottom=bounds
     x,y=right-1,(top+bottom)//2
     try:
-        return ui.read_paint(page,box,x,y,observe=emit)
+        stamp,marks=ui.read_paint(page,box,x,y,observe=emit,fresh_pointer=base_only,pointer_phase=phase)
+        if base_only:
+            verify(stamp)
+            emit('stage',dict(name=phase+'_column_from_visible_crosshair',status='ok',
+                              source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
+        return stamp,marks
     except StageFailure as error:
         if error.code!='source_not_readable' or error.reason is not None:
             raise
     same_document()
+    if base_only:
+        # A different height on the same verified last column can expose the
+        # tooltip when its middle intersects the reference line or a price tag.
+        y=round(top+(bottom-top)*.35)
+        require(ui.chart_box(page)==box,'closing_geometry_changed_at_pointer')
     try:
         event=read_tooltip(page,box,bounds,column,x,y,ui.PAINT,
-                           deadline=time.monotonic()+ui.limited_timeout(1000)/1000)
+                           deadline=time.monotonic()+ui.limited_timeout(1000)/1000,clock_only=base_only)
+        if base_only:
+            event=dict(event,expected='dated_last_column_header_at_pointer',x=round(x),y=round(y))
         emit('hover',event)
+        if base_only:
+            evidence=event.get('column_evidence',[])
+            stamps={item['dated_title'] for item in evidence}
+            require(len(stamps)==1,phase+'_column_display_unavailable')
+            require(all(item['period_seconds']==period_seconds(period) for item in evidence),phase+'_column_period_changed')
+            stamp=stamps.pop()
+            verify(stamp)
+            same_document()
+            emit('stage',dict(name=phase+'_column_from_visible_tooltip',status='ok',
+                              source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
+            return stamp,[]
         # price_labels() already checked this *newly displayed* table has one
         # full-datetime title, regular times ending at column, and a price axis.
         stamps={m[0] for m in event.get('marks',()) if re.fullmatch(r'\d{1,2}/\d{1,2} \d{1,2}:\d{2}',m[0])}
@@ -225,7 +261,7 @@ def enrich_latest(page,box,bounds,side,column,scale,regions,height,deadline,stag
 
 
 @ui.phase('map_read')
-def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
+def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,base_only=False):
     from modern_map_basic_numbers import build_basic_snapshot
     require((symbol,model,timeframe)==('BTC',1,'12H'),'wrong_basic_target')
     def emit(kind,value):
@@ -256,7 +292,11 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
         stage('basic_identity_start',lambda:identity(page,symbol,model,timeframe))
         side=stage('read_market_overview',lambda:overview(page))
         emit('overview',side)
-        stage('verify_market_observation',lambda:ui.core_observation(side))
+        def validate_market():
+            if base_only:
+                market_amounts(side)
+            return ui.core_observation(side)
+        stage('verify_market_observation',validate_market)
         with ui.position_chart(page,protected) as initial_box:
             surface=stage('inspect_chart_obstruction',lambda:prepare_surface(page,initial_box,protected,ui.limited_timeout))
             box=ui.chart_box(page)
@@ -269,13 +309,17 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
                 emit('png',png)
                 digest=sha256(png).hexdigest()
                 bounds=stage('locate_dark_price_plot',lambda:ui.dark_bounds(screen,box))
-                require(edge_open(surface,bounds,box),'latest_price_edge_obstructed')
+                require(edge_open(surface,bounds,box,include_time=base_only),'latest_price_edge_obstructed')
                 left,top,right,bottom=bounds
                 middle=(top+bottom)//2
                 prior,prior_marks=stage('read_prior_crosshair_time',lambda:ui.read_paint(
                     page,box,left+.72*(right-left),middle,observe=emit))
-                current,initial_marks=stage('read_latest_crosshair_time',lambda:ui.read_paint(
-                    page,box,right-1,middle,observe=emit))
+                def read_opening_column():
+                    if base_only:
+                        return displayed_column(page,box,bounds,datetime.fromisoformat(side['source_time']),same_document,emit,
+                                                base_only=True,period=side.get('raw_column_period'),opening=True)
+                    return ui.read_paint(page,box,right-1,middle,observe=emit)
+                current,initial_marks=stage('read_latest_crosshair_time',read_opening_column)
                 column=read_epoch(current,side['source_time'])
                 previous=source_clock(prior,column,column=True,max_lag=12*3600)
                 require(0<(column-previous).total_seconds()<=12*3600 and
@@ -303,24 +347,51 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
                     def record(name,fn):
                         return stage(prefix+name,fn)
                     same_document()
-                    require(ui.chart_box(page)==box,'chart_geometry_changed')
-                    close_time,close_marks=record('recheck_latest_column',lambda:closing_column(
-                        page,box,bounds,column,same_document,emit))
-                    require(close_time==current,'closing_column_changed')
-                    with record('basic_closing_chart',lambda:source_screen(page,box,screen.size,protected)) as final:
-                        require(ui.dark_bounds(final,box)==bounds,'closing_price_domain_changed')
-                        end_marks=axis_marks(page,box,prior_marks,close_marks)
-                        end_scale=record('basic_closing_price_axis',lambda:axis_scale_live(final,box,bounds,end_marks))
-                        if end_scale is None:
-                            # A native boxed reference may be the only text readout. In
-                            # that case every pixel of the clean price axis must agree.
-                            axis=(right+1,top,box[0]+box[2],bottom+1)
-                            with screen.crop(axis) as a,final.crop(axis) as b:
-                                require(a.size[0]>=14 and a.tobytes()==b.tobytes(),'closing_axis_unverified')
-                            end_scale=scale
-                        require(number(end_scale[0])[0]==number(raw_ref)[0],'closing_reference_changed')
-                        final_regions,final_bins,_=right_edge_regions(final,bounds,side,end_scale,model)
-                        require(final_regions==regions and final_bins==native_bins,'closing_significant_regions_changed')
+                    with (ui.position_chart(page,protected) if base_only else nullcontext(box)) as closing_box:
+                        require(ui.chart_box(page)==closing_box,'chart_geometry_changed')
+                        if base_only:
+                            if not ui.choice(page,'Pan'):
+                                ui.select_choice(page,'Pan')
+                            require(ui.choice(page,'Pan'),'closing_pointer_mode_unverified')
+                            page.mouse.move(max(0,closing_box[0]-2),max(0,closing_box[1]-2))
+                            viewport=page.viewport_size or {}
+                            cx,cy,cw,ch=closing_box
+                            require(0<=cx<cx+cw<=viewport.get('width',0) and 0<=cy<cy+ch<=viewport.get('height',0),
+                                    'closing_chart_outside_viewport')
+                            current_surface=prepare_surface(page,closing_box,protected,ui.limited_timeout)
+                            require(ui.chart_box(page)==closing_box,'chart_geometry_changed')
+                        with record('basic_closing_chart',lambda:source_screen(page,closing_box,(viewport['width'],viewport['height']) if base_only else screen.size,protected)) as final:
+                            closing_bounds=ui.dark_bounds(final,closing_box)
+                            if base_only:
+                                clear=edge_open(current_surface,closing_bounds,closing_box,include_time=True)
+                                emit('stage',dict(name='basic_closing_geometry',status='ok' if clear else 'blocked',
+                                    canvas_rect=list(closing_box),plot_rect=list(closing_bounds),
+                                    opening_canvas_rect=list(box),opening_plot_rect=list(bounds),
+                                    viewport=[viewport['width'],viewport['height']],geometry_changed=box!=closing_box or bounds!=closing_bounds,
+                                    covered=len(current_surface['covered']),unknown=len(current_surface['unknown'])))
+                                require(clear,'closing_price_or_time_axis_obstructed')
+                            else:
+                                require(closing_bounds==bounds,'closing_price_domain_changed')
+                            close_time,close_marks=record('recheck_latest_column',lambda:displayed_column(
+                                page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period')))
+                            require(read_epoch(close_time,side['source_time'])==column,'closing_column_changed')
+                            end_marks=axis_marks(page,closing_box,prior_marks if box==closing_box else [],close_marks)
+                            end_scale=record('basic_closing_price_axis',lambda:axis_scale_live(final,closing_box,closing_bounds,end_marks))
+                            if end_scale is None:
+                                # Reuse the independently proven opening mapping only
+                                # if the complete right-axis band is byte-identical.
+                                l,t,r,b=closing_bounds
+                                dx,dy=l-left,t-top
+                                require((right+dx,bottom+dy)==(r,b),'closing_price_domain_changed')
+                                with screen.crop((right+1,top,box[0]+box[2],bottom+1)) as a, final.crop(
+                                        (r+1,t,closing_box[0]+closing_box[2],b+1)) as end_axis:
+                                    require(a.size[0]>=14 and a.size==end_axis.size and a.tobytes()==end_axis.tobytes(),
+                                            'closing_axis_unverified')
+                                end_scale=(raw_ref,lambda p:where(p)+dy)
+                            require(number(end_scale[0])[0]==number(raw_ref)[0],'closing_reference_changed')
+                            final_regions,final_bins,_=right_edge_regions(final,closing_bounds,side,end_scale,model)
+                            require(final_regions==regions and final_bins==native_bins,'closing_significant_regions_changed')
+                            require(ui.chart_box(page)==closing_box,'closing_geometry_changed_at_pointer')
                     after=record('recheck_market_update',lambda:overview(page))
                     record('basic_verify_closing_market',lambda:prove_observations(side,after))
                     record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
@@ -338,6 +409,8 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
                 base=stage('build_basic_result',lambda:build_basic_snapshot(side,**basic_args))
                 if emit('verified_basic',base) is False:
                     raise StageFailure('state_store_failed')
+                if base_only:
+                    return base
                 try:
                     try:
                         enrichment=enrich_latest(page,box,bounds,side,column,scale,regions,bin_height,

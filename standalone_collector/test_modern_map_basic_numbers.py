@@ -1,10 +1,13 @@
 """Numerical BASIC contract. All inputs here are local synthetic observations."""
 from copy import deepcopy
+from datetime import datetime,timezone
+from zoneinfo import ZoneInfo
 import json
 from pathlib import Path
 import unittest
 from model1_execution import StageFailure
 from modern_map_basic_numbers import SOURCE_URL, build_basic_snapshot,validate_basic_snapshot
+from modern_map_evidence import iso,source_clock
 
 STAMP='2026-11-26T15:00:00Z'
 
@@ -127,3 +130,81 @@ class BasicNumbersTests(unittest.TestCase):
         market,args=live_inputs();args['chart_regions'].append(dict(side='above',colour='yellow',prices=[110.01]))
         args['end_observation']['chart_regions']=3
         with self.assertRaises(StageFailure):build_basic_snapshot(market,**args)
+
+    def test_displayed_column_period_limits_latest_bucket_across_utc_and_israel_midnight(self):
+        instant=datetime(2027,1,1,0,2,tzinfo=timezone.utc)
+        at=iso(source_clock('00:02',instant))
+        self.assertEqual(iso(source_clock('12/31 23:59',instant,column=True)),'2026-12-31T23:59:00Z')
+        local=datetime(2026,11,27,0,1,tzinfo=ZoneInfo('Asia/Jerusalem'))
+        self.assertEqual(iso(source_clock('21:58',local.astimezone(timezone.utc))),'2026-11-26T21:58:00Z')
+        for col,ok in [('2026-12-31T23:59:00Z',True),('2026-12-31T23:57:00Z',True),
+                       ('2026-12-31T23:56:00Z',False),('2027-01-01T00:03:00Z',False)]:
+            market,args=live_inputs();market['source_time']=at
+            args.update(source_time_after=at,column_time=col,column_time_after=col,captured_at=at)
+            args['end_observation'].update(source_time=at,column_time=col)
+            with self.subTest(column=col):
+                if ok:self.assertEqual(build_basic_snapshot(market,**args)['column_time'],col)
+                else:
+                    with self.assertRaises(StageFailure) as caught:build_basic_snapshot(market,**args)
+                    self.assertEqual(caught.exception.basic_reason,'column_outside_displayed_period')
+
+    def test_actual_sidebar_duplicates_compacted_by_dom_reader_are_counted_on_restart(self):
+        market,args=live_inputs()
+        dup=[['110','10.0M','+10.00%'],['90','10.0M','-10.00%'],['110','$10.00M','+10.0%']]
+        for obs in [market,args['end_observation']]:obs.update(raw_sidebar_rows=deepcopy(dup),duplicate_sidebar_levels=1)
+        source=build_basic_snapshot(market,**args);self.assertEqual(source['coverage']['duplicates_removed'],1)
+        self.assertEqual((source['coverage']['verified_amount'],len(source['source_evidence']['sidebar_rows'])),(20_000_000,3))
+        self.assertEqual(validate_basic_snapshot(source),source)
+        market['raw_sidebar_rows'][-1][1]='11.0M'
+        with self.assertRaises(StageFailure):build_basic_snapshot(market,**args)
+
+    def test_real_zero_observed_side_and_realized_amount_are_numerically_valid(self):
+        market,args=live_inputs()
+        market.update(raw_above_total='100M',raw_below_total='0',raw_above_pct='100%',raw_below_pct='0%',
+                      raw_realized_total='35.0K',raw_realized_longs='0',raw_realized_shorts='35.0K')
+        market['sidebar_levels'][1]['raw_value']='0';args['end_observation'].update(market,raw_last_price='100')
+        source=build_basic_snapshot(market,**args)
+        self.assertEqual(source['parsed_amounts']['realized_longs'],0)
+        self.assertEqual(source['side_percent'],{'above':100,'below':0})
+        self.assertEqual((source['chart_regions'][0]['amount'],source['chart_regions'][0]['share_pct']),(0,0))
+        market['raw_below_total']=None;args['end_observation']['raw_below_total']=None
+        with self.assertRaises(StageFailure) as caught:build_basic_snapshot(market,**args)
+        self.assertEqual(caught.exception.basic_reason,'below_total_missing')
+
+    def test_explicit_empty_denominator_never_converted_to_absent_or_false_zero_percent(self):
+        for total,above,largest,reason in [(None,'0',None,'total_missing'),('0','0',None,'printed_zero_total_percent_undefined'),
+                                   ('0','55M','20M','printed_zero_total_conflicts_with_sides'),
+                                   ('0','0','3M','printed_zero_total_conflicts_with_levels')]:
+            market,args=live_inputs();market.update(raw_total=total,raw_above_total=above,raw_below_total='0',raw_largest_value=largest,sidebar_levels=[])
+            args['end_observation'].update(market)
+            with self.subTest(total=total,above=above),self.assertRaises(StageFailure) as caught:
+                build_basic_snapshot(market,**args)
+            self.assertEqual(caught.exception.basic_reason,reason)
+
+    def test_tied_rounded_maxima_and_named_source_max_price(self):
+        market,args=live_inputs();market['sidebar_levels'].append(dict(raw_price='115',raw_value='10.0M',raw_distance_pct='+15.00%'))
+        market['raw_largest_price']='110';args['end_observation'].update(market,sidebar_rows=3,raw_last_price='100')
+        result=build_basic_snapshot(market,**args)
+        self.assertEqual(result['strongest_observed_prices'],{'above':['110','115'],'below':['90']})
+        market['sidebar_levels'][0]['raw_value']='8.0M'
+        with self.assertRaises(StageFailure):build_basic_snapshot(market,**args)
+
+    def test_unprinted_global_max_stays_unknown_despite_verified_sidebar_and_regions(self):
+        market,args=live_inputs();market['raw_largest_value']=None;args['end_observation']['raw_largest_value']=None
+        source=build_basic_snapshot(market,**args)
+        self.assertIsNone(source['raw_largest_value']);self.assertIsNone(source['parsed_amounts']['largest_value'])
+        self.assertEqual(source['strongest_observed_prices'],{'above':['110'],'below':['90']})
+        self.assertEqual(source['coverage']['regions_with_amount'],1)
+        self.assertEqual(validate_basic_snapshot(source),source)
+        market['raw_largest_value']='0';args['end_observation']['raw_largest_value']='0'
+        with self.assertRaises(StageFailure):build_basic_snapshot(market,**args)
+        for row in market['sidebar_levels']:row['raw_value']='0'
+        source=build_basic_snapshot(market,**args)
+        self.assertEqual((source['raw_largest_value'],source['parsed_amounts']['largest_value']),('0',0))
+
+    def test_native_group_cannot_cross_or_touch_reference_price(self):
+        for rates in ([95,100,105],[100,105],[99,104]):
+            market,args=live_inputs();args['chart_regions']=[dict(side='above',colour='green',prices=rates)]
+            args['end_observation']['chart_regions']=1
+            with self.subTest(prices=rates),self.assertRaises(StageFailure) as caught:build_basic_snapshot(market,**args)
+            self.assertEqual(caught.exception.reason,'side_conflicts_with_price')

@@ -24,7 +24,8 @@ class NumericPublication(unittest.TestCase):
         self.snapshot = live_sample()
         self.snapshot['source_sha256'] = sha256(self.image).hexdigest()
 
-    def capture(self,symbol,model,timeframe,image_path,observe):
+    def capture(self,symbol,model,timeframe,image_path,observe,base_only):
+        self.assertIs(base_only,True)
         self.assertEqual((symbol,model,timeframe),('BTC',1,'12H'))
         image_path.write_bytes(self.image)
         return deepcopy(self.snapshot)

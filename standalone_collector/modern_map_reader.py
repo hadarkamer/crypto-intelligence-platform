@@ -331,28 +331,40 @@ def clear_cookie_notice(page, *, model=None):
         raise StageFailure('source_not_readable', error.reason) from error
 
 
-def read_paint(page, box, x, y, *, observe=None):
+def read_paint(page, box, x, y, *, observe=None, fresh_pointer=False, pointer_phase='closing'):
     page.mouse.move(box[0]-2, max(1,box[1]-2))
+    def dom_dates():
+        dates=set()
+        for marker in visible(page.get_by_text(re.compile(r'^\d{1,2}/\d{1,2} \d{2}:\d{2}$'))):
+            pos=marker.bounding_box()
+            if pos:
+                cx,cy=round(pos['x']+pos['width']/2),round(pos['y'])
+                if abs(cx-x)<95 and box[1]+.78*box[3]<=cy<=box[1]+box[3]:
+                    dates.add((marker.inner_text().strip(),cx,cy))
+        return dates
+    inactive=dom_dates() if fresh_pointer else set()
     watch = page.evaluate_handle(PAINT, list(box))
     try:
-        page.mouse.move(x-2,y)
+        if not fresh_pointer:
+            page.mouse.move(x-2,y)
         page.mouse.move(x,y)
         seen=[]
+        observed_dom=set()
         def timestamp():
             labels=watch.evaluate('w=>w.labels')
             seen[:]=[(v[0],round(v[1]),round(v[2])) for v in labels if ':' in v[0]]
-
-            stamps = {p[0] for p in labels if '/' in p[0] and abs(p[1]-x)<115 and
-                      box[1]+.78*box[3] <= p[2] <= box[1]+box[3]}
-            for marker in visible(page.get_by_text(re.compile(r'^\d{1,2}/\d{1,2} \d{2}:\d{2}$'))):
-                pos=marker.bounding_box()
-                if (pos and abs(pos['x']+pos['width']/2-x)<95 and
-                    box[1]+.78*box[3]<=pos['y']<=box[1]+box[3]):
-                    stamps.add(marker.inner_text().strip())
-            if len(stamps) == 1:
-                # Canvas text can be painted behind a late consent banner.
+            painted={p[0] for p in labels if '/' in p[0] and abs(p[1]-x)<115 and
+                     box[1]+.78*box[3] <= p[2] <= box[1]+box[3]}
+            observed_dom.clear()
+            observed_dom.update(dom_dates()-inactive)
+            stamps=painted|{p[0] for p in observed_dom}
+            if len(stamps)==1:
                 clear_cookie_notice(page)
-                return stamps.pop(), labels
+                stamp=stamps.pop()
+                if fresh_pointer and observe:
+                    observe('stage',dict(name=pointer_phase+'_crosshair_evidence',status='ok',source_timestamp=stamp,
+                           pointer_x=round(x),pointer_y=round(y),canvas_count=len(painted),dom_count=len(observed_dom)))
+                return stamp,labels
             return None
         try:
             return wait_for(page,timestamp,timeout=3)
@@ -360,7 +372,8 @@ def read_paint(page, box, x, y, *, observe=None):
             if observe:
                 observe('hover',{'source':'unresolved','rows':[],
                                 'marks':[list(m) for m in sorted(set(seen))[:256]],
-                                'expected':'bottom_crosshair_time_at_pointer','x':round(x),'y':round(y)})
+                                'expected':'bottom_crosshair_time_at_pointer','x':round(x),'y':round(y),
+                                'candidate_dom_dates':[list(v) for v in sorted(observed_dom)[:12]]})
             raise
     finally:
         watch.evaluate('w=>w.restore()')
@@ -530,10 +543,12 @@ def read_map(page, symbol, model, timeframe, output):
         return read_selected_map(page,symbol,model,timeframe,output)
 
 
-def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None):
+def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None,base_only=False):
     if (symbol,model,timeframe)==('BTC',1,'12H'):
         from modern_map_basic import capture_basic
-        return capture_basic(page,symbol,model,timeframe,output,guard=guard,observe=observe)
+        return capture_basic(page,symbol,model,timeframe,output,guard=guard,observe=observe,base_only=base_only)
+    if base_only:
+        raise ValueError('base_only requires BTC / Model 1 / Coin / 12H')
     return read_strict_selected_map(page,symbol,model,timeframe,output,guard=guard,observe=observe)
 
 

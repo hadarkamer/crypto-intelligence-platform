@@ -180,12 +180,12 @@ def _refresh_rotated_state(session, context):
         return
 
 
-def collect_with_dedicated_session(session, context, page, target, output, *, allow_login=True, observe=None):
+def collect_with_dedicated_session(session, context, page, target, output, *, allow_login=True, observe=None, base_only=False):
     """At most one renewal per work item. The parent durably fences all jobs."""
     reader = read_selected_map
-    if observe is not None:
+    if base_only or observe is not None:
         from functools import partial
-        reader = partial(read_selected_map, observe=observe)
+        reader = partial(read_selected_map, observe=observe, base_only=base_only)
 
     cooldown = session.source_cooldown()
     if cooldown['code'] != 'allowed':

@@ -78,13 +78,14 @@ class MeasuredCheckpoint(unittest.TestCase):
         self.snapshot['source_sha256'] = sha256(FIXTURE.read_bytes()).hexdigest()
         self.starts = 0
 
-    def capture(self, symbol, model, tf, path, observe):
+    def capture(self, symbol, model, tf, path, observe, base_only):
+        self.assertIs(base_only,True)
         self.starts += 1
         path.write_bytes(FIXTURE.read_bytes())
         observe('overview',dict(source_time=self.snapshot['source_time'],raw_total='1.29B'))
         return deepcopy(self.snapshot)
 
-    async def attempt(self, *, fail_save=False):
+    async def attempt(self, *, fail_save=False, base_only=True):
         async with checkpoint.workspace(self.job,'12H',1,'BTC',lambda _: self.store,True) as (directory,channel):
             root = Path(directory)
             env = {'DATABASE_URL':'private','COINGLASS_LOGIN_PASSWORD':'private','OPENAI_API_KEY':'dummy'}
@@ -100,7 +101,7 @@ class MeasuredCheckpoint(unittest.TestCase):
                     raise OSError('lost publication')
                 return write(path,value)
             with patch.dict(os.environ,{checkpoint.FD:str(fd)}), patch.object(task,'capture',side_effect=self.capture), patch.object(task,'_write_once',side_effect=write_result):
-                await asyncio.to_thread(task._run_basic_btc,root,self.job)
+                await asyncio.to_thread(task._run_basic_btc,root,self.job,base_only=base_only)
             return json.loads((root/'result.json').read_text())
 
     def test_resume_in_new_workspace_after_lost_numeric_delivery(self):
@@ -134,7 +135,7 @@ class MeasuredCheckpoint(unittest.TestCase):
         self.assertEqual(result['run_id'],self.job)
 
     def test_partial_is_private_and_cannot_replace_full(self):
-        def lost_map(symbol,model,tf,path,observe):
+        def lost_map(symbol,model,tf,path,observe,base_only):
             path.write_bytes(FIXTURE.read_bytes())
             observe('overview',dict(raw_total='1.29B',source_time=self.snapshot['source_time'],
                                     extra='excluded-private-fixture'))
@@ -180,12 +181,13 @@ class MeasuredCheckpoint(unittest.TestCase):
     def test_lost_worker_after_initial_fence_resumes_basic_without_recapture(self):
         count = []
         durable = checkpoint.CheckpointStore(self.store,self.job)
-        def die_after_first_fence(symbol,model,tf,path,observe):
+        def die_after_first_fence(symbol,model,tf,path,observe,base_only):
+            self.assertIs(base_only,True)
             count.append(True)
             path.write_bytes(FIXTURE.read_bytes())
             observe('verified_basic',self.snapshot)
             self.assertEqual(durable.read()[0]['source']['snapshot'],self.snapshot)
-            raise OSError('worker exited during optional read')
+            raise OSError('worker exited after BASIC commit and before result delivery')
         with patch.object(self,'capture',side_effect=die_after_first_fence):
             with self.assertRaises(OSError):
                 asyncio.run(self.attempt())
@@ -202,14 +204,14 @@ class MeasuredCheckpoint(unittest.TestCase):
                   source_time=args['source_time_after'],column_time=args['column_time'])
         enriched = build_basic_snapshot(market,**args,enrichment=[cell])
         durable = checkpoint.CheckpointStore(self.store,self.job)
-        def complete(symbol,model,tf,path,observe):
+        def complete(symbol,model,tf,path,observe,base_only):
             path.write_bytes(FIXTURE.read_bytes())
             observe('verified_basic',self.snapshot)
             self.assertEqual(durable.read()[0]['source']['snapshot']['collection_tier'],'basic')
             return enriched
         with patch.object(self,'capture',side_effect=complete) as capture:
             with self.assertRaises(OSError):
-                asyncio.run(self.attempt(fail_save=True))
+                asyncio.run(self.attempt(fail_save=True,base_only=False))
             previous,image=durable.read()
             self.assertEqual(previous['source']['snapshot'],enriched)
             with TemporaryDirectory() as tmp:
@@ -236,12 +238,12 @@ class MeasuredCheckpoint(unittest.TestCase):
                   source_time=args['source_time_after'],column_time=args['column_time'])
         duplicate=build_basic_snapshot(market,enrichment=[cell],**args)
         self.assertEqual(duplicate['collection_tier'],'basic')
-        def capture_duplicate(symbol,model,tf,path,observe):
+        def capture_duplicate(symbol,model,tf,path,observe,base_only):
             path.write_bytes(FIXTURE.read_bytes())
             observe('verified_basic',self.snapshot)
             return duplicate
         with patch.object(self,'capture',side_effect=capture_duplicate):
-            self.assertEqual(asyncio.run(self.attempt())['basic_snapshot'],self.snapshot)
+            self.assertEqual(asyncio.run(self.attempt(base_only=False))['basic_snapshot'],self.snapshot)
         durable=checkpoint.CheckpointStore(self.store,self.job)
         base,image=durable.read()
         # Independently coherent figures on a different source observation with the
@@ -259,7 +261,7 @@ class MeasuredCheckpoint(unittest.TestCase):
         self.assertEqual(durable.read(),(base,image))
 
     def test_read_failure_after_fence_still_publishes_verified_basic(self):
-        def fail_optional(symbol,model,tf,path,observe):
+        def fail_optional(symbol,model,tf,path,observe,base_only):
             path.write_bytes(FIXTURE.read_bytes())
             observe('verified_basic',self.snapshot)
             raise StageFailure('source_timeout')
@@ -267,6 +269,27 @@ class MeasuredCheckpoint(unittest.TestCase):
             result=asyncio.run(self.attempt())
         self.assertEqual(capture.call_count,1)
         self.assertEqual(result['basic_snapshot'],self.snapshot)
+
+    def test_base_only_rejects_unexpected_optional_data_but_restores_previously_accepted_source(self):
+        from modern_map_basic_numbers import build_basic_snapshot
+        from test_modern_map_basic_numbers import live_inputs
+        market,args=live_inputs()
+        args['source_sha256']=self.snapshot['source_sha256']
+        cell=dict(source='hover',raw_price='110',raw_value='10.0M',raw_price_step='5.00',
+                  source_time=args['source_time_after'],column_time=args['column_time'])
+        duplicate=build_basic_snapshot(market,**args,enrichment=[cell])
+        def wrong_reader(symbol,model,tf,path,observe,base_only):
+            self.assertTrue(base_only)
+            path.write_bytes(FIXTURE.read_bytes())
+            observe('verified_basic',self.snapshot)
+            return duplicate
+        with patch.object(self,'capture',side_effect=wrong_reader) as calls:
+            with self.assertRaises(StageFailure):
+                asyncio.run(self.attempt())
+            result=asyncio.run(self.attempt())
+        self.assertEqual(calls.call_count,1)
+        self.assertEqual(result['basic_snapshot'],self.snapshot)
+        self.assertEqual(result['basic_snapshot']['enrichment']['observations'],0)
 
     def test_unverified_receipt_cannot_displace_ready_source(self):
         original = asyncio.run(self.attempt())

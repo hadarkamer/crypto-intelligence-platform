@@ -12,10 +12,9 @@ PLOT=(0,0,65,773)
 
 
 class PrintedPriceTests(TestCase):
-    def test_both_real_filtered_charts_without_numeric_dom_or_runtime_ocr(self):
-        # The E fixture contains only the rightmost 66 plot pixels and the axis.
-        # Its source image is the retained 15:00 market PNG from the app job.
-        for stamp,shown,center in [('1343','60,861',373.5),('1500','60,677',397.5)]:
+    def test_real_filtered_charts_without_numeric_dom_or_runtime_ocr(self):
+        # Each crop contains the rightmost 66 plot pixels and the original price axis.
+        for stamp,shown,center in [('1343','60,861',373.5),('1500','60,677',397.5),('1608','60,652',381.0)]:
             with self.subTest(stamp=stamp), Image.open(FIXTURES/f'btc_12h_{stamp}_axis_edge.png') as image:
                 raw,where=axis_scale_live(image,BOX,PLOT,[])
                 self.assertEqual(raw,shown)
