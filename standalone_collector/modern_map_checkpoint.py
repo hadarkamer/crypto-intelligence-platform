@@ -1,4 +1,4 @@
-"""Commit one BTC/1/12H capture and its interpretation in the bridge's existing private evidence row."""
+"""Commit one BTC/1/12H capture and its protected numerical evidence in the bridge's existing private evidence row."""
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +15,6 @@ KEY = 'measured_btc_v1'
 PARTIAL = 'measured_btc_partial_v1'
 FD = 'COINGLASS_MEASURED_ACK_FD'
 SOURCE = 'measured-source.json'
-ANSWER = 'measured-interpretation.json'
-CLAIM = 'measured-analysis-started.json'
 MAX_RECORD = 2 * 1024 * 1024
 MAX_IMAGE = 4 * 1024 * 1024
 RETAIN_DIAGNOSTIC = """INSERT INTO public.ai_collection_bridge_evidence AS e(job_id,image_png,diagnostic)
@@ -134,7 +132,7 @@ class CheckpointStore:
         return row['checkpoint'],bytes(row['image_png'])
 
     def commit(self, action, root):
-        """A job lock serializes claim/response; acknowledgement follows a committed transaction."""
+        """Acknowledge verified source or partial evidence only after the database commit."""
         with self.job_store.connect() as connection:
             job = connection.execute("""SELECT id FROM public.ai_collection_bridge_jobs WHERE id=%s
                 AND status='running' AND symbol='BTC' AND heatmap_model=1 AND timeframe='12H'
@@ -168,6 +166,8 @@ class CheckpointStore:
                     raise ValueError('measured_record_image')
                 digest = hashlib.sha256(image).hexdigest()
                 _identity(source,self.job,digest)
+                from modern_map_task import numeric_result
+                numeric_result(source['snapshot'],self.job,image)
                 if previous:
                     if previous.get('source') != source: raise ValueError('measured_source_changed')
                     return
@@ -176,23 +176,7 @@ class CheckpointStore:
                     diagnostic=ai_collection_bridge_evidence.diagnostic || EXCLUDED.diagnostic""",
                     (self.job,image,json.dumps({KEY:{'source':source}},allow_nan=False)))
                 return
-            if not previous:
-                raise ValueError('measured_source_missing')
-            if action == b'C':
-                if previous.get('claimed'):
-                    raise ValueError('measured_analysis_outcome_pending')
-                previous['claimed'] = True
-            elif action == b'V':
-                answer = _json(root/ANSWER,32768)
-                if (not previous.get('claimed') or (answer.get('run_id'),answer.get('image_sha256')) !=
-                        (self.job,previous['source']['image_sha256']) or previous.get('answer',answer) != answer):
-                    raise ValueError('measured_analysis_binding')
-                previous['answer'] = answer
-            else:
-                raise ValueError('measured_checkpoint_action')
-            connection.execute("""UPDATE public.ai_collection_bridge_evidence
-                SET diagnostic=jsonb_set(diagnostic,'{measured_btc_v1}',%s::jsonb)
-                WHERE job_id=%s""",(json.dumps(previous,allow_nan=False),self.job))
+            raise ValueError('measured_checkpoint_action')
 
 
 def restore(root, job, entry):
@@ -205,10 +189,6 @@ def restore(root, job, entry):
     _identity(source,job,digest)
     (root/'image.png').write_bytes(image)
     _write_once(root/SOURCE,source)
-    if record.get('claimed'):
-        _write_once(root/CLAIM,dict(run_id=job,image_sha256=digest))
-    if record.get('answer'):
-        _write_once(root/ANSWER,record['answer'])
     return True
 
 
@@ -236,6 +216,8 @@ class CheckpointChannel:
             from session_runtime import WORKER_ENV
             for key in set(env)-WORKER_ENV:
                 del env[key]
+        for key in ('OPENAI_API_KEY','OPENAI_MARKET_SCANNER_MODEL'):
+            env.pop(key,None)
         fd = self.child.fileno()
         env[FD] = str(fd)
         return (*pass_fds,fd)
@@ -259,9 +241,9 @@ async def workspace(job,tf,model,symbol,store_factory,enabled):
             if task:
                 await task
             channel.channel.close()
-            # If acknowledging a known local snapshot/answer failed, make one
+            # If acknowledging a known local snapshot failed, make one
             # idempotent save before the private working directory is released.
-            if channel.failed in (b'P',b'S',b'V'):
+            if channel.failed in (b'P',b'S'):
                 await asyncio.to_thread(store.commit,channel.failed,Path(tmp))
 
 

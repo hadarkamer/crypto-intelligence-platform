@@ -423,11 +423,7 @@ def measure_box(page, bounds, y1, y2, *, require_leader=True):
     return measure_panel(page,right_edge,require_leader=require_leader)
 
 
-def display_ready(page):
-    select_option(page,'Layout','Single chart')
-    select_option(page,'Lens','Heat')
-    select_option(page,'Colours','Viridis')
-    select_choice(page,'Pan')
+def full_intensity(page):
     def intensity():
         return label(page,'Intensity').evaluate("""el=>{
           for(let n=el;n&&n!==document.body;n=n.parentElement) {
@@ -435,13 +431,19 @@ def display_ready(page):
             if(s.includes('%'))return s;
           }return '';
         }""")
-    def full():
-        s=intensity()
-        return bool(re.search(r'(?:≥|>=)\s*0\s*%',s) and re.search(r'(?:≤|<=)\s*100\s*%',s))
-    if not full():
+    s=intensity()
+    return bool(re.search(r'(?:≥|>=)\s*0\s*%',s) and re.search(r'(?:≤|<=)\s*100\s*%',s))
+
+
+def display_ready(page):
+    select_option(page,'Layout','Single chart')
+    select_option(page,'Lens','Heat')
+    select_option(page,'Colours','Viridis')
+    select_choice(page,'Pan')
+    if not full_intensity(page):
         one(page.get_by_role('button',name=re.compile('lowest intensity',re.I))).press('Home')
         one(page.get_by_role('button',name=re.compile('full.brightness intensity',re.I))).press('End')
-        wait_for(page,full)
+        wait_for(page,lambda:full_intensity(page))
 
 
 def evidence_controls(page,symbol,model):
@@ -528,8 +530,15 @@ def read_map(page, symbol, model, timeframe, output):
         return read_selected_map(page,symbol,model,timeframe,output)
 
 
-@phase('map_read')
 def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None):
+    if (symbol,model,timeframe)==('BTC',1,'12H'):
+        from modern_map_basic import capture_basic
+        return capture_basic(page,symbol,model,timeframe,output,guard=guard,observe=observe)
+    return read_strict_selected_map(page,symbol,model,timeframe,output,guard=guard,observe=observe)
+
+
+@phase('map_read')
+def read_strict_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None):
     if guard:guard()
     clear_cookie_notice(page, model=model)
     def clear_surface():

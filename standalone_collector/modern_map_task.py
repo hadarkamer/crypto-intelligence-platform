@@ -1,11 +1,10 @@
-"""One managed-session map, one PNG and one bounded visual verification."""
+"""Collect one managed-session map and publish the validated result for its reader."""
 from __future__ import annotations
 
 import hashlib
 import json
 import math
 import os
-import re
 from pathlib import Path
 
 from collection_metrics import phase, task_metrics
@@ -35,84 +34,6 @@ def scan_schema():
                               observed_mode=enum('Coin','Pair','unknown'),readable={'type':'boolean'},
                               blocking_condition=enum('none','loading','login','blur','challenge','unknown'),
                               short_summary=text,prominent_levels={'type':'array','items':candidate}))
-
-
-MEASURED_INSTRUCTIONS = """Write a concise qualitative Hebrew summary of this single verified heatmap.
-Explain the relative distribution and prominent clusters, and the limits of coverage. Open levels differ
-from completed liquidations. Only describe supplied observations. Do not transcribe, estimate or calculate
-numbers, forecast, give advice or invent levels. All displayed figures and cluster membership come from code."""
-
-
-def summary_schema():
-    return object_schema({'short_summary': {'type': 'string'}})
-
-
-def interpretation_inputs(snapshot, overview=None):
-    """Project only market labels with verified types from this map update into the request."""
-    from modern_map_cells import map_metrics, metrics_from_overview
-    overview = overview or {}
-    metrics = metrics_from_overview(snapshot, overview) if overview else map_metrics(snapshot)
-    facts = {k: snapshot[k] for k in ('symbol','heatmap_model','timeframe','mode','source_time',
-                                      'column_time','raw_last_price','raw_price_step','raw_above_total','raw_below_total')}
-    for field in ('raw_total','raw_realized_total','raw_realized_longs','raw_realized_shorts',
-                  'raw_largest_price','raw_largest_value'):
-        raw = overview.get(field)
-        if raw is not None:
-            number(raw, field != 'raw_largest_price')
-        facts[field] = (None if field.startswith('raw_realized_') and
-                        metrics.get('realized_24h_status') == 'component_total_conflict' else raw)
-    if overview:
-        known = set(facts) | {'sidebar_levels', 'sidebar_shape', 'raw_column_period','raw_above_pct',
-                              'raw_below_pct','raw_updated_at'}
-        facts['missing_fields'] = sorted({k for k in known if k in overview.get('missing_fields',[])})
-        facts['ambiguous_fields'] = sorted({k for k in known if k in overview.get('ambiguous_fields',[])})
-        facts['realized_24h_status'] = metrics['realized_24h_status']
-        facts['sidebar_price_amount_distance'] = []
-        for row in overview.get('sidebar_levels', []):
-            price, amount, distance = (row.get(k) for k in ('raw_price','raw_value','raw_distance_pct'))
-            number(price)
-            number(amount, True)
-            if distance is not None and not re.fullmatch(r'[+−-]?\d+(?:\.\d+)?%', distance):
-                raise StageFailure('source_not_readable', 'sidebar_distance_unverified')
-            facts['sidebar_price_amount_distance'].append([price, amount, distance])
-        period = overview.get('raw_column_period')
-        if period is not None and not re.fullmatch(r'\d+(?:s|m|h|min|minutes?)', period):
-            raise StageFailure('source_not_readable', 'column_period_unverified')
-        facts['column_period'] = period
-        facts['sidebar_coverage'] = 'Displayed highlights; chart candidates assessed separately'
-    facts['side_percent'] = metrics['side_percent']
-    facts['denominator_basis'] = metrics['denominator_basis']
-    facts['cluster_columns'] = ['side','colour','low','high','raw_total','distance_pct','liquidity_share_pct']
-    rows = [[row[k] for k in facts['cluster_columns']] for row in metrics['clusters']]
-    return MEASURED_INSTRUCTIONS + ' Verified market data: ' + json.dumps(facts, separators=(',', ':'), default=str), rows
-
-
-def normalized_summary(raw, snapshot, run_id, image, overview=None):
-    """Identity, coverage, prices and membership were verified by the reader before capture."""
-    if (not isinstance(raw, dict) or set(raw) - {'short_summary','model','usage'} or
-            not isinstance(raw.get('model'), str) or not 1 <= len(raw['model']) <= 100):
-        raise StageFailure('analysis_response_invalid')
-    summary = raw.get('short_summary')
-    if not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 1000 or re.search(r'[\d$%€]', summary):
-        raise StageFailure('analysis_response_invalid', 'qualitative_summary_expected')
-    if ((snapshot['symbol'],snapshot['heatmap_model'],snapshot['timeframe'],snapshot['mode']) != ('BTC',1,'12H','Coin')
-            or snapshot['source_time'] != snapshot['source_time_after']
-            or snapshot['column_time'] != snapshot['column_time_after']):
-        raise StageFailure('source_not_readable', 'analysis_snapshot_identity_or_epoch')
-    groups = snapshot['groups']
-    validate_groups(groups, number(snapshot['raw_last_price'])[0], snapshot['raw_price_step'],
-                    snapshot['raw_above_total'], snapshot['raw_below_total'])
-    amounts = [number(group['raw_total'], True)[0] for group in groups]
-    largest = max(amounts)
-    scores = [float(amount / largest) for amount in amounts]
-    result = _normalized_result(raw, snapshot, run_id, image, scores)
-    if overview:
-        from modern_map_cells import display_facts_summary, metrics_from_overview
-        metrics = metrics_from_overview(snapshot, overview)
-        prose = 'פרשנות: ' + summary.strip()
-        source_lines = display_facts_summary(snapshot, overview, metrics, 4499-len(prose))
-        result['summary'] = source_lines + '\n' + prose
-    return result
 
 
 def normalized(raw, snapshot, run_id, image):
@@ -232,7 +153,6 @@ def run_modern_task(timeframe,run_id,output):
 
 
 def _run(timeframe,run_id,root):
-    from market_vision.openai_heatmap_scanner import analyze_heatmap_images
     from modern_map_reader import map_url
     symbol=os.environ['COLLECTION_HEATMAP_SYMBOL']
     map_url(symbol)
@@ -240,7 +160,8 @@ def _run(timeframe,run_id,root):
     if raw_model not in ('1','2','3') or timeframe not in ('12H','24H','48H'):
         raise ValueError('Invalid capture identity')
     if (symbol,raw_model,timeframe) == ('BTC','1','12H'):
-        return _run_measured_btc(root,run_id,analyze_heatmap_images)
+        return _run_basic_btc(root,run_id)
+    from market_vision.openai_heatmap_scanner import analyze_heatmap_images
     path=root/'image.png'
     stage('capture')
     snapshot=capture(symbol,int(raw_model),timeframe,path)
@@ -277,19 +198,44 @@ def _write_once(path, value):
         os.unlink(temp)
 
 
-def _run_measured_btc(root, run_id, analyze):
+def numeric_result(snapshot, job_id, png_bytes):
+    """Only a live, end-verified BASIC observation can become a ready job."""
+    from uuid import UUID
+    from modern_map_basic_numbers import validate_basic_snapshot
+    try:
+        valid_id = str(UUID(job_id)) == job_id
+    except (TypeError, ValueError, AttributeError):
+        valid_id = False
+    if not valid_id or len(png_bytes) > 4*1024*1024 or not png_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise StageFailure('image_evidence_invalid')
+    digest = hashlib.sha256(png_bytes).hexdigest()
+    snapshot = validate_basic_snapshot(snapshot)
+    if snapshot.get('source_sha256') != digest:
+        raise StageFailure('image_evidence_invalid')
+    if (snapshot.get('provenance') != 'live' or snapshot.get('end_column_verified') is not True
+            or snapshot.get('end_reference_verified') is not True):
+        raise StageFailure('source_not_readable','live_basic_verification_missing')
+    return dict(schema_version='coinglass-model1.v1', result_type='verified_basic', run_id=job_id,
+                symbol='BTC', heatmap_model=1, timeframe='12H', source_url=snapshot['source_url'],
+                captured_at=snapshot['captured_at'], source_updated_at=snapshot['source_time'],provider='CoinGlass',
+                evidence=dict(artifact_id=job_id,sha256=digest,content_type='image/png'),basic_snapshot=snapshot)
+
+
+def _run_basic_btc(root, run_id):
     from modern_map_checkpoint import acknowledgements
     with acknowledgements() as acknowledge:
-        return _process_measured_btc(root,run_id,analyze,acknowledge)
+        return _process_basic_btc(root, run_id, acknowledge)
 
 
-def _process_measured_btc(root, run_id, analyze, acknowledge):
+def _process_basic_btc(root, run_id, acknowledge):
     image_path = root / 'image.png'
     source_path = root / 'measured-source.json'
-    answer_path = root / 'measured-interpretation.json'
-    out = root / 'result.json'
     if source_path.exists():
-        capture_record = json.loads(source_path.read_text())
+        record = json.loads(source_path.read_text())
+        image = image_path.read_bytes()
+        if record.get('run_id') != run_id or record.get('image_sha256') != hashlib.sha256(image).hexdigest():
+            raise StageFailure('image_evidence_invalid')
+        result = numeric_result(record['snapshot'],run_id,image)
     else:
         overview, hovers, stages = {}, [], []
         def observe(kind, data):
@@ -302,6 +248,9 @@ def _process_measured_btc(root, run_id, analyze, acknowledge):
         stage('capture')
         try:
             snapshot = capture('BTC',1,'12H',image_path,observe=observe)
+            stage('validation')
+            image = image_path.read_bytes()
+            result = numeric_result(snapshot,run_id,image)
         except Exception as error:
             if overview or hovers or stages:
                 from modern_map_checkpoint import partial_record
@@ -309,51 +258,16 @@ def _process_measured_btc(root, run_id, analyze, acknowledge):
                 _write_once(root/'measured-partial.json',partial)
                 acknowledge(b'P')
             raise
-        image = image_path.read_bytes()
-        if len(image) > 4*1024*1024 or not image.startswith(b'\x89PNG\r\n\x1a\n'):
-            raise StageFailure('image_evidence_invalid')
-        capture_record = dict(run_id=run_id,snapshot=snapshot,overview=overview,
-                              image_sha256=hashlib.sha256(image).hexdigest())
-        _write_once(source_path,capture_record)
-        acknowledge(b'S')
-    image = image_path.read_bytes()
-    digest = hashlib.sha256(image).hexdigest()
-    if capture_record.get('run_id') != run_id or capture_record.get('image_sha256') != digest:
-        raise StageFailure('image_evidence_invalid')
-    snapshot, overview = capture_record['snapshot'], capture_record['overview']
+        record = dict(run_id=run_id,snapshot=snapshot,image_sha256=result['evidence']['sha256'])
+        _write_once(source_path,record)
+    # Reacknowledging an identical source is idempotent. In particular a failed
+    # acknowledgement cannot be bypassed by retrying inside this directory.
+    stage('saving')
+    acknowledge(b'S')
+    out = root/'result.json'
     if out.exists():
-        saved = json.loads(out.read_text())
-        if (saved['run_id'],saved['evidence']['sha256']) != (run_id,digest):
+        if json.loads(out.read_text()) != result:
             raise StageFailure('image_evidence_invalid')
         return
-    if answer_path.exists():
-        stored = json.loads(answer_path.read_text())
-        if (stored['run_id'],stored['image_sha256']) != (run_id,digest):
-            raise StageFailure('analysis_response_invalid')
-        raw = stored['answer']
-    else:
-        instructions, rows = interpretation_inputs(snapshot,overview)
-        if (root/'measured-analysis-started.json').exists():
-            raise StageFailure('analysis_incomplete')
-
-        def reserve_request():
-            # Called by the scanner only once the request is ready to transmit.
-            try:
-                _write_once(root/'measured-analysis-started.json', {'run_id':run_id,'image_sha256':digest})
-            except FileExistsError:
-                raise StageFailure('analysis_incomplete') from None
-            acknowledge(b'C')
-
-        stage('analysis')
-        with phase('analysis'):
-            raw = analyze([dict(image=str(image_path),timeframe='12H',measure_candidates=rows)], symbol='BTC',
-                          timeout_seconds=120,evidence_schema=summary_schema(),evidence_instructions=instructions,
-                          before_request=reserve_request)
-        _write_once(answer_path,dict(run_id=run_id,image_sha256=digest,answer=raw))
-        acknowledge(b'V')
-    remember_analysis(raw)
-    stage('validation')
-    result = normalized_summary(raw,snapshot,run_id,image,overview)
-    stage('saving')
     with phase('result_write'):
         _write_once(out,result)

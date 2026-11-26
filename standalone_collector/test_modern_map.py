@@ -325,6 +325,7 @@ class ReaderReplay(unittest.TestCase):
                 (stamp(clock-timedelta(minutes=5) if changed else clock),[])]
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             def stub(k,**kw):return stack.enter_context(patch.object(reader,k,**kw))
+            stub('read_selected_map',side_effect=reader.read_strict_selected_map)
             stub('open_verified_map');stub('display_ready');stub('details',return_value=data)
             stack.enter_context(patch('modern_map_surface.prepare_surface',return_value={
                 'covered':[],'unknown':[],'eligible':0,'cards':0,'close_attempts':0}))

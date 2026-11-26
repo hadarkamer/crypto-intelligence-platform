@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 import re
+import time
 
 from modern_map_evidence import AMOUNT, PRICE, number
 
@@ -12,9 +13,11 @@ from modern_map_evidence import AMOUNT, PRICE, number
 # Retain only bounded market quantities and times. Do not return DOM text,
 # links, attributes, page markup or account elements from the browser.
 _DOM = r"""box => {
-  const [x,y,w,h]=box, out=[];
+  const [x,y,w,h,budget]=box, out=[];
+  const stop=budget===undefined ? Infinity : performance.now()+budget;
   const token=/^(?:(?:\d{1,2}\/\d{1,2}\s+)?\d{1,2}:\d{2}|(?:\$\s*)?\d[\d,]*(?:\.\d+)?\s*[KMB]?)$/i;
   for (const e of document.querySelectorAll('th,td,span,div,strong,b,[role=gridcell],[role=columnheader]')) {
+    if(performance.now()>stop)return [];
     if(e.childElementCount || !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) ||
        e.closest('header,footer,nav,form,dialog,input,iframe,[role=dialog],[contenteditable=true]'))continue;
     const rect=e.getBoundingClientRect();
@@ -154,16 +157,36 @@ def price_labels(marks, column):
                 axes.add(tuple(raw for _,raw in rows))
     return list(next(iter(axes))) if len(axes)==1 else []
 
-def read_tooltip(page,box,bounds,anchor,x,y,paint):
+def read_tooltip(page,box,bounds,anchor,x,y,paint,*,deadline=None):
     """Compare pointer-off and pointer-on DOM. Use Canvas only for painted labels."""
     page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
-    off={tuple(v) for v in page.evaluate(_DOM,list(box))}
+    def remaining():
+        if deadline is None:return None
+        ms=int((deadline-time.monotonic())*1000)
+        if ms<=0:
+            from model1_execution import StageFailure
+            raise StageFailure('source_timeout')
+        return ms
+    def read_dom():
+        ms=remaining()
+        return page.evaluate(_DOM,[*box,ms] if ms is not None else list(box))
+    off={tuple(v) for v in read_dom()}
     watcher=page.evaluate_handle(paint,list(box))
     try:
         page.mouse.move(x,y)
-        page.evaluate('() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))')
+        ms=remaining()
+        if ms is None:
+            page.evaluate('() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))')
+        else:
+            ready=page.evaluate('''ms => new Promise(done => {
+                const timer=setTimeout(()=>done(false), ms);
+                requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);done(true)}));
+            })''',ms)
+            if not ready:
+                from model1_execution import StageFailure
+                raise StageFailure('source_timeout')
         seen=watcher.evaluate('w=>w.labels')
-        dom=[m for m in page.evaluate(_DOM,list(box)) if tuple(m) not in off]
+        dom=[m for m in read_dom() if tuple(m) not in off]
     finally:
         watcher.evaluate('w=>w.restore()')
         watcher.dispose()

@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import contextmanager
 from copy import deepcopy
+from hashlib import sha256
 import json
 import os
 import sys
@@ -15,7 +16,8 @@ import modern_map_checkpoint as checkpoint
 import modern_map_task as task
 import symbol_jobs
 from model1_execution import StageFailure
-from test_modern_map import FIXTURE, frozen_result
+from test_modern_map import FIXTURE
+from test_modern_map_basic_numbers import live_sample
 from test_session_state import Cursor, IsolatedPg, PGLITE
 
 
@@ -72,9 +74,9 @@ class MeasuredCheckpoint(unittest.TestCase):
     def setUp(self):
         self.job = str(uuid4())
         self.store.execute("INSERT INTO public.ai_collection_bridge_jobs(id,status,symbol,heatmap_model,timeframe) VALUES (%s,'running','BTC',1,'12H')",(self.job,))
-        frozen = frozen_result()['measure_snapshot']
-        self.snapshot = {k:v for k,v in frozen.items() if k not in ('artifact_id','sha256')}
-        self.starts = self.sends = 0
+        self.snapshot = live_sample()
+        self.snapshot['source_sha256'] = sha256(FIXTURE.read_bytes()).hexdigest()
+        self.starts = 0
 
     def capture(self, symbol, model, tf, path, observe):
         self.starts += 1
@@ -82,11 +84,12 @@ class MeasuredCheckpoint(unittest.TestCase):
         observe('overview',dict(source_time=self.snapshot['source_time'],raw_total='1.29B'))
         return deepcopy(self.snapshot)
 
-    async def attempt(self, analyze, *, fail_save=False):
+    async def attempt(self, *, fail_save=False):
         async with checkpoint.workspace(self.job,'12H',1,'BTC',lambda _: self.store,True) as (directory,channel):
             root = Path(directory)
             env = {'DATABASE_URL':'private','COINGLASS_LOGIN_PASSWORD':'private','OPENAI_API_KEY':'dummy'}
             channel.attach(env,())
+            self.assertNotIn('OPENAI_API_KEY',env)
             self.assertNotIn('DATABASE_URL',env)
             self.assertNotIn('COINGLASS_LOGIN_PASSWORD',env)
             # Dup as subprocess pass_fds would; closing the child end must not close the parent's socket.
@@ -97,29 +100,19 @@ class MeasuredCheckpoint(unittest.TestCase):
                     raise OSError('lost publication')
                 return write(path,value)
             with patch.dict(os.environ,{checkpoint.FD:str(fd)}), patch.object(task,'capture',side_effect=self.capture), patch.object(task,'_write_once',side_effect=write_result):
-                await asyncio.to_thread(task._run_measured_btc,root,self.job,analyze)
+                await asyncio.to_thread(task._run_basic_btc,root,self.job)
             return json.loads((root/'result.json').read_text())
 
-    def test_resume_in_new_workspace_before_and_after_analysis(self):
-        def preflight(*args,**kwargs): raise RuntimeError('no ready model transport')
-        with self.assertRaises(RuntimeError):
-            asyncio.run(self.attempt(preflight))
-        record,_ = checkpoint.CheckpointStore(self.store,self.job).read()
-        self.assertEqual(set(record),{'source'})
-
-        def analyzed(*args,before_request,**kwargs):
-            before_request()
-            self.sends += 1
-            return dict(model='fixture',short_summary='הנזילות נוטה לצד העליון.')
+    def test_resume_in_new_workspace_after_lost_numeric_delivery(self):
         with self.assertRaises(OSError):
-            asyncio.run(self.attempt(analyzed,fail_save=True))
+            asyncio.run(self.attempt(fail_save=True))
         # The outer worker writes a diagnostic after the child exits and enforces
         # image expiry. Both operations must preserve a still-replayable checkpoint.
         self.store.execute(checkpoint.RETAIN_DIAGNOSTIC,(self.job,None,'{"failure_code":"interrupted"}'))
         self.store.execute("UPDATE public.ai_collection_bridge_evidence SET created_at=now()-interval '7 hours' WHERE job_id=%s",(self.job,))
         self.store.execute(checkpoint.EXPIRE_IMAGES)
         record,image = checkpoint.CheckpointStore(self.store,self.job).read()
-        self.assertEqual(set(record),{'source','claimed','answer'})
+        self.assertEqual(set(record),{'source'})
         self.assertEqual(image,FIXTURE.read_bytes())
         # Exercise the actual retry entry, which previously deleted the only source.
         cycle = str(uuid4())
@@ -134,9 +127,10 @@ class MeasuredCheckpoint(unittest.TestCase):
             queued = symbol_jobs._continue_attempt(connection,prior,cycle,2)
         self.assertEqual((queued['id'],queued['status'],queued['attempt']), (self.job,'queued',2))
         self.store.execute("UPDATE public.ai_collection_bridge_jobs SET status='running' WHERE id=%s",(self.job,))
-        result = asyncio.run(self.attempt(analyzed))
-        self.assertEqual((self.starts,self.sends),(1,1))
-        self.assertIn('1.29B',result['summary'])
+        result = asyncio.run(self.attempt())
+        self.assertEqual(self.starts,1)
+        self.assertEqual(result['basic_snapshot'],self.snapshot)
+        self.assertNotIn('usage',result)
         self.assertEqual(result['run_id'],self.job)
 
     def test_partial_is_private_and_cannot_replace_full(self):
@@ -157,7 +151,7 @@ class MeasuredCheckpoint(unittest.TestCase):
                                  post_failure_raw_below_total='471.2M',debug='excluded-private-fixture'))
             raise StageFailure('source_not_readable')
         with patch.object(self,'capture',side_effect=lost_map), self.assertRaises(StageFailure):
-            asyncio.run(self.attempt(None))
+            asyncio.run(self.attempt())
         durable = checkpoint.CheckpointStore(self.store,self.job)
         self.assertIsNone(durable.read())
         row = self.store.execute("SELECT diagnostic FROM public.ai_collection_bridge_evidence WHERE job_id=%s",(self.job,)).fetchone()
@@ -174,10 +168,7 @@ class MeasuredCheckpoint(unittest.TestCase):
             post_failure_raw_below_total='471.2M'))
         self.assertEqual(partial['source_time'],self.snapshot['source_time'])
         self.assertNotIn('excluded-private-fixture',json.dumps(partial))
-        def analyze(*args,before_request,**kwargs):
-            before_request()
-            return dict(model='fixture',short_summary='נראית נזילות בשני הצדדים.')
-        asyncio.run(self.attempt(analyze))
+        asyncio.run(self.attempt())
         complete,image = durable.read()
         with TemporaryDirectory() as directory:
             # The conditional update checks the persisted full row even when
@@ -186,16 +177,24 @@ class MeasuredCheckpoint(unittest.TestCase):
         retained,retained_image=durable.read()
         self.assertEqual((retained,retained_image),(complete,image))
 
-    def test_no_second_post_after_transport_lost(self):
-        def disconnect(*args,before_request,**kwargs):
-            before_request()
-            self.sends += 1
-            raise TimeoutError
-        with self.assertRaises(TimeoutError): asyncio.run(self.attempt(disconnect))
-        with self.assertRaises(StageFailure): asyncio.run(self.attempt(disconnect))
-        self.assertEqual((self.starts,self.sends),(1,1))
-        record,_ = checkpoint.CheckpointStore(self.store,self.job).read()
-        self.assertEqual(set(record),{'source','claimed'})
+    def test_unverified_receipt_cannot_displace_ready_source(self):
+        original = asyncio.run(self.attempt())
+        store = checkpoint.CheckpointStore(self.store,self.job)
+        stored,image = store.read()
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root/'image.png').write_bytes(image)
+            damaged = deepcopy(stored['source'])
+            damaged['snapshot']['coverage']['verified_amount'] += 1
+            (root/checkpoint.SOURCE).write_text(json.dumps(damaged))
+            with self.assertRaises(StageFailure):
+                store.commit(b'S',root)
+            for action in (b'C',b'V'):
+                with self.assertRaises(ValueError):
+                    store.commit(action,root)
+        self.assertEqual(store.read(),(stored,image))
+        self.assertEqual(asyncio.run(self.attempt()),original)
+        self.assertEqual(self.starts,1)
 
 
 if __name__ == '__main__':

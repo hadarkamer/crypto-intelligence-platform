@@ -178,7 +178,7 @@ def measurement(text):
     return reference, total, {'raw_price': leader.group(1), 'raw_value': leader.group(2)}, low, high
 
 
-def sample_groups(image, bounds, model, anchor_price, price_step, y_for_price, last_price):
+def sample_groups(image, bounds, model, anchor_price, price_step, y_for_price, last_price, *, audit=None):
     """Coordinates select rows. Every returned price/value is subsequently read from the source."""
     left, top, right, bottom = bounds
     check(0 <= left < right < image.width and 0 <= top < bottom < image.height)
@@ -202,7 +202,11 @@ def sample_groups(image, bounds, model, anchor_price, price_step, y_for_price, l
         else:
             labeled.append((colour,[{'y':y, 'price':price, 'side':side}]))
     runs = prominent_runs(labeled)
-    check(1 <= len(runs) <= 40)
+    if audit is not None:
+        audit.update(native_bins_inspected=last-first+1)
+        check(len(runs) <= last-first+1)
+    else:
+        check(1 <= len(runs) <= 40)
     return height, runs
 
 

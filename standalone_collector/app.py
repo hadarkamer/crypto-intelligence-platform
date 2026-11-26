@@ -243,16 +243,17 @@ def register_dedicated_status(application, store, active):
 def create_app():
     from aiohttp import web
     from collection_bridge import BridgeError,JobStore,register_collection_routes
-    from symbol_jobs import MEASURE_SCHEMA,modern_enabled,verified_symbols
+    from symbol_jobs import MEASURE_SCHEMA,modern_enabled,numeric_only,verified_symbols
     application=web.Application(client_max_size=2048)
     enabled=os.getenv('COLLECTION_BRIDGE_ENABLED','').lower()=='true'
-    configured=bool(os.getenv('DATABASE_URL') and os.getenv('OPENAI_API_KEY')
+    basic_only=enabled and numeric_only()
+    configured=bool(os.getenv('DATABASE_URL') and (basic_only or os.getenv('OPENAI_API_KEY'))
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
     modern=modern_enabled()
     dedicated=dedicated_account_requested(os.environ)
     try:
         declared=verified_symbols()
-        supported_symbols=sorted(declared if modern else declared & {'BTC'})
+        supported_symbols=sorted(declared if modern and not basic_only else declared & {'BTC'})
     except BridgeError:
         supported_symbols=[]
     active=enabled and configured and bool(supported_symbols)
@@ -266,11 +267,18 @@ def create_app():
             'capture_flow':'coin-map-right-edge' if modern else 'original',
             'acceptance':'screenshot-observed-and-numeric-validation',
             'supported_symbols':supported_symbols,
-            'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
+            'supported_models':[1] if basic_only else [1,2,3],
+            'supported_timeframes':['12H'] if basic_only else ['12H','24H','48H'],
             'new_capture_hourly_limit':None,
             'worker_concurrency':1,'automatic_cache_minutes':15}
         result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
         result['numeric_reader']=MEASURE_SCHEMA if modern else 'displayed-hover.v1'
+        if modern:
+            result['basic_profile']={'symbol':'BTC','heatmap_model':1,'timeframe':'12H','reader':'coinglass.basic.v1'}
+        if basic_only:
+            result.update(numeric_reader='coinglass.basic.v1',acceptance='verified_basic')
+            result.pop('selection_policy')
+            result.pop('level_contract_version')
         result['store_connectivity']=await asyncio.to_thread(store_readiness,store)
         report=None if dedicated else read_public_probe_report()
         if report is not None:result['source_probe']=report

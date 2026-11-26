@@ -25,6 +25,11 @@ def modern_enabled():
     return os.getenv('COINGLASS_MODERN_UI_ENABLED', '').lower() == 'true'
 
 
+def numeric_only():
+    """An existing collector without model credentials can still serve this one numerical profile."""
+    return modern_enabled() and not os.getenv('OPENAI_API_KEY')
+
+
 def canonical_auth_failure(connection, store, jid, code):
     """Keep the worksheet's existing durable wake contract for bound login events."""
     reasons = {'auth_challenge', 'auth_code_required', 'auth_invalid_credentials', 'auth_rate_limited',
@@ -175,6 +180,9 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
         prior = connection.execute("""SELECT j.* FROM public.ai_collection_bridge_requests r
             JOIN public.ai_collection_bridge_jobs j ON j.id=r.job_id WHERE r.id=%s
             FOR UPDATE OF j""", (rid,)).fetchone()
+        if (numeric_only() and (symbol,store.heatmap_model,timeframe) != ('BTC',1,'12H')
+                and (not prior or prior['status'] != 'ready' and attempt > prior['attempt'])):
+            raise BridgeError('not_configured','This collection profile requires the analysis configuration',503)
         if prior:
             if (prior['symbol'], prior['heatmap_model'], prior['timeframe']) != (symbol, store.heatmap_model, timeframe):
                 raise BridgeError('idempotency_conflict', 'Request id belongs to another CoinGlass map', 409)
@@ -196,12 +204,14 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
             row = connection.execute("""SELECT * FROM public.ai_collection_bridge_jobs
                 WHERE symbol=%s AND heatmap_model=%s AND timeframe=%s AND logical_request_id IS NULL
                 AND (status IN ('queued','running') OR (status='ready'
-                    AND result->>'selection_policy'='prominent_right_edge.v1'
-                    AND CASE WHEN %s THEN result->'measure_snapshot'->>'schema'=%s
-                             ELSE result->'hover_snapshot'->>'version'='displayed-hover.v1' END
+                    AND CASE WHEN %s AND (symbol,heatmap_model,timeframe)=('BTC',1,'12H') THEN
+                             result->>'result_type'='verified_basic' AND result->'basic_snapshot'->>'schema'='coinglass.basic.v1'
+                             ELSE result->>'selection_policy'='prominent_right_edge.v1' AND CASE WHEN %s THEN
+                             result->'measure_snapshot'->>'schema'=%s ELSE
+                             result->'hover_snapshot'->>'version'='displayed-hover.v1' END END
                     AND (result->>'captured_at')::timestamptz BETWEEN now()-interval '15 minutes' AND now()))
                 ORDER BY created_at DESC LIMIT 1""",
-                (symbol, store.heatmap_model, timeframe, modern_enabled(), MEASURE_SCHEMA)).fetchone()
+                (symbol, store.heatmap_model, timeframe, modern_enabled(), modern_enabled(), MEASURE_SCHEMA)).fetchone()
         if row is None:
             _allow_new_source_work(connection)
             row = connection.execute("""INSERT INTO public.ai_collection_bridge_jobs
@@ -260,6 +270,15 @@ def _aware_timestamp(value):
 def valid_result(result, image, jid, timeframe, model, symbol, modern):
     if not isinstance(result, dict):
         return False
+    if 'basic_snapshot' in result or result.get('result_type') == 'verified_basic':
+        if not modern or (symbol,model,timeframe) != ('BTC',1,'12H') or type(result.get('heatmap_model')) is not int:
+            return False
+        from modern_map_task import numeric_result
+        from model1_execution import StageFailure
+        try:
+            return result == numeric_result(result.get('basic_snapshot'),jid,image)
+        except (StageFailure, ValueError, TypeError, KeyError):
+            return False
     evidence = result.get('evidence')
     digest = hashlib.sha256(image).hexdigest()
     if (not isinstance(evidence, dict) or evidence.get('sha256') != digest

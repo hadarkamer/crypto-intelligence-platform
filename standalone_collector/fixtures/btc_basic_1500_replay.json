@@ -1,0 +1,183 @@
+{
+  "job_id": "b0513483-a619-4a7f-85cc-43cc845802eb",
+  "source_time": "2026-11-26T15:00:00Z",
+  "column_time": "2026-11-26T15:00:00Z",
+  "closed_at": "2026-11-26T15:01:16.069687Z",
+  "sha256": "35ae4a321f5d26e4aa8cac06cc32d6188fa83851d7dbe51fbf624d97f19b2182",
+  "axis_reference": "60,677",
+  "native_bins_inspected": 132,
+  "closing": {
+    "raw_total": "875.0M",
+    "raw_above_total": "441.2M",
+    "raw_below_total": "433.9M",
+    "source_time": "2026-11-26T15:00:00Z",
+    "raw_last_price": null
+  },
+  "overview": {
+    "raw_total": "875.0M",
+    "raw_above_total": "441.2M",
+    "raw_below_total": "433.9M",
+    "raw_above_pct": "50%",
+    "raw_below_pct": "50%",
+    "raw_realized_total": "153.4M",
+    "raw_realized_longs": "19.8M",
+    "raw_realized_shorts": "133.6M",
+    "raw_largest_value": "37.2M",
+    "raw_price_step": "43.56",
+    "raw_column_period": "5m",
+    "source_time": "2026-11-26T15:00:00Z",
+    "sidebar_levels": [
+      {
+        "raw_price": "63,348",
+        "raw_value": "9.3M",
+        "raw_distance_pct": "+4.40%"
+      },
+      {
+        "raw_price": "62,913",
+        "raw_value": "7.1M",
+        "raw_distance_pct": "+3.68%"
+      },
+      {
+        "raw_price": "62,129",
+        "raw_value": "18.6M",
+        "raw_distance_pct": "+2.39%"
+      },
+      {
+        "raw_price": "61,867",
+        "raw_value": "8.6M",
+        "raw_distance_pct": "+1.96%"
+      },
+      {
+        "raw_price": "61,737",
+        "raw_value": "16.8M",
+        "raw_distance_pct": "+1.75%"
+      },
+      {
+        "raw_price": "61,519",
+        "raw_value": "37.2M",
+        "raw_distance_pct": "+1.39%"
+      },
+      {
+        "raw_price": "61,127",
+        "raw_value": "28.5M",
+        "raw_distance_pct": "+0.74%"
+      },
+      {
+        "raw_price": "60,299",
+        "raw_value": "37.2M",
+        "raw_distance_pct": "-0.62%"
+      },
+      {
+        "raw_price": "60,038",
+        "raw_value": "19.0M",
+        "raw_distance_pct": "-1.05%"
+      },
+      {
+        "raw_price": "59,907",
+        "raw_value": "28.5M",
+        "raw_distance_pct": "-1.27%"
+      },
+      {
+        "raw_price": "59,689",
+        "raw_value": "18.6M",
+        "raw_distance_pct": "-1.63%"
+      },
+      {
+        "raw_price": "59,297",
+        "raw_value": "14.2M",
+        "raw_distance_pct": "-2.27%"
+      },
+      {
+        "raw_price": "58,470",
+        "raw_value": "11.5M",
+        "raw_distance_pct": "-3.64%"
+      },
+      {
+        "raw_price": "58,208",
+        "raw_value": "4.7M",
+        "raw_distance_pct": "-4.07%"
+      }
+    ],
+    "display_values": {
+      "raw_total": [
+        "875.0M"
+      ],
+      "raw_above_total": [
+        "441.2M"
+      ],
+      "raw_below_total": [
+        "433.9M"
+      ],
+      "raw_realized_total": [
+        "$153.4M"
+      ],
+      "raw_realized_longs": [
+        "$19.8M"
+      ],
+      "raw_realized_shorts": [
+        "$133.6M"
+      ],
+      "raw_largest_value": [
+        "37.2M"
+      ],
+      "raw_above_pct": [
+        "50%"
+      ],
+      "raw_below_pct": [
+        "50%"
+      ],
+      "raw_price_step": [
+        "43.56"
+      ],
+      "raw_column_period": [
+        "5m"
+      ]
+    }
+  },
+  "chart_regions": [
+    {
+      "side": "below",
+      "colour": "yellow",
+      "prices": [
+        60211.68
+      ]
+    },
+    {
+      "side": "below",
+      "colour": "yellow",
+      "prices": [
+        60298.8
+      ]
+    },
+    {
+      "side": "below",
+      "colour": "green",
+      "prices": [
+        60342.36,
+        60385.92
+      ]
+    },
+    {
+      "side": "above",
+      "colour": "yellow",
+      "prices": [
+        61431.36
+      ]
+    },
+    {
+      "side": "above",
+      "colour": "yellow",
+      "prices": [
+        61518.48
+      ]
+    },
+    {
+      "side": "above",
+      "colour": "green",
+      "prices": [
+        61562.04,
+        61605.6
+      ]
+    }
+  ]
+}
