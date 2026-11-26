@@ -1,108 +1,24 @@
-name: Check standalone heatmap collector
-
+name: Offline Firefox chart geometry
 on:
-  pull_request:
-    branches:
-      - app/model1-standalone-20260915
-    paths:
-      - standalone_collector/**
-      - collection_bridge.py
-      - collection_model1_task.py
-      - market_vision/coinglass_heatmap_capture.py
-      - market_vision/openai_heatmap_scanner.py
-      - .github/workflows/standalone-heatmap-check.yml
   push:
-    branches:
-      - app/model1-standalone-20260915
-    paths:
-      - standalone_collector/**
-      - collection_bridge.py
-      - collection_model1_task.py
-      - market_vision/coinglass_heatmap_capture.py
-      - market_vision/openai_heatmap_scanner.py
-      - .github/workflows/standalone-heatmap-check.yml
-  workflow_dispatch:
-    inputs:
-      hover_source_check:
-        description: Run one source-only pass of all nine maps (no AI or app writes)
-        type: boolean
-        default: false
-
+    branches: [qa/coinglass-offline-map-geometry-20261126]
 permissions:
   contents: read
-
 jobs:
-  validate:
+  replay:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    env:
-      OPENAI_API_KEY: ""
-      DATABASE_URL: ""
-      COINGLASS_STORAGE_STATE_JSON: ""
-      COINGLASS_COOKIE_HEADER: ""
-      COLLECTION_BRIDGE_ENABLED: "false"
-      PYTHONUTF8: "1"
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install collector test dependencies
-        run: >-
-          python -m pip install
-          'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3'
-          'playwright==1.55.0' 'Pillow==12.3.0' 'pycryptodome==3.21.0'
-      - name: Install synthetic DOM test browser
-        run: python -m playwright install --with-deps chromium
-      - name: Provide local database and Chromium for managed-session fixtures
-        shell: bash
+          python-version: '3.11'
+      - name: Install the pilot's pinned Playwright Firefox
         run: |
-          set -euo pipefail
-          npm install --silent --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coinglass-test" @electric-sql/pglite@0.5.13
-          echo "PGLITE_MODULE=$RUNNER_TEMP/coinglass-test/node_modules/@electric-sql/pglite" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/coinglass-test/bin"
-          python - <<'PYTEST'
-          from pathlib import Path
-          import os
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as playwright:
-              target = Path(playwright.chromium.executable_path)
-              assert target.is_file()
-              (Path(os.environ["RUNNER_TEMP"]) / "coinglass-test/bin/chromium").symlink_to(target)
-          PYTEST
-          echo "$RUNNER_TEMP/coinglass-test/bin" >> "$GITHUB_PATH"
-          pg_config --bindir >> "$GITHUB_PATH"
-      - name: Prepare actual runtime and run collector contracts
-        env:
-          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
-        run: |
-          /opt/google/chrome/chrome --version
-          python standalone_collector/prepare.py
-      - name: Check the dedicated account flow against synthetic pages and a private test database
+          python -m pip install 'playwright==1.55.0' 'Pillow==12.3.0'
+          python -m playwright install --with-deps firefox
+      - name: Replay captured geometry offline in native Firefox
         working-directory: standalone_collector
-        env:
-          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
-        run: |
-          export COINGLASS_TEST_POSTGRES_BIN="$(pg_config --bindir)"
-          python -m unittest discover -v -p 'test_dedicated*.py'
-      - name: Exercise protected-map fixture and restart the browser against saved local state
-        working-directory: standalone_collector
-        run: python -m unittest test_session_browser_restart test_collection_metrics -v
-      - name: Verify read-only startup and source configuration checks
-        working-directory: standalone_collector
-        run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v
-      - name: Check whitespace
-        run: git diff --check
-      - name: Explicit source-only hover acceptance
-        # Source access is deliberate; PR checks and reruns never start scans.
-        if: >-
-          github.run_attempt == 1 &&
-          github.event_name == 'workflow_dispatch' && inputs.hover_source_check
-        run: python standalone_collector/hover_source_check.py --output hover-source-evidence
-      - name: Retain source check evidence
-        if: always() && hashFiles('hover-source-evidence/summary.json') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: hover-source-evidence
-          path: hover-source-evidence
-          retention-days: 7
+        run: python -m unittest -v test_geometry_firefox
