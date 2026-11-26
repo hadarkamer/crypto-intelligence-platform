@@ -185,15 +185,19 @@ def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=N
     context = None
     # The private session IPC removes credentials before this point. The AI
     # client runs later in this process. Its key must not reach the driver
-    # or Chromium. Each capture already runs in a dedicated worker process.
+    # or browser. Each capture already runs in a dedicated worker process.
     ai_key = os.environ.pop('OPENAI_API_KEY', None)
     try:
         with ExitStack() as resources:
             try:
                 with phase('browser_context'):
                     pw = resources.enter_context(sync_playwright())
-                    browser = pw.chromium.launch(headless=True, chromium_sandbox=True,
-                                                 args=['--disable-dev-shm-usage'])
+                    if (symbol,model,timeframe)==('BTC',1,'12H'):
+                        browser=pw.firefox.launch(headless=True,timeout=20000,env={
+                            k:os.environ[k] for k in ('HOME','LANG','PATH','LD_LIBRARY_PATH') if k in os.environ})
+                    else:
+                        browser=pw.chromium.launch(headless=True,chromium_sandbox=True,
+                                                   args=['--disable-dev-shm-usage'])
                     resources.callback(browser.close)
                     context = browser.new_context(storage_state=session.state, locale='en-US',
                         timezone_id='UTC', color_scheme='dark', device_scale_factor=1,

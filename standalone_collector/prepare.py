@@ -26,7 +26,7 @@ def prepare_browser():
     if needs_install:
         subprocess.run([sys.executable,'-m','pip','install',
             *[f'{p}=={v}' for p,v in BROWSER_REQUIREMENTS.items()]],check=True,timeout=180)
-    subprocess.run([sys.executable,'-m','playwright','install','chromium'],check=True,timeout=240)
+    subprocess.run([sys.executable,'-m','playwright','install','chromium','firefox'],check=True,timeout=240)
     for package,expected in BROWSER_REQUIREMENTS.items():
         if version(package)!=expected:raise RuntimeError('Standalone dependency mismatch')
     print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5 Pillow=12.3.0 pycryptodome=3.21.0',flush=True)
@@ -135,6 +135,7 @@ def prepare():
         cwd=HERE,check=True,timeout=120)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
+        'pilot_browser':{'symbol':'BTC','model':1,'timeframe':'12H','engine':'firefox','playwright':'1.55.0'},
         'capture_flows':{'modern':'Coin map, requested asset/model/horizon, verified right-edge measurements and cropped map PNG',
             'legacy':'Model-specific BTC map, DOM hover column and same-image crop'},
         'numeric_readers':{'modern':'coinglass.right-edge-measure.v1','legacy':'displayed-hover.v1'},

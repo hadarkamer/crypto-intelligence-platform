@@ -292,12 +292,12 @@ class SafetyAndDispatch(TestCase):
             with self.assertRaises(StageFailure) as caught:flow.guard_surface(page,BTC12)
             self.assertEqual(caught.exception.code,'source_not_readable')
 
-    def test_worker_runs_sandboxed_without_ai_key_and_cleans_on_failure(self):
+    def test_btc_12h_worker_uses_firefox_without_secrets_and_cleans_on_failure(self):
         from unittest.mock import MagicMock
         browser, context = MagicMock(),MagicMock()
         browser.new_context.return_value=context
         pw=MagicMock()
-        pw.chromium.launch.return_value=browser
+        pw.firefox.launch.return_value=browser
         state=Mock(dedicated=True,state={'cookies':[],'origins':[]})
         @contextmanager
         def driver():
@@ -316,11 +316,27 @@ class SafetyAndDispatch(TestCase):
             self.assertFalse((Path(root)/'image.png').exists())
             self.assertFalse((Path(root)/'result.json').exists())
             ai.assert_not_called()
-        kwargs=pw.chromium.launch.call_args.kwargs
-        self.assertIs(kwargs['chromium_sandbox'],True)
-        self.assertNotIn('--no-sandbox',kwargs['args'])
+        pw.chromium.launch.assert_not_called()
+        self.assertEqual(pw.firefox.launch.call_args.kwargs,dict(
+            headless=True,timeout=20000,env={k:os.environ[k] for k in
+                ('HOME','LANG','PATH','LD_LIBRARY_PATH') if k in os.environ}))
+        self.assertEqual(browser.new_context.call_args.kwargs,dict(
+            storage_state=state.state,locale='en-US',timezone_id='UTC',color_scheme='dark',
+            device_scale_factor=1,viewport={'width':1440,'height':1280}))
         state.finish.assert_called_once_with(context)
         context.close.assert_called_once();browser.close.assert_called_once()
+
+    def test_other_map_preserves_normal_chromium_launch(self):
+        from unittest.mock import MagicMock
+        driver=MagicMock()
+        state=Mock(dedicated=True,state={'cookies':[],'origins':[]})
+        with patch('playwright.sync_api.sync_playwright',return_value=driver), \
+             patch.object(flow,'collect_with_dedicated_session',return_value={'verified':True}):
+            self.assertEqual(capture('BTC',1,'24H',None,session=state),{'verified':True})
+        pw=driver.__enter__.return_value
+        pw.firefox.launch.assert_not_called()
+        pw.chromium.launch.assert_called_once_with(headless=True,chromium_sandbox=True,
+                                                   args=['--disable-dev-shm-usage'])
 
     def test_legacy_session_is_rejected_before_browser_launch(self):
         with patch('playwright.sync_api.sync_playwright') as driver:
