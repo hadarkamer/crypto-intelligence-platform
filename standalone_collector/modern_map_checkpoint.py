@@ -43,6 +43,26 @@ def _observation_receipts(stages):
         if name == 'post_failure_market_observation' and status in ('observed','unavailable','stale_or_unverified_time'):
             receipts[name] = {'status':status, **{k:step[k] for k,pattern in clock_fields.items() if k in step
                 and (step[k] is None or isinstance(step[k],str) and len(step[k])<=40 and re.fullmatch(pattern,step[k]))}}
+        elif name == 'basic_native_domain_readout' and status == 'observed':
+            from modern_map_evidence import AMOUNT, PRICE
+            receipt = {'status':status}
+            fields = {**dict.fromkeys(('raw_box_total','raw_market_total','raw_above_total','raw_below_total'),AMOUNT),
+                      **dict.fromkeys(('raw_reference','raw_price_low','raw_price_high'),PRICE),
+                      **dict.fromkeys(('absolute_delta','rounding_tolerance'),r'[0-9]+(?:\.[0-9]+)?'),
+                      'source_time':iso_utc}
+            for key,pattern in fields.items():
+                raw=step.get(key)
+                if isinstance(raw,str) and raw.isascii() and len(raw)<=64 and re.fullmatch(pattern,raw):
+                    receipt[key]=raw
+            if type(step.get('totals_match')) is bool:
+                receipt['totals_match']=step['totals_match']
+            if step.get('count_mode')=='Right edge':
+                receipt['count_mode']='Right edge'
+            rect=step.get('plot_rect')
+            if (isinstance(rect,list) and len(rect)==4 and all(type(v) is int for v in rect)
+                    and 0<=rect[0]<rect[2] and 0<=rect[1]<rect[3]):
+                receipt['plot_rect']=rect
+            receipts[name]=receipt
         elif name == 'chart_obstruction' and status in ('clear','partial'):
             receipt = {'status':status}
             for key in ('cards','eligible','close_attempts'):

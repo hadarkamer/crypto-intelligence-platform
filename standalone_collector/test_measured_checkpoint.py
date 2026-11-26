@@ -33,6 +33,26 @@ class MeasureDetailPrivacy(unittest.TestCase):
         self.assertIsNone(checkpoint._measure_detail(dict(detail,reason='native_step_invalid private-injection-fixture')))
 
 
+class NativeDomainPrivacy(unittest.TestCase):
+    def test_partial_keeps_only_typed_domain_operands(self):
+        event=dict(name='basic_native_domain_readout',status='observed',count_mode='Right edge',
+                   source_time='2026-11-26T18:41:00Z',raw_box_total='949.0M',raw_market_total='950.8M',
+                   raw_above_total='546.7M',raw_below_total='404.1M',raw_reference='60,590',
+                   raw_price_low='58,020.10',raw_price_high='62,550.20',totals_match=False,
+                   absolute_delta='1800000',rounding_tolerance='150000',plot_rect=[10,20,400,500])
+        with TemporaryDirectory() as tmp:
+            path=Path(tmp)/'absent.png'
+            wrap=lambda step:checkpoint.partial_record('isolated',{},[],[step],RuntimeError(),path)
+            accepted=wrap(dict(event,unexpected='private-fixture'))['basic_native_domain_readout']
+            self.assertEqual(accepted,{k:v for k,v in event.items() if k!='name'})
+            polluted=dict(event,raw_box_total='private-fixture',source_time='unknown',raw_price_low='6.1M',
+                          rounding_tolerance='NaN',absolute_delta='-33',raw_market_total='$4.4M',
+                          count_mode='private-fixture',plot_rect=[1,2,False,4],totals_match=1)
+            kept=wrap(polluted)['basic_native_domain_readout']
+            self.assertEqual(set(kept),{'status','raw_above_total','raw_below_total','raw_reference','raw_price_high'})
+            self.assertNotIn('basic_native_domain_readout',wrap(dict(event,status='failed')))
+
+
 class Store:
     """Represent PostgreSQL bytea on the JSON pipe used by the existing PGlite fixture."""
     def __init__(self, db): self.db = db

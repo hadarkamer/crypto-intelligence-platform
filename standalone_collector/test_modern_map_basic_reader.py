@@ -90,7 +90,7 @@ class BasicSourceReader(TestCase):
             if shifted and not native:scales[-1]=('100.00',lambda p:where(p)+delta[1])
             scales.append(scales[-1])
             stub(basic,'axis_scale_live',side_effect=scales)
-            measured=stub(basic,'from_native_box',return_value=('100.00',where))
+            measured=stub(basic,'from_native_box',return_value=(('100.00',where),'measure_domain'))
             later=dict(final, source_time=(clock+timedelta(minutes=1)).isoformat().replace('+00:00','Z')) if optional_change=='epoch' else final
             stub(basic,'overview',side_effect=[side,final,later])
             stub(basic,'after_read_failure')
@@ -308,3 +308,49 @@ class BasicSourceReader(TestCase):
                 tip.return_value={'column_evidence':[{'dated_title':other,'period_seconds':300}]}
                 with self.subTest(other=other), self.assertRaises(StageFailure):
                     basic.displayed_column(*args,base_only=True,period='5m',opening=True)
+
+    def test_native_box_trace_preserves_tokens_and_rounding(self):
+        from decimal import Decimal
+        from modern_map_measure_panel import PanelMeasurement
+        side=dict(raw_total='950.8M',raw_above_total='546.7M',raw_below_total='404.1M',source_time='2026-11-26T18:41:00Z')
+        def displayed(total,ref='60,590'):
+            return PanelMeasurement((ref,total,None,Decimal('59000'),Decimal('62000')),('59,000','62,000'))
+        def trace(amount,chart,ref='60,590'):
+            records=[]
+            with patch.object(ui,'measure_box',return_value=displayed(amount,ref)) as measure:
+                try:
+                    answer=basic.from_native_box(Mock(),(2,50,1016,823),side,observe=lambda k,v:records.append(v),
+                                                 chart_axis=chart)
+                except StageFailure as error:
+                    answer=error
+                measure.assert_called_once()
+            return answer,records[0]
+        # The side tokens are retained G data; all native panel amounts in
+        # this fixture are synthetic, because G did not retain its panel.
+        independent=lambda price: ('60,590',lambda p:2*p)
+        answer,data=trace('950.7M',Mock(side_effect=AssertionError))
+        self.assertEqual(answer[1],'measure_domain')
+        self.assertEqual((data['absolute_delta'],data['rounding_tolerance'],data['totals_match']),
+                         ('100000.0','150000.0',True))
+        self.assertEqual(data['raw_price_low'],'59,000')
+        self.assertEqual(data['plot_rect'],[2,50,1016,823])
+        answer,data=trace('945.2M',independent)
+        self.assertEqual(answer[1],'native_reference_on_chart_axis')
+        self.assertEqual(answer[0][1](2),4)
+        self.assertEqual((data['raw_box_total'],data['raw_market_total'],data['raw_above_total'],data['raw_below_total']),
+                         ('945.2M','950.8M','546.7M','404.1M'))
+        self.assertEqual((data['absolute_delta'],data['rounding_tolerance'],data['totals_match']),
+                         ('5600000.0','150000.0',False))
+        answer,_=trace('945.2M',independent,'60,590.4')
+        self.assertEqual(answer[0][0],'60,590')
+        for candidate,ref,detail in [(independent,'60,590.6','measured_reference_conflicts_with_chart'),
+                                     (independent,'60,589','measured_reference_conflicts_with_chart'),
+                                     (None,'60,590','native_box_total_conflict_axis_unverified'),
+                                     (lambda _:None,'60,590','native_box_total_conflict_axis_unverified'),
+                                     (lambda _:('60,599',lambda p:p),'60,590','measured_reference_conflicts_with_chart'),
+                                     (independent,'63,000','measured_reference_outside_domain')]:
+            with self.subTest(detail=detail):
+                error,data=trace('945.2M',candidate,ref)
+                self.assertIsInstance(error,StageFailure)
+                self.assertEqual(error.basic_reason,detail)
+                self.assertEqual(data['raw_reference'],ref)

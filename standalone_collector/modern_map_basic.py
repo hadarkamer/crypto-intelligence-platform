@@ -15,7 +15,7 @@ from playwright.sync_api import Error as BrowserError
 import modern_map_reader as ui
 from model1_execution import StageFailure
 from modern_map_axis import axis_marks
-from modern_map_axis_ocr import axis_scale_live
+from modern_map_axis_ocr import axis_scale_live, same_printed_price
 from modern_map_cells import _agree, merge_cells
 from modern_map_basic_numbers import market_amounts, period_seconds
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
@@ -80,17 +80,36 @@ def edge_open(surface,bounds,box,*,include_time=False):
     return True
 
 
-def from_native_box(page, bounds, side):
+def from_native_box(page, bounds, side, *, observe=None, chart_axis=None):
+    """Read the published Right-edge panel without equating a visible box to market-wide coverage."""
     _,top,_,bottom=bounds
-    # One domain selection can establish a printed reference and coordinate
-    # scale. A largest-cluster value is irrelevant to this operation.
     result=ui.measure_box(page,bounds,top+.2,bottom-.2,require_leader=False)
-    raw_ref,total,_,low,high=result
-    equivalent(total,[side['raw_above_total'],side['raw_below_total']])
-    require(low<number(raw_ref)[0]<high,'measured_reference_outside_domain')
+    raw_ref,raw_box,_,low,high=result
+    box_value,box_error=number(raw_box,True)
+    above,above_error=number(side['raw_above_total'],True)
+    below,below_error=number(side['raw_below_total'],True)
+    delta=abs(box_value-above-below)
+    tolerance=box_error+above_error+below_error
+    raw_low,raw_high=result.raw_bounds
+    if observe:
+        observe('stage',dict(name='basic_native_domain_readout',status='observed',source_time=side['source_time'],
+            count_mode='Right edge',plot_rect=list(bounds),raw_box_total=raw_box,raw_market_total=side['raw_total'],
+            raw_above_total=side['raw_above_total'],raw_below_total=side['raw_below_total'],raw_reference=raw_ref,
+            raw_price_low=raw_low,raw_price_high=raw_high,absolute_delta=format(delta,'f'),
+            rounding_tolerance=format(tolerance,'f'),totals_match=delta<=tolerance))
+    ref=number(raw_ref)[0]
+    require(low<ref<high,'measured_reference_outside_domain')
+    if delta>tolerance:
+        # These endpoints alone cannot establish full market coverage. A
+        # complete calibration from printed chart ticks is independent of
+        # both Box total and Box bounds. Only its own coordinate mapping is used.
+        scale=chart_axis(raw_ref) if chart_axis is not None else None
+        require(scale is not None,'native_box_total_conflict_axis_unverified')
+        require(same_printed_price(scale[0],raw_ref),'measured_reference_conflicts_with_chart')
+        return scale,'native_reference_on_chart_axis'
     def where(price):
         return bottom-.2-(price-float(low))*(bottom-top-.4)/float(high-low)
-    return raw_ref,where
+    return (raw_ref,where),'measure_domain'
 
 
 def source_screen(page, box, padded_size, guard):
@@ -328,9 +347,13 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                 scale=stage('basic_verified_price_axis',lambda:axis_scale_live(screen,box,bounds,marks))
                 source_method='chart_axis'
                 if scale is None:
-                    source_method='measure_domain'
+                    def independent_axis(panel_ref):
+                        same_document()
+                        require(ui.chart_box(page)==box,'chart_geometry_changed')
+                        return axis_scale_live(screen,box,bounds,marks,panel_reference=panel_ref)
                     with ui.map_access_budget(ui.limited_timeout(4000)/1000):
-                        scale=stage('basic_native_price_domain',lambda:from_native_box(page,bounds,side))
+                        scale,source_method=stage('basic_native_price_domain',lambda:from_native_box(
+                            page,bounds,side,observe=emit,chart_axis=independent_axis if base_only else None))
                     ui.select_choice(page,'Pan')
                 raw_ref,where=scale
                 if side['raw_last_price']:

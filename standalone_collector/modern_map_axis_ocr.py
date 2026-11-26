@@ -1,4 +1,5 @@
 """Read only the price axis and last-price tag of the supported Firefox chart font."""
+from decimal import ROUND_HALF_UP
 from functools import lru_cache
 from itertools import groupby
 import re
@@ -6,6 +7,7 @@ import re
 from PIL import Image, ImageDraw
 
 from modern_map_axis import axis_scale
+from modern_map_evidence import PRICE, number
 
 # Row masks of printed digits, drawn from filtered market images on 24 and 26
 # November. The retained charts use the same small price font. There are no price
@@ -49,7 +51,7 @@ def _runs(flags):
             yield indices[0],indices[-1]+1
 
 
-def _printed(mask):
+def _printed(mask, *, allow_unknown=False):
     pieces=[]
     for left,right in _runs(mask.crop((x,0,x+1,mask.height)).getbbox() is not None for x in range(mask.width)):
         col=mask.crop((left,0,right,mask.height))
@@ -71,13 +73,29 @@ def _printed(mask):
         ranked=sorted((min((probe ^ ref).bit_count() for ref in refs),digit)
                       for digit,refs in _alphabet().items())
         if ranked[0][0]>8 or ranked[1][0]-ranked[0][0]<7:
-            return None
-        text+=ranked[0][1]
+            if not allow_unknown:
+                return None
+            text+='?'
+        else:
+            text+=ranked[0][1]
+    if allow_unknown and '?' in text:
+        valid=re.fullmatch(r'[1-9?][0-9?]{0,2}(?:,[0-9?]{3})+',text)
+        return text if valid and any(d.isdigit() for d in text) else None
     return text if re.fullmatch(r'[1-9]\d{0,2}(?:,\d{3})+',text) else None
 
 
-def axis_scale_live(image,box,bounds,marks):
+def same_printed_price(left,right):
+    # Exact at equal precision. A finer quote must round to the coarser label.
+    coarse,fine=sorted((number(left),number(right)),key=lambda item:item[1],reverse=True)
+    unit=(2*coarse[1]).normalize()
+    return fine[0].quantize(unit,rounding=ROUND_HALF_UP)==coarse[0]
+
+
+def axis_scale_live(image,box,bounds,marks,*,panel_reference=None):
     """Prefer DOM/Canvas marks and use the clean price pixels only when needed."""
+    if panel_reference is not None and (not isinstance(panel_reference,str)
+            or len(panel_reference)>40 or not re.fullmatch(PRICE,panel_reference)):
+        return None
     left,top,right,bottom=bounds
     end=min(image.width,box[0]+box[2])
     if not (0<=left<right<end<=image.width and 0<=top<bottom<image.height and end-right>=14):
@@ -87,6 +105,8 @@ def axis_scale_live(image,box,bounds,marks):
     if marks:
         scale=axis_scale(image,box,bounds,marks)
         if scale is not None:
+            if panel_reference is not None and not same_printed_price(panel_reference,scale[0]):
+                return None
             return scale
     if end-right>150:
         return None
@@ -104,9 +124,21 @@ def axis_scale_live(image,box,bounds,marks):
     if x0>=x1 or y1-y0<10:
         return None
     tag=strip.crop((x0,y0+3,x1,y1-3)).point(lambda p:255 if p<120 else 0)
-    reference=_printed(tag)
+    reference=_printed(tag,allow_unknown=panel_reference is not None)
     if not reference:
         return None
+    if panel_reference is not None:
+        # Measure's scoped Reference (last price) supplies the number. Require
+        # the tag's punctuation and all readable digits to agree at its printed
+        # precision. Unknown digits alone never determine a price. The grid and
+        # dashed-line evidence are still verified by axis_scale below.
+        panel_value,_=number(panel_reference)
+        displayed=format(panel_value.to_integral_value(rounding=ROUND_HALF_UP),',f')
+        if len(displayed)!=len(reference) or any(
+                glyph!='?' and glyph!=expected for glyph,expected in zip(reference,displayed)):
+            return None
+        if '?' in reference:
+            reference=displayed
     mid_x=(right+1+end)/2
     decoded=[(reference,mid_x,top+(y0+y1-1)/2)]
     ink=strip.point(lambda p:255 if p>66 else 0)
