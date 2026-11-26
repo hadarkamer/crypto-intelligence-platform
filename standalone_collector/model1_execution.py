@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import time
 
-CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable','source_login_required',
+CODES=frozenset({'evidence_store_failed','source_capture_failed','source_timeout','source_not_readable','source_login_required',
     'source_map_unavailable','source_navigation_changed','source_rate_limited',
     'auth_configuration_invalid','auth_challenge','auth_code_required','auth_rate_limited','auth_invalid_credentials',
     'auth_form_unavailable','auth_unconfirmed','auth_gate_after_verification','auth_retry_exhausted','auth_retry_pending',

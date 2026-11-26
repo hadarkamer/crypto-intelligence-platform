@@ -7,7 +7,7 @@ subprocess test invocations substituted explicitly; generated code is inspected.
 import ast
 import asyncio
 import copy
-from contextlib import nullcontext, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stdout
 import fcntl
 import io
 import json
@@ -231,7 +231,7 @@ class BuildIntegrationTests(unittest.TestCase):
             self.assertFalse(app.source_session_configured())
 
     def test_actual_generated_bridge_orders_parent_state_around_source_cleanup(self):
-        import prepare
+        import modern_map_checkpoint, prepare, symbol_jobs
         from heatmap_models import child_environment
         from session_runtime import SessionError
         with tempfile.TemporaryDirectory(prefix='session-bridge-build-') as temporary:
@@ -240,9 +240,10 @@ class BuildIntegrationTests(unittest.TestCase):
                   patch.object(prepare.subprocess,'run'),redirect_stdout(io.StringIO())):
                 prepare.prepare()
             tree=ast.parse((runtime/'collection_bridge.py').read_text())
-            actual=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='BridgeError'
+            actual=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name in ('BridgeError','JobStore')
                     or isinstance(n,ast.AsyncFunctionDef) and n.name=='run_existing_scanner']
             scope={'asyncio':asyncio,'tempfile':tempfile,'sys':sys,'Path':Path,'Any':Any,
+                   'modern_map_checkpoint':modern_map_checkpoint,'symbol_jobs':symbol_jobs,
                    'child_environment':child_environment,'__file__':str(runtime/'collection_bridge.py')}
             exec(compile(ast.Module(body=actual,type_ignores=[]),'<actual-generated-bridge>','exec'),scope)
             async def scenario(*, managed=True, spawn_error=False, finish_error=False):
@@ -276,7 +277,8 @@ class BuildIntegrationTests(unittest.TestCase):
                     self.assertEqual(kwargs['pass_fds'],(123,) if managed else ())
                     if spawn_error:raise OSError('controlled_spawn_failure')
                     return process
-                with (patch.dict(os.environ,{'COINGLASS_SESSION_KEY':'DUMMY_PARENT_ONLY_KEY'}),
+                with (patch.dict(os.environ,{'COINGLASS_SESSION_KEY':'DUMMY_PARENT_ONLY_KEY',
+                                                  'COINGLASS_MODERN_UI_ENABLED':'false'}),
                       patch.object(asyncio,'create_subprocess_exec',spawn)):
                     try:await scope['run_existing_scanner']('12H',RUN_ID,1,session=Session() if managed else None)
                     except (RuntimeError,OSError) as error:
@@ -361,6 +363,39 @@ class BuildIntegrationTests(unittest.TestCase):
                 if hover_fails:self.assertLess(events.index('error:source_capture_failed'),events.index('session_finish'))
                 self.assertEqual(events.count('session_finish'),1)
 
+    def assert_generated_child_descriptors(self,bridge_text,runtime):
+        from modern_map_checkpoint import CheckpointChannel, FD
+        fn, = [n for n in ast.parse(bridge_text).body if isinstance(n,ast.AsyncFunctionDef)
+               and n.name=='run_existing_scanner']
+        launch, = [n for n in ast.walk(fn) if isinstance(n,ast.Call)
+                   and ast.unparse(n.func)=='asyncio.create_subprocess_exec']
+        pass_fds, = [k.value for k in launch.keywords if k.arg=='pass_fds']
+        block, = [node.body for node in ast.walk(fn) if isinstance(node,ast.Try) and
+                  any(isinstance(stmt,ast.Assign) and launch in ast.walk(stmt) for stmt in node.body)]
+        launch_at = next(i for i,stmt in enumerate(block) if isinstance(stmt,ast.Assign) and launch in ast.walk(stmt))
+        preparation = compile(ast.Module(body=block[launch_at-2:launch_at],type_ignores=[]),'<fd-preparation>','exec')
+        inherited = compile(ast.Expression(pass_fds),'<fd-inheritance>','eval')
+        with ExitStack() as resources:
+            session_fds = os.pipe()
+            for fd in session_fds:
+                resources.callback(os.close,fd)
+            channel = CheckpointChannel(None,runtime)
+            resources.callback(channel.channel.close)
+            resources.callback(channel.child.close)
+            for transport in (None,SimpleNamespace(pass_fds=session_fds)):
+                for market in (None,channel):
+                    with self.subTest(managed=bool(transport),market=bool(market)):
+                        env = {}
+                        state = dict(_session_transport=transport,_market_channel=market,_session_child_env=env)
+                        exec(preparation,state)
+                        expected = session_fds if transport else ()
+                        if market:
+                            expected += (channel.child.fileno(),)
+                            self.assertEqual(env[FD],str(channel.child.fileno()))
+                        else:
+                            self.assertNotIn(FD,env)
+                        self.assertEqual(eval(inherited,state),expected)
+
     def test_complete_runtime_generation_uses_real_adapters_without_install_or_source(self):
         import prepare
         root=Path(__file__).resolve().parent.parent
@@ -375,7 +410,7 @@ class BuildIntegrationTests(unittest.TestCase):
             self.assertTrue(all(call.args[0][1:3]==['-m','unittest'] for call in commands.call_args_list))
             capture_text=(runtime/'market_vision/coinglass_heatmap_capture.py').read_text()
             bridge_text=(runtime/'collection_bridge.py').read_text()
-            for name in ('session_capture.py','session_state.py','session_runtime.py'):
+            for name in ('session_capture.py','session_state.py','session_runtime.py','modern_map_checkpoint.py'):
                 self.assertEqual((runtime/name).read_bytes(),(root/'standalone_collector'/name).read_bytes())
             capture_tree=ast.parse(capture_text)
             function=next(node for node in capture_tree.body if isinstance(node,ast.FunctionDef) and node.name=='capture_heatmaps')
@@ -390,7 +425,7 @@ class BuildIntegrationTests(unittest.TestCase):
             self.assertIn("[] if _capture_session else _load_cookie_header()",capture_text)
             self.assertIn("_session_child_env.pop('COINGLASS_SESSION_KEY', None)",bridge_text)
             self.assertIn('await session.finish(_session_transport)',bridge_text)
-            self.assertIn('pass_fds=_session_transport.pass_fds if _session_transport else ()',bridge_text)
+            self.assert_generated_child_descriptors(bridge_text,runtime)
             self.assertEqual(prepare.BROWSER_REQUIREMENTS['pycryptodome'],'3.21.0')
             compile(capture_text,'<generated-capture>','exec');compile(bridge_text,'<generated-bridge>','exec')
         self.assertEqual((root/'market_vision/coinglass_heatmap_capture.py').read_bytes(),native)

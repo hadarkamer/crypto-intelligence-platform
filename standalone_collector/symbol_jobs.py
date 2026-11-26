@@ -147,8 +147,15 @@ def _continue_attempt(connection, prior, rid, attempt):
             (prior['id'],)).fetchone()
         if not confirmed:
             raise BridgeError('login_pending', 'The source login event has not been resolved', 409)
-    _allow_new_source_work(connection)
-    connection.execute('DELETE FROM public.ai_collection_bridge_evidence WHERE job_id=%s', (prior['id'],))
+    retained = None
+    if modern_enabled() and (prior.get('symbol'),prior.get('heatmap_model'),prior.get('timeframe')) == ('BTC',1,'12H'):
+        retained = connection.execute("""SELECT diagnostic ? 'measured_btc_v1' AND image_png IS NOT NULL AS complete
+            FROM public.ai_collection_bridge_evidence WHERE job_id=%s AND
+            diagnostic ?| ARRAY['measured_btc_v1','measured_btc_partial_v1']""",(prior['id'],)).fetchone()
+    if not retained or not retained['complete']:
+        _allow_new_source_work(connection)
+    if not retained:
+        connection.execute('DELETE FROM public.ai_collection_bridge_evidence WHERE job_id=%s',(prior['id'],))
     return connection.execute("""UPDATE public.ai_collection_bridge_jobs
         SET status='queued',attempt=%s,started_at=NULL,finished_at=NULL,
             result=NULL,image_png=NULL,error_code=NULL

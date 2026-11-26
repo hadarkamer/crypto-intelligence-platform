@@ -272,7 +272,7 @@ class BrowserReplay(unittest.TestCase):
 
 class ReaderReplay(unittest.TestCase):
     """Exercise read_map through file/evidence generation, with UI I/O simulated."""
-    def replay(self, changed=False, tooltip=False, buffered=False):
+    def replay(self, changed=False, tooltip=False, buffered=False, covered=False):
         import io
         import tempfile
         from contextlib import ExitStack
@@ -313,7 +313,16 @@ class ReaderReplay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             def stub(k,**kw):return stack.enter_context(patch.object(reader,k,**kw))
             stub('open_verified_map');stub('display_ready');stub('details',return_value=data)
-            side=dict(data,raw_total='100M',raw_column_period='5m',sidebar_levels=[])
+            side=dict(data,raw_total='100M',raw_column_period='5m',raw_largest_value=None,sidebar_levels=[])
+            if covered:
+                side['raw_largest_value']='30M'
+                side['sidebar_levels']=[{'raw_price':str(p),'raw_value':f'{v}M'} for p,v,_ in reversed(levels)]
+                bank={number['raw_price']:number for number in side['sidebar_levels']}
+                def coverage(screen,box,bounds,marks,overview,model,anchor,step):
+                    h,groups=sample_groups(screen,bounds,model,anchor,step,lambda p:100+(120-p)*10,105)
+                    return '105',h,groups,{Decimal(p):m for p,m in bank.items()},bank['115']
+                stack.enter_context(patch('modern_map_axis.axis_marks',return_value=[]))
+                stack.enter_context(patch('modern_map_axis.match_displayed_bins',side_effect=coverage))
             stack.enter_context(patch('modern_map_overview.overview',return_value=side))
             rows=[]
             # Supplying a complete grid tests reuse of one effective hover.
@@ -342,9 +351,14 @@ class ReaderReplay(unittest.TestCase):
             else:
                 result=reader.read_map(page,'BTC',1,'12H',path)
                 self.assertTrue(path.read_bytes().startswith(b'\x89PNG'))
-            self.assertEqual(measures.call_count,1 if tooltip else 5)
-            self.assertEqual(hover.call_count,1 if tooltip else 2)
+            self.assertEqual(measures.call_count,0 if covered else 1 if tooltip else 5)
+            self.assertEqual(hover.call_count,0 if covered else 1 if tooltip else 2)
             return result
+
+    def test_complete_sidebar_skips_hover_and_measure_but_still_rechecks_column(self):
+        result=self.replay(covered=True,buffered=True)
+        self.assertEqual([g['raw_total'] for g in result['groups']],['15M','27M','30M'])
+        with self.assertRaises(StageFailure):self.replay(covered=True,changed=True)
 
     def test_covered_hover_grid_skips_all_per_bin_measurements(self):
         result=self.replay(tooltip=True,buffered=True)

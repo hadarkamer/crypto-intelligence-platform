@@ -28,6 +28,7 @@ class MeasuredInterpretation(unittest.TestCase):
         return self.snapshot
 
     def analyze(self, images, **options):
+        options['before_request']()
         self.calls += 1
         root = Path(images[0]['image']).parent
         self.assertEqual(json.loads((root/'measured-source.json').read_text())['snapshot'],self.snapshot)
@@ -57,6 +58,7 @@ class MeasuredInterpretation(unittest.TestCase):
 
     def test_indeterminate_transport_is_not_repeated_and_source_is_kept(self):
         def disconnected(*args,**kwargs):
+            kwargs['before_request']()
             self.calls += 1
             raise TimeoutError
         with TemporaryDirectory() as directory, patch.object(task,'capture',side_effect=self.capture) as cap:

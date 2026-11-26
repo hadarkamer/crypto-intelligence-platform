@@ -54,29 +54,37 @@ def table_rows(marks, anchor):
     headers = [(time,x,y) for t,x,y in raw_marks if (time:=_timestamp(t,anchor))]
     numeric = [(m[1]+m[2].upper(),x,y) for t,x,y in raw_marks if (m:=_NUMBER.fullmatch(t))]
     cells = set()
-    for _,_,head_y in headers:
+    header_heights = {y for _,_,y in headers}
+    for head_y in header_heights:
         header = sorted({(x,time) for time,x,y in headers if abs(y-head_y)<=3})
         if len(header)!=len({t for x,t in header}) or len(header)>12:
             continue
-        for raw,price_x,price_y in numeric:
-            if not re.fullmatch(PRICE,raw) or not 3<price_y-head_y<=305:
+        left, right = header[0][0], header[-1][0]
+        tolerance = min([32]+[(header[i][0]-header[i-1][0])*.43 for i in range(1,len(header))])
+        row_heights = {y for _,_,y in numeric if 3 < y - head_y <= 305}
+        for row_y in row_heights:
+            # An earlier tooltip title with a time is not a table header.
+            if any(head_y+3 < other_y < row_y-3 for other_y in header_heights):
                 continue
-            left = header[0][0]-price_x
-            if not 13<=left<=145:
+            row = sorted((x,t) for t,x,y in numeric
+                         if abs(y-row_y)<=3 and left-145<=x<=right+145)
+            if len(row) != len(header)+1:
                 continue
-            line = [(x,t) for t,x,y in numeric if abs(y-price_y)<=3]
-            if any(x<price_x-3 and price_x-x<145 for x,t in line):
-                continue
-            other = sorted((x,t) for x,t in line if x>price_x+6 and x<=header[-1][0]+35)
-            if len(header)!=len(other):
-                continue
-            # Canvas alignments can be end- or centre-aligned. Reject marks
-            # drifting into a neighbouring time column.
-            tolerance=min([32]+[(header[i][0]-header[i-1][0])*.43 for i in range(1,len(header))])
-            if any(abs(actual_x-expected_x)>tolerance for (actual_x,_),(expected_x,_) in zip(other,header)):
-                continue
-            for (_,amount),(_,stamp) in zip(other,header):
-                cells.add((raw,amount,stamp))
+            # The visible price axis can be on either side. Accept only one
+            # complete alignment, so missing amounts never shift time columns.
+            options = []
+            for (axis_x,price), amounts, gap in (
+                (row[0],row[1:],left-row[0][0]),
+                (row[-1],row[:-1],row[-1][0]-right),
+            ):
+                if not 13<=gap<=145 or not re.fullmatch(PRICE,price):
+                    continue
+                if all(abs(x-header_x)<=tolerance for (x,_),(header_x,_) in zip(amounts,header)):
+                    options.append((price,amounts))
+            if len(options) == 1:
+                price, amounts = options[0]
+                for (_,amount),(_,stamp) in zip(amounts,header):
+                    cells.add((price,amount,stamp))
     return [dict(price=p,amount=a,time=t) for p,a,t in sorted(cells)]
 
 

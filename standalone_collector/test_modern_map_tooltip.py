@@ -24,5 +24,29 @@ class RenderedTableTests(unittest.TestCase):
         self.assertEqual({r['price'] for r in rows},{'60,050'})
         self.assertEqual(table_rows([('23:55',148,40)]+self.labels,self.at),[])
 
+    def test_right_price_axis_with_multitime_cells_and_uncertain_orientation(self):
+        right = [(text, 209 if x in (29,30) else x, y) for text,x,y in self.labels]
+        self.assertEqual(table_rows(right,self.at),table_rows(self.labels,self.at))
+        self.assertEqual(table_rows([('00:00',80,50),('12',65,74),('14',95,74)],self.at),[])
+
+    def test_captured_right_axis_without_amounts_and_coarser_price_bins(self):
+        # Sanitized Firefox hover on 26 November 2026. The original receipt
+        # exposes row and column headers, but contains no numeric amount cells.
+        at = datetime(2026,11,26,13,43,tzinfo=timezone.utc)
+        headers = [(stamp,x,728) for stamp,x in zip(
+            ('13:20','13:25','13:30','13:35','13:40'),(634,696,758,820,882))]
+        prices = [('61,018',950,750),('60,931',950,775),('60,844',950,800),
+                  ('60,756',950,825),('60,669',950,850),('60,582',950,875),('60,495',950,900)]
+        actual = [('11/26 13:40',639,681),*headers,*prices]
+        self.assertEqual(table_rows(actual,at),[])
+        # An isolated shaped replay adds synthetic amounts; it must still
+        # reject a row ladder spanning two native steps for per-bin amounts.
+        amounts = [('1.0M',x,y) for _,x,_ in headers for _,_,y in prices]
+        rows = table_rows([*actual,*amounts],at)
+        self.assertEqual(len(rows),35)
+        book = {}
+        counts = merge_cells(book,rows,'11/26 13:40','43.56')
+        self.assertEqual((book,counts['unresolved'],counts['historical']),({},7,28))
+
     def test_source_sum_preserves_coarsest_precision(self):
         self.assertEqual(member_sum([{'raw_value':'1.1M'},{'raw_value':'12.34K'}]),'1.1M')

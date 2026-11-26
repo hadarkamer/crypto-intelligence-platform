@@ -62,6 +62,10 @@ def interpretation_inputs(snapshot, overview=None):
         facts[field] = (None if field.startswith('raw_realized_') and
                         metrics.get('realized_24h_status') == 'component_total_conflict' else raw)
     if overview:
+        known = set(facts) | {'sidebar_levels', 'sidebar_shape', 'raw_column_period','raw_above_pct',
+                              'raw_below_pct','raw_updated_at'}
+        facts['missing_fields'] = sorted({k for k in known if k in overview.get('missing_fields',[])})
+        facts['ambiguous_fields'] = sorted({k for k in known if k in overview.get('ambiguous_fields',[])})
         facts['realized_24h_status'] = metrics['realized_24h_status']
         facts['sidebar_price_amount_distance'] = []
         for row in overview.get('sidebar_levels', []):
@@ -274,6 +278,12 @@ def _write_once(path, value):
 
 
 def _run_measured_btc(root, run_id, analyze):
+    from modern_map_checkpoint import acknowledgements
+    with acknowledgements() as acknowledge:
+        return _process_measured_btc(root,run_id,analyze,acknowledge)
+
+
+def _process_measured_btc(root, run_id, analyze, acknowledge):
     image_path = root / 'image.png'
     source_path = root / 'measured-source.json'
     answer_path = root / 'measured-interpretation.json'
@@ -281,18 +291,31 @@ def _run_measured_btc(root, run_id, analyze):
     if source_path.exists():
         capture_record = json.loads(source_path.read_text())
     else:
-        overview = {}
+        overview, hovers, stages = {}, [], []
         def observe(kind, data):
             if kind == 'overview':
                 overview.update(data)
+            elif kind == 'stage':
+                stages.append(data)
+            elif kind == 'hover':
+                hovers.append(data)
         stage('capture')
-        snapshot = capture('BTC',1,'12H',image_path,observe=observe)
+        try:
+            snapshot = capture('BTC',1,'12H',image_path,observe=observe)
+        except Exception as error:
+            if overview or hovers or stages:
+                from modern_map_checkpoint import partial_record
+                partial = partial_record(run_id,overview,hovers,stages,error,image_path)
+                _write_once(root/'measured-partial.json',partial)
+                acknowledge(b'P')
+            raise
         image = image_path.read_bytes()
         if len(image) > 4*1024*1024 or not image.startswith(b'\x89PNG\r\n\x1a\n'):
             raise StageFailure('image_evidence_invalid')
         capture_record = dict(run_id=run_id,snapshot=snapshot,overview=overview,
                               image_sha256=hashlib.sha256(image).hexdigest())
         _write_once(source_path,capture_record)
+        acknowledge(b'S')
     image = image_path.read_bytes()
     digest = hashlib.sha256(image).hexdigest()
     if capture_record.get('run_id') != run_id or capture_record.get('image_sha256') != digest:
@@ -310,17 +333,24 @@ def _run_measured_btc(root, run_id, analyze):
         raw = stored['answer']
     else:
         instructions, rows = interpretation_inputs(snapshot,overview)
-        # Only a known response can be replayed. An indeterminate POST cannot
-        # consume another request for the same retained capture.
-        try:
-            _write_once(root/'measured-analysis-started.json', {'run_id':run_id,'image_sha256':digest})
-        except FileExistsError:
-            raise StageFailure('analysis_response_invalid') from None
+        if (root/'measured-analysis-started.json').exists():
+            raise StageFailure('analysis_incomplete')
+
+        def reserve_request():
+            # Called by the scanner only once the request is ready to transmit.
+            try:
+                _write_once(root/'measured-analysis-started.json', {'run_id':run_id,'image_sha256':digest})
+            except FileExistsError:
+                raise StageFailure('analysis_incomplete') from None
+            acknowledge(b'C')
+
         stage('analysis')
         with phase('analysis'):
             raw = analyze([dict(image=str(image_path),timeframe='12H',measure_candidates=rows)], symbol='BTC',
-                          timeout_seconds=120,evidence_schema=summary_schema(),evidence_instructions=instructions)
+                          timeout_seconds=120,evidence_schema=summary_schema(),evidence_instructions=instructions,
+                          before_request=reserve_request)
         _write_once(answer_path,dict(run_id=run_id,image_sha256=digest,answer=raw))
+        acknowledge(b'V')
     remember_analysis(raw)
     stage('validation')
     result = normalized_summary(raw,snapshot,run_id,image,overview)

@@ -303,7 +303,12 @@ PAINT = """box => {
       if(this.globalAlpha>0 && /^(?:(?:[0-9]{1,2}\\/[0-9]{1,2} )?[0-9]{1,2}:[0-9]{2}|(?:\\$\\s*)?[0-9,]+(?:\\.\\d+)?\\s*[KMB]?)$/i.test(String(txt)) && String(txt).length<=32) {
         const p=new DOMPoint(x,y).matrixTransform(this.getTransform());
         const px=r.x+p.x*r.width/c.width, py=r.y+p.y*r.height/c.height;
-        if(Number.isFinite(px+py) && px>=r.left-1 && px<=r.right+1 && py>=r.top-1 && py<=r.bottom+1) labels.push([String(txt),px,py,this.textBaseline]);
+        if(Number.isFinite(px+py) && px>=r.left-1 && px<=r.right+1 && py>=r.top-1 && py<=r.bottom+1) {
+          const text=this.measureText(String(txt));
+          const centre=new DOMPoint(x,y+(text.actualBoundingBoxDescent-text.actualBoundingBoxAscent)/2)
+              .matrixTransform(this.getTransform());
+          labels.push([String(txt),px,py,this.textBaseline,r.y+centre.y*r.height/c.height]);
+        }
         if(labels.length>6000)labels.splice(0,3000);
       }
       return result;
@@ -413,13 +418,8 @@ def measure_box(page, bounds, y1, y2):
     if not choice(page,'Right edge'):
         right_edge.click(timeout=3000)
     wait_for(page,lambda:choice(page,'Right edge'))
-    panel=label(page,'Largest cluster').evaluate("""el=>{
-      for(let n=el;n&&n!==document.body;n=n.parentElement){
-        const s=n.innerText;
-        if(s.includes('Box total') && s.includes('Reference'))return s;
-      }return '';
-    }""")
-    return measurement(panel)
+    from modern_map_measure_panel import measure_panel
+    return measure_panel(page,right_edge)
 
 
 def display_ready(page):
@@ -546,7 +546,8 @@ def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=No
             value=action()
         except Exception as error:
             emit('stage',dict(name=name,status='failed',elapsed_ms=round((time.monotonic()-started)*1000),
-                              condition=getattr(error,'reason',None) or getattr(error,'code','reader_failed')))
+                              condition=getattr(error,'reason',None) or getattr(error,'code','reader_failed'),
+                              details=getattr(error,'measure_detail',None)))
             raise
         emit('stage',dict(name=name,status='ok',elapsed_ms=round((time.monotonic()-started)*1000)))
         return value
@@ -596,8 +597,8 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         x0,y0,x1,y1=bounds
         def stamp_at(x):
             return read_paint(page,box,x,(y1+y0)//2,observe=emit)
-        prior,_=stage('read_prior_crosshair_time',lambda:stamp_at(x0+(x1-x0)*.72))
-        raw_time,_=stage('read_latest_crosshair_time',lambda:stamp_at(x1-1))
+        prior,prior_marks=stage('read_prior_crosshair_time',lambda:stamp_at(x0+(x1-x0)*.72))
+        raw_time,current_marks=stage('read_latest_crosshair_time',lambda:stamp_at(x1-1))
         update = datetime.fromisoformat(before['source_time'])
         column = source_clock(raw_time,update,column=True)
         previous=source_clock(prior,column,column=True,max_lag=48*3600)
@@ -629,25 +630,35 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
             event['counts']=result
             emit('hover',event)
             usable=usable or bool(result['accepted'] or result['duplicates'])
-        if supplemental is not None:
-            hover((y1+y0)//2)
-        # Obtain the independently displayed reference, native price domain
-        # and maximum. A sidebar/table alone does not establish all three.
-        last,full,strongest,low_bound,high_bound=stage(
-            'measure_price_domain_and_maximum',lambda:measure_box(page,bounds,y0+.2,y1-.2))
-        emit('stage',dict(name='observed_price_domain',status='ok',last=last,raw_total=full,
-                          raw_above=before['raw_above_total'],raw_below=before['raw_below_total'],
-                          low=str(low_bound),high=str(high_bound),strongest=strongest))
-        stage('compare_map_and_side_totals',
-              lambda:equivalent(full,[before['raw_above_total'],before['raw_below_total']]))
-        last_price = number(last)[0]
-        stage('validate_price_domain',lambda:check(0 < low_bound < last_price < high_bound))
-        def where(price):
-            return y1-.2-(price-float(low_bound))*(y1-y0-.4)/float(high_bound-low_bound)
-        height,runs=stage('locate_prominent_latest_bins',
-                          lambda:sample_groups(screen,bounds,model,raw_anchor,step,where,float(last_price)))
+        direct=None
+        if supplemental and supplemental.get('raw_largest_value') and supplemental['sidebar_levels']:
+            from modern_map_axis import axis_marks,match_displayed_bins
+            marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,current_marks))
+            direct=stage('verify_sidebar_covers_prominent_bins',lambda:match_displayed_bins(
+                screen,box,bounds,marks,supplemental,model,raw_anchor,step))
+        if direct is not None:
+            last,height,runs,book,strongest=direct
+            last_price=number(last)[0]
+        else:
+            if supplemental is not None:
+                hover((y1+y0)//2)
+            # Obtain the independently displayed reference, native price domain
+            # and maximum. A sidebar/table alone does not establish all three.
+            last,full,strongest,low_bound,high_bound=stage(
+                'measure_price_domain_and_maximum',lambda:measure_box(page,bounds,y0+.2,y1-.2))
+            emit('stage',dict(name='observed_price_domain',status='ok',last=last,raw_total=full,
+                              raw_above=before['raw_above_total'],raw_below=before['raw_below_total'],
+                              low=str(low_bound),high=str(high_bound),strongest=strongest))
+            stage('compare_map_and_side_totals',
+                  lambda:equivalent(full,[before['raw_above_total'],before['raw_below_total']]))
+            last_price = number(last)[0]
+            stage('validate_price_domain',lambda:check(0 < low_bound < last_price < high_bound))
+            def where(price):
+                return y1-.2-(price-float(low_bound))*(y1-y0-.4)/float(high_bound-low_bound)
+            height,runs=stage('locate_prominent_latest_bins',
+                              lambda:sample_groups(screen,bounds,model,raw_anchor,step,where,float(last_price)))
         sidebar={number(m['raw_price'])[0]:m for m in (supplemental or {}).get('sidebar_levels',[])}
-        method_counts=dict(hover=0,measure=0,sidebar_matches=0,hover_attempts=0)
+        method_counts=dict(dom=0,hover=0,measure=0,sidebar_matches=0,hover_attempts=0)
         def agrees_with_rail(member):
             label=sidebar.get(number(member['raw_price'])[0])
             if label:
@@ -671,7 +682,7 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
                     equivalent(total,[member['raw_value']])
                     method_counts['measure']+=1
                 else:
-                    method_counts['hover']+=1
+                    method_counts['dom' if direct is not None else 'hover']+=1
                 stage('validate_latest_bin',lambda:verified_member(row,member,step))
                 stage('compare_bin_to_sidebar',lambda:agrees_with_rail(member))
                 values.append(member)
@@ -702,7 +713,7 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
             final_market=stage('recheck_market_update',lambda:overview(page))
             check(all(final_market[k]==supplemental[k] for k in (
                 'source_time','raw_total','raw_above_total','raw_below_total','raw_price_step',
-                'raw_column_period','sidebar_levels')))
+                'raw_column_period','raw_largest_value','sidebar_levels')))
             after=core_observation(final_market)
         else:
             after=details(page)
