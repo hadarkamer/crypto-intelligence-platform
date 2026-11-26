@@ -251,6 +251,22 @@ def chart_box(page):
     return tuple(round(box[k]) for k in ('x','y','width','height'))
 
 
+def position_chart(page):
+    box = chart_box(page)
+    viewport = page.viewport_size
+    if not viewport:
+        return box
+    x, y, width, height = box
+    overflow = y + height - viewport['height']
+    if (overflow > 0 and height <= viewport['height'] and y >= 0 and
+            0 <= x and x + width <= viewport['width']):
+        # Keep every chart row. After the minimal document scroll, the full
+        # canvas and control rectangles still have to pass the capture checks.
+        page.evaluate("dy => window.scrollBy({top:dy,left:0,behavior:'instant'})", overflow)
+        return chart_box(page)
+    return box
+
+
 # Observe only text actually painted by the visible chart. This hook runs on
 # this page's canvas instances while the crosshair is displayed. It never
 # inspects the chart's data model, network, browser storage or client bundles.
@@ -428,20 +444,30 @@ def market_surface(page, box, controls, guard):
     # Numeric routines use viewport coordinates. Build that coordinate space
     # from just the chart and identified map controls, leaving all else blank.
     viewport = page.viewport_size
-    check(viewport and 0 < viewport['width'] <= 4096 and 0 < viewport['height'] <= 4096)
+    def clip_error(reason, index=None, edges=None, size=None):
+        error = StageFailure('source_not_readable', reason)
+        error.market_clip = {'viewport': (viewport['width'], viewport['height']) if viewport else None,
+                             'rect_index': index, 'css_edges': edges, 'image_size': size}
+        return error
+
+    if not (viewport and 0 < viewport['width'] <= 4096 and 0 < viewport['height'] <= 4096):
+        raise clip_error('map_viewport_unavailable')
     screen = Image.new('RGB', (viewport['width'],viewport['height']), (10,13,18))
     left, top, width, height = box
     rectangles = [dict(x=left,y=top,width=width,height=height), *controls]
     try:
-        for rect in rectangles:
-            check(rect)
+        for index, rect in enumerate(rectangles):
+            if not rect:
+                raise clip_error('map_clip_missing', index)
             x, y = math.floor(rect['x']), math.floor(rect['y'])
             right = math.ceil(rect['x']+rect['width'])
             bottom = math.ceil(rect['y']+rect['height'])
-            check(0 <= x < right <= screen.width and 0 <= y < bottom <= screen.height)
+            if not (0 <= x < right <= screen.width and 0 <= y < bottom <= screen.height):
+                raise clip_error('map_clip_outside_viewport', index, (x, y, right, bottom))
             area = dict(x=x,y=y,width=right-x,height=bottom-y)
             with Image.open(BytesIO(protected_clip(page,area,guard))) as part:
-                check(part.size == (right-x,bottom-y))
+                if part.size != (right-x,bottom-y):
+                    raise clip_error('map_clip_size_mismatch', index, (x, y, right, bottom), part.size)
                 screen.paste(part,(x,y))
         return screen
     except BaseException:
@@ -461,7 +487,7 @@ def read_selected_map(page,symbol,model,timeframe,output,*,guard=None):
     if guard:guard()
     display_ready(page)
     before = details(page)
-    box = chart_box(page)
+    box = position_chart(page)
     left,top,width,height=box
     page.mouse.move(max(0,left-2),max(0,top-2))
     controls=evidence_controls(page,symbol,model)

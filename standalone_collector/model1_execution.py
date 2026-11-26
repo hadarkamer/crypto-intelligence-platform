@@ -28,6 +28,10 @@ VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_analysis_shape', 'hove
 VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_update_timeout', 'hover_candidates_unresolved', 'hover_candidate_missing', 'hover_candidate_disagreement', 'hover_cookie_overlay'])
 VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_price_axis_changed', 'hover_price_axis_mismatch'])
 VALIDATION_REASONS=VALIDATION_REASONS | {'map_shorts_amount_unreadable', 'map_longs_amount_unreadable'}
+MARKET_CLIP_REASONS = {'map_viewport_unavailable', 'map_clip_missing', 'map_clip_outside_viewport',
+                       'map_clip_size_mismatch'}
+VALIDATION_REASONS = VALIDATION_REASONS | MARKET_CLIP_REASONS
+
 VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_image_evidence_missing', 'hover_image_changed', 'hover_candidate_evidence_mismatch', 'hover_pool_not_visible'])
 VALIDATION_REASONS=VALIDATION_REASONS | frozenset(['hover_candle_text_invalid', 'hover_candle_time_invalid', 'hover_candle_number_invalid', 'hover_candle_evidence_mismatch', 'hover_candle_time_mismatch', 'hover_candle_not_found', 'hover_candle_outside_axis', 'hover_candle_changed'])
 STAGES=frozenset({'startup','capture','image_check','analysis','validation','saving'})
@@ -187,6 +191,21 @@ def remember_analysis(raw):
     if type(scan.get('readable')) is bool:facts['readable']=scan['readable']
     _analysis_facts=facts
 
+def safe_market_clip(value):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, length in (('viewport', 2), ('css_edges', 4), ('image_size', 2)):
+        values = value.get(key)
+        if (isinstance(values, (list, tuple)) and len(values) == length and
+                all(type(x) is int and abs(x) <= 65536 for x in values)):
+            result[key] = list(values)
+    index = value.get('rect_index')
+    if type(index) is int and 0 <= index <= 7:
+        result['rect_index'] = index
+    return result
+
+
 def failure_detail(exc):
     inner=exc.__cause__ if exc.__cause__ is not None else exc
     kind=type(inner).__name__
@@ -195,6 +214,9 @@ def failure_detail(exc):
             'capture_phase':phase if phase in PHASES else 'capture'}
     reason=getattr(exc,'reason',None)
     if isinstance(reason,str) and reason in VALIDATION_REASONS:detail['validation_reason']=reason
+    if detail.get('validation_reason') in MARKET_CLIP_REASONS:
+        detail['market_clip'] = safe_market_clip(getattr(exc, 'market_clip', None))
+
     capture_state=getattr(exc,'_model1_source_capture_state',None)
     if capture_state is not None:
         from capture_failure_observer import safe_failure_state,CLICK_FAILURES
@@ -278,6 +300,8 @@ def read_failure(path,job_id,returncode):
                     'blocking_condition':{'none','loading','login','blur','challenge','unknown'}}.items():
                     val=raw.get(key)
                     if isinstance(val,str) and val in allowed:report[key]=val
+                if report.get('validation_reason') in MARKET_CLIP_REASONS:
+                    report['market_clip'] = safe_market_clip(raw.get('market_clip'))
                 if type(raw.get('elapsed_seconds')) in (int,float) and 0<=raw['elapsed_seconds']<=360:
                     report['elapsed_seconds']=raw['elapsed_seconds']
                 report['usage']=numeric_usage(raw.get('usage'))

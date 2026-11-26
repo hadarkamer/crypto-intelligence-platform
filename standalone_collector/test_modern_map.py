@@ -118,6 +118,73 @@ class ModernMapTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'source_not_readable')
             self.assertEqual(failure_detail(caught.exception)['validation_reason'], reason)
 
+    def test_position_entire_chart_after_measured_bottom_overflow(self):
+        from unittest.mock import Mock, patch
+        from modern_map_reader import position_chart, market_surface
+
+        page = Mock()
+        page.viewport_size = {'width': 1440, 'height': 1280}
+        # Captured viewport and canvas coordinates from the Firefox BTC pilot.
+        observed = (17, 495, 1074, 800)
+        shown = (17, 480, 1074, 800)
+        with patch('modern_map_reader.chart_box', side_effect=[observed, shown]):
+            self.assertEqual(position_chart(page), shown)
+            self.assertEqual(page.evaluate.call_args.args[1], 15)
+        page.reset_mock()
+        with patch('modern_map_reader.chart_box', return_value=shown):
+            self.assertEqual(position_chart(page), shown)
+            page.evaluate.assert_not_called()
+        # A scroll which fails to expose the last 15 rows cannot authorize a partial read.
+        with patch('modern_map_reader.chart_box', return_value=observed):
+            unchanged = position_chart(page)
+            with self.assertRaises(StageFailure) as caught:
+                market_surface(page, unchanged, [], None)
+            self.assertEqual(caught.exception.reason, 'map_clip_outside_viewport')
+        page.reset_mock()
+        oversized = (17, 495, 1074, 1300)
+        with patch('modern_map_reader.chart_box', return_value=oversized):
+            self.assertEqual(position_chart(page), oversized)
+            page.evaluate.assert_not_called()
+
+    def test_market_surface_reports_only_bounded_clip_geometry(self):
+        from contextlib import redirect_stdout
+        from io import BytesIO, StringIO
+        from tempfile import TemporaryDirectory
+        from unittest.mock import Mock, patch
+        from model1_execution import failure_detail, read_failure
+        from modern_map_reader import market_surface
+
+        page = Mock()
+        page.viewport_size = {'width': 80, 'height': 60}
+        with BytesIO() as data:
+            with Image.new('RGB', (40, 20)) as sample:
+                sample.save(data, 'PNG')
+            png = data.getvalue()
+        for box, controls, reason, expected in (
+            ((0, 0, 40, 20), [None], 'map_clip_missing', {'rect_index': 1}),
+            ((0, 0, 40, 20), [dict(x=-.2, y=1, width=1, height=1)], 'map_clip_outside_viewport',
+             {'rect_index': 1, 'css_edges': [-1, 1, 1, 2]}),
+            ((0, 0, 20, 10), [], 'map_clip_size_mismatch',
+             {'rect_index': 0, 'css_edges': [0, 0, 20, 10], 'image_size': [40, 20]}),
+        ):
+            with self.subTest(reason=reason), patch('modern_map_reader.protected_clip', return_value=png):
+                with self.assertRaises(StageFailure) as caught:
+                    market_surface(page, box, controls, None)
+                detail = failure_detail(caught.exception)
+                self.assertEqual(detail['validation_reason'], reason)
+                self.assertEqual(detail['market_clip'], {'viewport': [80, 60], **expected})
+        with TemporaryDirectory() as folder, redirect_stdout(StringIO()) as printed:
+            error_file = Path(folder)/'error.json'
+            detail['market_clip']['private_text'] = 'do-not-export'
+            error_file.write_text(json.dumps({'code': 'source_not_readable', **detail}))
+            read_failure(error_file, 'fixture', 1)
+            self.assertNotIn('do-not-export', printed.getvalue())
+            self.assertIn('"image_size": [40, 20]', printed.getvalue())
+        page.viewport_size = None
+        with self.assertRaises(StageFailure) as caught:
+            market_surface(page, (0, 0, 20, 10), [], None)
+        self.assertEqual(caught.exception.reason, 'map_viewport_unavailable')
+
     def test_read_native_measurement(self):
         last,total,leader,lo,hi=measurement('Box total · 61,418 → 61,680 (0.44%)\n91.1M\n'
                                            'Largest cluster\n61,500 · 51.0M\nReference (last price)\n60,036')
