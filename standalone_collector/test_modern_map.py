@@ -193,6 +193,33 @@ class ModernMapTests(unittest.TestCase):
             market_surface(page, (0, 0, 20, 10), [], None)
         self.assertEqual(caught.exception.reason, 'map_viewport_unavailable')
 
+    def test_market_notice_blocks_even_a_painted_right_edge_time(self):
+        from unittest.mock import Mock, patch
+        from modern_map_reader import read_paint, read_selected_map
+
+        page = Mock()
+        notice = Mock()
+        notice.count.return_value = 1
+        notice.nth.return_value.is_visible.return_value = True
+        time_labels = Mock()
+        time_labels.count.return_value = 0
+        page.get_by_text.side_effect = lambda rx: notice if 'essential cookies' in rx.pattern else time_labels
+        decline = page.locator.return_value.get_by_role.return_value
+        decline.count.return_value = 0
+        with patch('modern_map_reader.display_ready') as navigate:
+            with self.assertRaises(StageFailure) as blocked:
+                read_selected_map(page, 'BTC', 1, '12H', None)
+            self.assertEqual(blocked.exception.reason, 'hover_cookie_overlay')
+            navigate.assert_not_called()
+        painted = page.evaluate_handle.return_value
+        painted.evaluate.return_value = [['11/26 12:08', 800, 794, 'top']]
+        with patch('modern_map_reader.wait_for', side_effect=lambda p, read, **kw: read()):
+            with self.assertRaises(StageFailure) as late:
+                read_paint(page, (0, 0, 1074, 800), 800, 400)
+            self.assertEqual(late.exception.reason, 'hover_cookie_overlay')
+            painted.dispose.assert_called_once()
+        decline.press.assert_not_called()
+
     def test_read_native_measurement(self):
         last,total,leader,lo,hi=measurement('Box total · 61,418 → 61,680 (0.44%)\n91.1M\n'
                                            'Largest cluster\n61,500 · 51.0M\nReference (last price)\n60,036')
@@ -254,6 +281,8 @@ class ReaderReplay(unittest.TestCase):
         from PIL import ImageDraw
         import modern_map_reader as reader
         page=Mock()
+        page.get_by_text.return_value.count.return_value=0
+        page.locator.return_value.get_by_role.return_value.count.return_value=0
         page.url=map_url('BTC')
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         data={'source_time':clock.isoformat().replace('+00:00','Z'),'raw_price_step':'1',

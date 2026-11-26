@@ -314,6 +314,17 @@ PAINT = """box => {
 }"""
 
 
+def clear_cookie_notice(page, *, model=None):
+    from heatmap_hover import HoverError, dismiss_cookie_banner, require_cookie_banner_hidden
+    try:
+        if model is None:
+            require_cookie_banner_hidden(page)
+        else:
+            dismiss_cookie_banner(page, model=model)
+    except HoverError as error:
+        raise StageFailure('source_not_readable', error.reason) from error
+
+
 def read_paint(page, box, x, y):
     page.mouse.move(box[0]-2, max(1,box[1]-2))
     watch = page.evaluate_handle(PAINT, list(box))
@@ -329,7 +340,11 @@ def read_paint(page, box, x, y):
                 if (pos and abs(pos['x']+pos['width']/2-x)<95 and
                     box[1]+.78*box[3]<=pos['y']<=box[1]+box[3]):
                     stamps.add(marker.inner_text().strip())
-            return (stamps.pop(),labels) if len(stamps)==1 else None
+            if len(stamps) == 1:
+                # Canvas text can be painted behind a late consent banner.
+                clear_cookie_notice(page)
+                return stamps.pop(), labels
+            return None
         return wait_for(page,timestamp,timeout=3)
     finally:
         watch.evaluate('w=>w.restore()')
@@ -505,10 +520,14 @@ def read_map(page, symbol, model, timeframe, output):
 @phase('map_read')
 def read_selected_map(page,symbol,model,timeframe,output,*,guard=None):
     if guard:guard()
+    clear_cookie_notice(page, model=model)
+    def clear_surface():
+        if guard:guard()
+        clear_cookie_notice(page)
     display_ready(page)
     before = details(page)
-    with position_chart(page, guard) as box:
-        return _measure_selected_map(page, symbol, model, timeframe, output, before, box, guard)
+    with position_chart(page, clear_surface) as box:
+        return _measure_selected_map(page, symbol, model, timeframe, output, before, box, clear_surface)
 
 
 def _measure_selected_map(page, symbol, model, timeframe, output, before, box, guard):
