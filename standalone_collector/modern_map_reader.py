@@ -565,19 +565,30 @@ def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=No
     else:
         before=details(page)
     with position_chart(page, clear_surface) as box:
+        from playwright.sync_api import Error as BrowserError
+        document=None
+        if pilot and observe:
+            try:
+                document=page.evaluate_handle('()=>document')
+            except BrowserError:
+                pass
         try:
             return _measure_selected_map(page,symbol,model,timeframe,output,before,box,clear_surface,
                                          supplemental,emit,stage)
         except Exception:
-            if pilot and observe:
+            if document is not None:
                 from modern_map_overview import after_read_failure
                 def still_present():
                     limited_timeout(1000)
-                    if page.is_closed() or page.url!=map_url(symbol):
+                    if page.is_closed() or page.url!=map_url(symbol) or not document.evaluate('d=>d===document'):
                         raise StageFailure('source_navigation_changed')
                     if guard:guard()
                 after_read_failure(page,still_present,emit)
             raise
+        finally:
+            if document is not None:
+                try:document.dispose()
+                except BrowserError:pass
 
 
 def core_observation(facts):

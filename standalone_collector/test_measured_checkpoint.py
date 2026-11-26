@@ -132,7 +132,17 @@ class MeasuredCheckpoint(unittest.TestCase):
             path.write_bytes(FIXTURE.read_bytes())
             observe('overview',dict(raw_total='1.29B',source_time=self.snapshot['source_time'],
                                     extra='excluded-private-fixture'))
-            observe('stage',dict(name='measure_price_domain_and_maximum',status='failed',elapsed_ms=23))
+            observe('stage',dict(name='chart_obstruction',status='partial',cards=1,eligible=0,
+                                 close_attempts=0,covered=[[10,20,80,100]],unknown=[],html='excluded-private-fixture'))
+            observe('stage',dict(name='measure_price_domain_and_maximum',status='failed',elapsed_ms=23,
+                                 details=dict(reason='number_missing',field='leader',
+                                              label_counts=dict(box=1,leader=2,reference=1,unexpected=1),
+                                              reading_counts=dict(box=1,leader=0,reference='excluded-private-fixture'))))
+            observe('stage',dict(name='post_failure_market_observation',status='observed',
+                                 post_failure_raw_updated_at='12:13',post_failure_source_time='2026-11-24T12:13:00Z',
+                                 post_failure_observed_at='2026-11-24T12:13:03.123Z',
+                                 post_failure_raw_total='1.30B',post_failure_raw_above_total='excluded-private-fixture',
+                                 post_failure_raw_below_total='471.2M',debug='excluded-private-fixture'))
             raise StageFailure('source_not_readable')
         with patch.object(self,'capture',side_effect=lost_map), self.assertRaises(StageFailure):
             asyncio.run(self.attempt(None))
@@ -142,6 +152,15 @@ class MeasuredCheckpoint(unittest.TestCase):
         partial = row['diagnostic'][checkpoint.PARTIAL]
         self.assertEqual(partial['failure']['name'],'measure_price_domain_and_maximum')
         self.assertEqual(partial['overview']['raw_total'],'1.29B')
+        self.assertEqual(partial['failure']['details'],dict(reason='number_missing',field='leader',
+            label_counts=dict(box=1,leader=2,reference=1),reading_counts=dict(box=1,leader=0)))
+        self.assertEqual(partial['chart_obstruction'],dict(status='partial',cards=1,eligible=0,
+            close_attempts=0,covered=[[10,20,80,100]],unknown=[]))
+        self.assertEqual(partial['post_failure_market_observation'],dict(status='observed',
+            post_failure_raw_updated_at='12:13',post_failure_source_time='2026-11-24T12:13:00Z',
+            post_failure_observed_at='2026-11-24T12:13:03.123Z',post_failure_raw_total='1.30B',
+            post_failure_raw_below_total='471.2M'))
+        self.assertEqual(partial['source_time'],self.snapshot['source_time'])
         self.assertNotIn('excluded-private-fixture',json.dumps(partial))
         def analyze(*args,before_request,**kwargs):
             before_request()

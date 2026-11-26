@@ -32,6 +32,46 @@ EXPIRE_IMAGES = """UPDATE public.ai_collection_bridge_evidence AS e SET image_pn
         (SELECT 1 FROM public.ai_collection_bridge_jobs j WHERE j.id=e.job_id AND j.status='ready'))"""
 
 
+def _observation_receipts(stages):
+    receipts = {}
+    iso_utc = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z'
+    amount = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[KMBT]?'
+    clock_fields = {'post_failure_observed_at':iso_utc, 'post_failure_source_time':iso_utc,
+                    'post_failure_raw_updated_at':r'(?:[01]\d|2[0-3]):[0-5]\d',
+                    **{'post_failure_raw_'+k:amount for k in ('total','above_total','below_total')}}
+    for step in stages:
+        name, status = step.get('name'), step.get('status')
+        if name == 'post_failure_market_observation' and status in ('observed','unavailable','stale_or_unverified_time'):
+            receipts[name] = {'status':status, **{k:step[k] for k,pattern in clock_fields.items() if k in step
+                and (step[k] is None or isinstance(step[k],str) and len(step[k])<=40 and re.fullmatch(pattern,step[k]))}}
+        elif name == 'chart_obstruction' and status in ('clear','partial'):
+            receipt = {'status':status}
+            for key in ('cards','eligible','close_attempts'):
+                if type(step.get(key)) is int and step[key] >= 0:
+                    receipt[key] = step[key]
+            for key in ('covered','unknown'):
+                if isinstance(step.get(key),list):
+                    receipt[key] = [rect for rect in step[key] if isinstance(rect,list) and len(rect)==4
+                                    and all(type(n) is int for n in rect) and rect[0]<rect[2] and rect[1]<rect[3]]
+            receipts[name] = receipt
+    return receipts
+
+
+def _measure_detail(detail):
+    if not isinstance(detail,dict) or detail.get('reason') not in (
+            'right_edge_inactive','label_missing','number_missing','conflicting_values'):
+        return None
+    labels = ('box','leader','reference')
+    result = {'reason':detail['reason']}
+    if detail.get('field') in labels:
+        result['field'] = detail['field']
+    for kind in ('label_counts','reading_counts'):
+        counts = detail.get(kind)
+        if isinstance(counts,dict):
+            result[kind] = {k:counts[k] for k in labels if type(counts.get(k)) is int and 0<=counts[k]<=220}
+    return result
+
+
 def partial_record(job, overview, hovers, stages, error, image_path):
     """Keep validated public market fields and the failing step. A partial cannot authorize analysis."""
     from modern_map_overview import _FIELDS
@@ -46,9 +86,13 @@ def partial_record(job, overview, hovers, stages, error, image_path):
                                          type(error).__name__) if isinstance(token,str) and safe.fullmatch(token)), 'reader_failed')
     failure = {k:last[k] for k in ('name','expected','received','missing','elapsed_ms') if k in last}
     failure['condition'] = condition
+    detail = _measure_detail(last.get('details'))
+    if detail is not None:
+        failure['details'] = detail
     # Every event comes from the reader's market-only projection. Do not store page text or exceptions.
     rows = [{k:event[k] for k in ('source','rows','counts','raw_step') if k in event} for event in hovers]
     return dict(run_id=job,status='partial',identity=dims,overview=typed,hover=rows,failure=failure,
+                **_observation_receipts(stages),
                 source_time=overview.get('source_time'),image_sha256=(hashlib.sha256(image_path.read_bytes()).hexdigest()
                 if image_path.is_file() else None))
 

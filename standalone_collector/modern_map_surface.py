@@ -30,7 +30,7 @@ _INSPECT = r"""box => {
                 [...p.querySelectorAll('b,strong,span,p,div,h2,h3')].some(e=>
                     visible(e) && /^CoinGlass\s+Legend$/i.test(norm(e.innerText)));
             if (titled && rect(p)) {
-                found=found||p;
+                if (!found || ['fixed','sticky','absolute'].includes(getComputedStyle(p).position))found=p;
                 if([...p.querySelectorAll('button,[role=button]')].some(btn=>
                   /^(?:close|dismiss)(?: (?:ad|advertisement|promotion))?$/i.test(
                       norm(btn.getAttribute('aria-label')||btn.getAttribute('title')||btn.innerText)))){found=p;break;}
@@ -41,10 +41,12 @@ _INSPECT = r"""box => {
     const blocked=[];
     for (const e of document.querySelectorAll('iframe,dialog,[role=dialog],[aria-modal=true],[popover],aside,div,section')) {
         if(!visible(e) || [...cards].some(card=>card.contains(e)||e.contains(card)))continue;
-        const b=e.getBoundingClientRect(), pos=getComputedStyle(e).position;
+        const b=e.getBoundingClientRect(), style=getComputedStyle(e), pos=style.position;
         const modal=e.matches('iframe,dialog,[role=dialog],[aria-modal=true],[popover]');
-        if(!modal && (!['fixed','sticky','absolute'].includes(pos) || b.width<90 || b.height<45 ||
-                   b.width*b.height>w*h*.8 || !e.querySelector('a[href],button,[role=button]')))continue;
+        const opaque = !['transparent','rgba(0, 0, 0, 0)',''].includes(style.backgroundColor);
+        const independent=e.querySelector('a[href],button,[role=button]') || opaque && e.innerText.trim();
+        if(!modal && (e.querySelector('canvas') || !['fixed','sticky','absolute'].includes(pos) ||
+            b.width<90 || b.height<45 || !independent))continue;
         const clip=rect(e);
         if(clip && !blocked.some(r=>r[0]<=clip[0]&&r[1]<=clip[1]&&r[2]>=clip[2]&&r[3]>=clip[3]))blocked.push(clip);
     }
