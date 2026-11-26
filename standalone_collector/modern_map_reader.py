@@ -251,20 +251,40 @@ def chart_box(page):
     return tuple(round(box[k]) for k in ('x','y','width','height'))
 
 
-def position_chart(page):
+@contextmanager
+def position_chart(page, guard=None):
     box = chart_box(page)
     viewport = page.viewport_size
-    if not viewport:
-        return box
     x, y, width, height = box
-    overflow = y + height - viewport['height']
-    if (overflow > 0 and height <= viewport['height'] and y >= 0 and
-            0 <= x and x + width <= viewport['width']):
-        # Keep every chart row. After the minimal document scroll, the full
-        # canvas and control rectangles still have to pass the capture checks.
-        page.evaluate("dy => window.scrollBy({top:dy,left:0,behavior:'instant'})", overflow)
-        return chart_box(page)
-    return box
+    if not viewport or not (
+        y >= 0 and 0 <= x and x + width <= viewport['width'] and
+        height <= viewport['height'] < y + height
+    ):
+        yield box
+        return
+    from playwright.sync_api import Error as BrowserError
+    if guard:
+        guard()
+    previous = page.evaluate_handle("""dy => {
+        const previous = {doc:document, x:scrollX, y:scrollY};
+        scrollBy({top:dy,left:0,behavior:'instant'});
+        return previous;
+    }""", y + height - viewport['height'])
+    try:
+        if guard:
+            guard()
+        yield chart_box(page)
+    finally:
+        # The chart and its controls were measured in the updated viewport.
+        # Restore only this same document, also when the read fails partway.
+        try:
+            try:
+                previous.evaluate("""p => {if(p.doc === document)
+                    scrollTo({left:p.x,top:p.y,behavior:'instant'});}""")
+            finally:
+                previous.dispose()
+        except BrowserError:
+            pass
 
 
 # Observe only text actually painted by the visible chart. This hook runs on
@@ -487,7 +507,11 @@ def read_selected_map(page,symbol,model,timeframe,output,*,guard=None):
     if guard:guard()
     display_ready(page)
     before = details(page)
-    box = position_chart(page)
+    with position_chart(page, guard) as box:
+        return _measure_selected_map(page, symbol, model, timeframe, output, before, box, guard)
+
+
+def _measure_selected_map(page, symbol, model, timeframe, output, before, box, guard):
     left,top,width,height=box
     page.mouse.move(max(0,left-2),max(0,top-2))
     controls=evidence_controls(page,symbol,model)

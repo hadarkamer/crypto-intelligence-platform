@@ -128,23 +128,31 @@ class ModernMapTests(unittest.TestCase):
         observed = (17, 495, 1074, 800)
         shown = (17, 480, 1074, 800)
         with patch('modern_map_reader.chart_box', side_effect=[observed, shown]):
-            self.assertEqual(position_chart(page), shown)
-            self.assertEqual(page.evaluate.call_args.args[1], 15)
+            guard = Mock()
+            with position_chart(page, guard) as box:
+                self.assertEqual(box, shown)
+            self.assertEqual(guard.call_count, 2)
+            self.assertEqual(page.evaluate_handle.call_args.args[1], 15)
+            page.evaluate_handle.return_value.evaluate.assert_called_once()
+            page.evaluate_handle.return_value.dispose.assert_called_once()
         page.reset_mock()
         with patch('modern_map_reader.chart_box', return_value=shown):
-            self.assertEqual(position_chart(page), shown)
-            page.evaluate.assert_not_called()
+            with position_chart(page) as box:
+                self.assertEqual(box, shown)
+            page.evaluate_handle.assert_not_called()
         # A scroll which fails to expose the last 15 rows cannot authorize a partial read.
         with patch('modern_map_reader.chart_box', return_value=observed):
-            unchanged = position_chart(page)
-            with self.assertRaises(StageFailure) as caught:
+            with self.assertRaises(StageFailure) as caught, position_chart(page) as unchanged:
                 market_surface(page, unchanged, [], None)
             self.assertEqual(caught.exception.reason, 'map_clip_outside_viewport')
+            page.evaluate_handle.return_value.evaluate.assert_called_once()
+            page.evaluate_handle.return_value.dispose.assert_called_once()
         page.reset_mock()
         oversized = (17, 495, 1074, 1300)
         with patch('modern_map_reader.chart_box', return_value=oversized):
-            self.assertEqual(position_chart(page), oversized)
-            page.evaluate.assert_not_called()
+            with position_chart(page) as box:
+                self.assertEqual(box, oversized)
+            page.evaluate_handle.assert_not_called()
 
     def test_market_surface_reports_only_bounded_clip_geometry(self):
         from contextlib import redirect_stdout
