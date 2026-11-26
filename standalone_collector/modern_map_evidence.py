@@ -55,6 +55,64 @@ def equivalent(total, parts):
     check(abs(value - sum(p[0] for p in values)) <= error + sum(p[1] for p in values))
 
 
+def unresolved_measure(reason):
+    failure = StageFailure('source_not_readable', 'hover_resolution_insufficient')
+    failure.measure_detail = {'reason': reason}
+    raise failure
+
+
+def box_member(measured, raw_price, raw_step, raw_anchor):
+    """Use a printed Box total only inside one independently labelled native cell."""
+    if not raw_price or not raw_anchor:
+        unresolved_measure('native_price_not_printed')
+    raw_bounds = getattr(measured, 'raw_bounds', None)
+    if not raw_bounds:
+        unresolved_measure('box_bound_precision_missing')
+    price, price_error = number(raw_price)
+    anchor, anchor_error = number(raw_anchor)
+    step, step_error = number(raw_step)
+    if step <= step_error:
+        unresolved_measure('native_step_invalid')
+    index = ((price-anchor)/step).to_integral_value()
+    if abs(price-anchor-index*step) > price_error+anchor_error+abs(index)*step_error:
+        unresolved_measure('price_not_on_native_grid')
+    low, low_error = number(raw_bounds[0])
+    high, high_error = number(raw_bounds[1])
+    half_bin = (step-step_error)/2
+    # Allow for both printed boundary errors: the interval must enclose this
+    # centre and fit strictly inside its native bin, even at worst-case rounding.
+    if not (price+price_error-half_bin < low-low_error and low+low_error < price-price_error and
+            price+price_error < high-high_error and high+high_error < price-price_error+half_bin):
+        unresolved_measure('box_not_within_native_bin')
+    amount, _ = number(measured[1], True)
+    if amount <= 0:
+        unresolved_measure('prominent_bin_amount_missing')
+    return {'raw_price':raw_price, 'raw_value':measured[1]}
+
+
+def verify_covered_maximum(groups, strongest, raw_maximum, sidebar):
+    """Require all displayed ties and the independent maximum to survive the selected grid."""
+    members = [m for g in groups for m in g['members']]
+    check(members and (strongest or raw_maximum))
+    by_price = {number(m['raw_price'])[0]: m for m in members}
+    check(len(by_price) == len(members))
+    required = [strongest] if strongest else []
+    largest = max(members, key=lambda m:number(m['raw_value'], True)[0])
+    equivalent(raw_maximum or strongest['raw_value'], [largest['raw_value']])
+    if raw_maximum:
+        maximum = number(raw_maximum, True)[0]
+        displayed_ties = [m for m in sidebar if number(m['raw_value'], True)[0] == maximum]
+        if not strongest and not displayed_ties:
+            unresolved_measure('maximum_price_not_confirmed')
+        required.extend(displayed_ties)
+        if strongest:
+            equivalent(raw_maximum, [strongest['raw_value']])
+    for item in required:
+        selected = by_price.get(number(item['raw_price'])[0])
+        check(selected)
+        equivalent(item['raw_value'], [selected['raw_value']])
+
+
 def source_clock(raw, at, *, column=False, max_lag=1200):
     # The browser context is explicitly UTC. Select the nearest labelled minute
     # across midnight / New Year, and reject stale observations independently.

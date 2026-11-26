@@ -58,8 +58,14 @@ def _observation_receipts(stages):
 
 
 def _measure_detail(detail):
-    if not isinstance(detail,dict) or detail.get('reason') not in (
-            'right_edge_inactive','label_missing','number_missing','conflicting_values'):
+    if not isinstance(detail,dict):
+        return None
+    reason = detail.get('reason')
+    if reason in ('native_price_not_printed','box_bound_precision_missing','native_step_invalid',
+                  'price_not_on_native_grid','box_not_within_native_bin','prominent_bin_amount_missing',
+                  'maximum_price_not_confirmed','single_bin_amount_uncorroborated'):
+        return {'reason':reason}
+    if reason not in ('right_edge_inactive','label_missing','number_missing','conflicting_values'):
         return None
     labels = ('box','leader','reference')
     result = {'reason':detail['reason']}

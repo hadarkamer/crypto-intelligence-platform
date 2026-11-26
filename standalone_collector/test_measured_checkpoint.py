@@ -19,6 +19,18 @@ from test_modern_map import FIXTURE, frozen_result
 from test_session_state import Cursor, IsolatedPg, PGLITE
 
 
+class MeasureDetailPrivacy(unittest.TestCase):
+    def test_numerical_refusals_retain_only_the_enumerated_reason(self):
+        detail = dict(field='box',label_counts={'leader':2},reading_counts={'leader':0},
+                      text='private-injection-fixture',amount=123)
+        for reason in ('native_price_not_printed','box_bound_precision_missing','native_step_invalid',
+                       'price_not_on_native_grid','box_not_within_native_bin','prominent_bin_amount_missing',
+                       'maximum_price_not_confirmed','single_bin_amount_uncorroborated'):
+            with self.subTest(reason=reason):
+                self.assertEqual(checkpoint._measure_detail(dict(detail,reason=reason)),{'reason':reason})
+        self.assertIsNone(checkpoint._measure_detail(dict(detail,reason='native_step_invalid private-injection-fixture')))
+
+
 class Store:
     """Represent PostgreSQL bytea on the JSON pipe used by the existing PGlite fixture."""
     def __init__(self, db): self.db = db

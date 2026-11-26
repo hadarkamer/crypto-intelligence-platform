@@ -5,7 +5,7 @@ from modern_map_evidence import measurement, number
 from model1_execution import StageFailure
 
 
-_READ = r"""control => {
+_READ = r"""(control, requireLeader = true) => {
     const barred = 'form,input,textarea,header,footer,dialog,iframe,[role=dialog],[contenteditable=true],[hidden],[aria-hidden=true]';
     const shown = e => (!e.closest('nav') || e.closest('nav') === control.closest('nav')) && !e.closest(barred) && e.getClientRects().length &&
         e.checkVisibility?.({checkOpacity:true,checkVisibilityCSS:true}) !== false;
@@ -23,7 +23,7 @@ _READ = r"""control => {
     if (!shown(control) || !selected(control) || !/^(?:Right edge\s*)+$/i.test(norm(control.innerText))) return out;
     out.active = true;
     // Search outward from the active control. Stop before the document or
-    // unrelated chart/account content; the first panel with all labels owns it.
+    // unrelated chart/account content; the nearest panel with the required labels owns it.
     for (let p=control.parentElement; p && p!==document.body; p=p.parentElement) {
         if (p.matches('main,html') || p.querySelector('iframe,form,input[type=password]')) break;
         const nodes = p.querySelectorAll('div,span,p,dd,dt,b,small,strong,td');
@@ -46,13 +46,21 @@ _READ = r"""control => {
             }
         }
         out.counts=counts; out.values=values;
-        if (Object.values(counts).every(Boolean)) break;
+        if (counts.box && counts.reference && (counts.leader || !requireLeader)) break;
     }
     return out;
 }"""
 
 
-def _resolve(result):
+class PanelMeasurement(tuple):
+    """The existing five values plus the actual printed precision of the bounds."""
+    def __new__(cls, values, raw_bounds):
+        result = super().__new__(cls, values)
+        result.raw_bounds = raw_bounds
+        return result
+
+
+def _resolve(result, *, require_leader=True):
     def failed(cause, key=None):
         failure = StageFailure('source_not_readable', 'hover_evidence_mismatch' if cause == 'conflicting_values' else 'evidence_text_invalid')
         failure.measure_detail = {'reason': cause, 'field': key, 'label_counts': result['counts'],
@@ -69,17 +77,26 @@ def _resolve(result):
     for key in ('box', 'leader', 'reference'):
         distinct = {identity(values): tuple(values) for values in result['values'][key]}
         if not distinct:
+            if key == 'leader' and require_leader is False:
+                continue
             failed('label_missing' if not result['counts'][key] else 'number_missing', key)
         if len(distinct) != 1:
             failed('conflicting_values', key)
         parts[key] = next(iter(distinct.values()))
-    low, high, percent, amount = parts['box']
-    leader, size = parts['leader']
-    # measurement() owns parsing/ordering of known market numbers. The original
-    # span percentage is syntactic for that parser; reuse the real source value.
-    return measurement(f"Box total · {low} → {high} ({percent}) {amount}\n"
-                       f"Largest cluster {leader} · {size}\nReference (last price) {parts['reference'][0]}")
+    first, second, percent, amount = parts['box']
+    reference = parts['reference'][0]
+    bounds = tuple(sorted((first, second), key=lambda raw: number(raw)[0]))
+    if 'leader' in parts:
+        leader, size = parts['leader']
+        values = measurement(f"Box total · {first} → {second} ({percent}) {amount}\n"
+                             f"Largest cluster {leader} · {size}\nReference (last price) {reference}")
+    else:
+        number(reference)
+        number(amount, quantity=True)
+        low, high = (number(raw)[0] for raw in bounds)
+        values = reference, amount, None, low, high
+    return PanelMeasurement(values, bounds)
 
 
-def measure_panel(page, mode_control):
-    return _resolve(mode_control.evaluate(_READ))
+def measure_panel(page, mode_control, *, require_leader=True):
+    return _resolve(mode_control.evaluate(_READ, require_leader), require_leader=require_leader)

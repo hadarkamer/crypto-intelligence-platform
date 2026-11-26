@@ -272,7 +272,7 @@ class BrowserReplay(unittest.TestCase):
 
 class ReaderReplay(unittest.TestCase):
     """Exercise read_map through file/evidence generation, with UI I/O simulated."""
-    def replay(self, changed=False, tooltip=False, buffered=False, covered=False):
+    def replay(self, changed=False, tooltip=False, buffered=False, covered=False, no_domain_leader=False, cell_boxes=None):
         import io
         import tempfile
         from contextlib import ExitStack
@@ -287,6 +287,8 @@ class ReaderReplay(unittest.TestCase):
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         data={'source_time':clock.isoformat().replace('+00:00','Z'),'raw_price_step':'1',
               'raw_above_total':'80M','raw_below_total':'20M'}
+        if cell_boxes:
+            data['raw_price_step']='1.00'
         chart=Image.new('RGB',(890,520),(14,19,24))
         draw=ImageDraw.Draw(chart)
         draw.rectangle((20,100,719,400),fill=(68,0,83))
@@ -301,12 +303,23 @@ class ReaderReplay(unittest.TestCase):
                 image=io.BytesIO();part.save(image,format='PNG')
                 return image.getvalue()
         page.screenshot.side_effect=screenshot
-        def measure(page,bounds,upper,lower):
+        def measure(page,bounds,upper,lower,*,require_leader=True):
             lo,hi=(120-(v-100)/10 for v in (lower,upper))
             points=[(p,v) for p,v,_ in levels if lo<=p<=hi]
             p,v=max(points,key=lambda pair:pair[1])
             total=100 if hi-lo>28 else sum(v for p,v in points)
-            return '105',f'{total}M',{'raw_price':str(p),'raw_value':f'{v}M'},Decimal(str(lo)),Decimal(str(hi))
+            leader={'raw_price':str(p),'raw_value':f'{v}M'}
+            if no_domain_leader and hi-lo>28:
+                self.assertFalse(require_leader)
+                leader=None
+            if cell_boxes and hi-lo<=28:
+                from modern_map_measure_panel import PanelMeasurement
+                self.assertFalse(require_leader)
+                if cell_boxes=='bad_control' and p==115:
+                    total=27
+                return PanelMeasurement(('105',f'{total}M',None,Decimal(str(lo)),Decimal(str(hi))),
+                                        (f'{lo:.3f}',f'{hi:.3f}'))
+            return '105',f'{total}M',leader,Decimal(str(lo)),Decimal(str(hi))
         def stamp(at):return at.strftime('%m/%d %H:%M')
         labels=[(stamp(clock-timedelta(hours=1)),[]),(stamp(clock),[]),
                 (stamp(clock-timedelta(minutes=5) if changed else clock),[])]
@@ -316,6 +329,11 @@ class ReaderReplay(unittest.TestCase):
             stack.enter_context(patch('modern_map_surface.prepare_surface',return_value={
                 'covered':[],'unknown':[],'eligible':0,'cards':0,'close_attempts':0}))
             side=dict(data,raw_total='100M',raw_column_period='5m',raw_largest_value=None,sidebar_levels=[])
+            if no_domain_leader:
+                side['raw_largest_value']='30M'
+                side['sidebar_levels']=[{'raw_price':'115.00' if cell_boxes else '115','raw_value':'30M'}]
+                stack.enter_context(patch('modern_map_axis.axis_marks',return_value=[]))
+                stack.enter_context(patch('modern_map_axis.match_displayed_bins',return_value=None))
             if covered:
                 side['raw_largest_value']='30M'
                 side['sidebar_levels']=[{'raw_price':str(p),'raw_value':f'{v}M'} for p,v,_ in reversed(levels)]
@@ -332,7 +350,11 @@ class ReaderReplay(unittest.TestCase):
                 all_prices={p:v for p,v,_ in levels}
                 rows=[{'price':str(p),'amount':f'{all_prices.get(p,0)}M','time':stamp(clock)}
                       for p in range(min(all_prices),max(all_prices)+1)]
-            tip={'source':'dom' if tooltip else 'unresolved','rows':rows,'marks':[]}
+            if cell_boxes:
+                rows=[{'price':f'{p:.2f}','amount':'30M' if p==115 else '0M','time':stamp(clock),'step':'1.00'}
+                      for p in (114,115,116)]
+            tip={'source':'dom' if tooltip else 'unresolved','rows':rows,'marks':[],
+                 'raw_price_labels':[f'{p:.2f}' for p,_,_ in levels] if cell_boxes else []}
             hover=stack.enter_context(patch('modern_map_tooltip.read_tooltip',side_effect=lambda *a:dict(tip)))
             stub('chart_box',return_value=(20,100,750,335));stub('rail_anchor',return_value=115)
             stub('read_paint',side_effect=labels);measures=stub('measure_box',side_effect=measure)
@@ -353,14 +375,25 @@ class ReaderReplay(unittest.TestCase):
             else:
                 result=reader.read_map(page,'BTC',1,'12H',path)
                 self.assertTrue(path.read_bytes().startswith(b'\x89PNG'))
-            self.assertEqual(measures.call_count,0 if covered else 1 if tooltip else 5)
-            self.assertEqual(hover.call_count,0 if covered else 1 if tooltip else 2)
+            self.assertEqual(measures.call_count,5 if cell_boxes else 0 if covered else 1 if tooltip else 5)
+            self.assertEqual(hover.call_count,4 if cell_boxes else 0 if covered else 1 if tooltip else 2)
             return result
 
     def test_complete_sidebar_skips_hover_and_measure_but_still_rechecks_column(self):
         result=self.replay(covered=True,buffered=True)
         self.assertEqual([g['raw_total'] for g in result['groups']],['15M','27M','30M'])
         with self.assertRaises(StageFailure):self.replay(covered=True,changed=True)
+
+    def test_full_domain_without_leader_continues_to_independent_verified_values(self):
+        snap=self.replay(tooltip=True,buffered=True,no_domain_leader=True)
+        self.assertEqual(snap['raw_last_price'],'105')
+        self.assertEqual([g['raw_total'] for g in snap['groups']],['15M','27M','30M'])
+
+    def test_missing_leaders_use_one_witness_only_when_required(self):
+        snap=self.replay(tooltip=True,buffered=True,no_domain_leader=True,cell_boxes='valid')
+        self.assertEqual([g['raw_total'] for g in snap['groups']],['15M','27M','30M'])
+        with self.assertRaises(StageFailure):
+            self.replay(tooltip=True,buffered=True,no_domain_leader=True,cell_boxes='bad_control')
 
     def test_covered_hover_grid_skips_all_per_bin_measurements(self):
         result=self.replay(tooltip=True,buffered=True)

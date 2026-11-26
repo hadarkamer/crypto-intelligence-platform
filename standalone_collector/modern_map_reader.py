@@ -11,8 +11,9 @@ import time
 
 from PIL import Image
 
-from modern_map_evidence import (PRICE, check, equivalent, iso, measurement, number, observation,
-                                 sample_groups, source_clock, validate_groups, verified_member)
+from modern_map_evidence import (PRICE, box_member, check, equivalent, iso, measurement, number, observation,
+                                 sample_groups, source_clock, unresolved_measure, validate_groups,
+                                 verified_member, verify_covered_maximum)
 from model1_execution import StageFailure
 
 RANGES = {'12H':'12 hour', '24H':'24 hour', '48H':'48 hour'}
@@ -403,7 +404,7 @@ def rail_anchor(page):
     raise StageFailure('source_not_readable')
 
 
-def measure_box(page, bounds, y1, y2):
+def measure_box(page, bounds, y1, y2, *, require_leader=True):
     left,top,right,bottom=bounds
     check(top<=y1<y2<=bottom)
     # Pixel x is inside the latest painted column. The wide drag also
@@ -419,7 +420,7 @@ def measure_box(page, bounds, y1, y2):
         right_edge.click(timeout=3000)
     wait_for(page,lambda:choice(page,'Right edge'))
     from modern_map_measure_panel import measure_panel
-    return measure_panel(page,right_edge)
+    return measure_panel(page,right_edge,require_leader=require_leader)
 
 
 def display_ready(page):
@@ -651,14 +652,23 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         # Its total must agree with the independently printed side totals
         # before those totals may be used as a group-share denominator.
         book={}
+        sidebar_rows=(supplemental or {}).get('sidebar_levels',[])
+        sidebar={number(m['raw_price'])[0]:m for m in sidebar_rows}
+        source_max=(supplemental or {}).get('raw_largest_value')
+        printed_anchor=sidebar_rows[0]['raw_price'] if sidebar_rows else None
+        printed_prices={p:m['raw_price'] for p,m in sidebar.items()}
+        has_tooltip_prices=False
         column_key=column.strftime('%m/%d %H:%M')
         hover_attempts=0
         usable=False
         def hover(y):
-            nonlocal hover_attempts,usable
+            nonlocal hover_attempts,usable,has_tooltip_prices
             select_choice(page,'Pan')
             event=stage('read_hover',lambda:read_tooltip(page,box,bounds,column,x1-1,y,PAINT))
             hover_attempts+=1
+            for raw_price in event.get('raw_price_labels',[]):
+                printed_prices[number(raw_price)[0]]=raw_price
+                has_tooltip_prices=True
             try:
                 result=merge_cells(book,event['rows'],column_key,raw_step)
             except StageFailure:
@@ -680,9 +690,10 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
             if supplemental is not None:
                 hover((y1+y0)//2)
             # Obtain the independently displayed reference, native price domain
-            # and maximum. A sidebar/table alone does not establish all three.
+            # and total. The overview independently reports the maximum when available.
             last,full,strongest,low_bound,high_bound=stage(
-                'measure_price_domain_and_maximum',lambda:measure_box(page,bounds,y0+.2,y1-.2))
+                'measure_price_domain_and_maximum',lambda:measure_box(page,bounds,y0+.2,y1-.2,
+                                                                     require_leader=not bool(source_max)))
             emit('stage',dict(name='observed_price_domain',status='ok',last=last,raw_total=full,
                               raw_above=before['raw_above_total'],raw_below=before['raw_below_total'],
                               low=str(low_bound),high=str(high_bound),strongest=strongest))
@@ -694,7 +705,21 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
                 return y1-.2-(price-float(low_bound))*(y1-y0-.4)/float(high_bound-low_bound)
             height,runs=stage('locate_prominent_latest_bins',
                               lambda:sample_groups(screen,bounds,model,raw_anchor,step,where,float(last_price)))
-        sidebar={number(m['raw_price'])[0]:m for m in (supplemental or {}).get('sidebar_levels',[])}
+        used_unlabelled_box=False
+        witnessed_native_total=False
+        measured_witness=False
+        max_control=None
+        def read_single(row, narrow):
+            margin=(.39 if narrow else .48)*height
+            return measure_box(page,bounds,max(y0,row['y']-margin),min(y1,row['y']+margin),
+                               require_leader=not narrow)
+        def corroborate(measured, rail):
+            check(number(measured[0])[0]==last_price)
+            member=box_member(measured,rail['raw_price'],raw_step,printed_anchor)
+            equivalent(rail['raw_value'],[member['raw_value']])
+            if measured[2]:
+                check(number(measured[2]['raw_price'])[0]==number(rail['raw_price'])[0])
+                equivalent(member['raw_value'],[measured[2]['raw_value']])
         method_counts=dict(dom=0,hover=0,measure=0,sidebar_matches=0,hover_attempts=0)
         def agrees_with_rail(member):
             label=sidebar.get(number(member['raw_price'])[0])
@@ -709,19 +734,39 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
                 if time.monotonic()>=deadline:raise StageFailure('source_timeout')
                 y = row['y']
                 member=member_for(book,row,step)
-                if supplemental is not None and member is None and (hover_attempts<2 or usable):
+                if supplemental is not None and member is None and (hover_attempts<2 or usable or
+                        (has_tooltip_prices and member_for(printed_prices,row,step) is None)):
                     hover(y)
                     member=member_for(book,row,step)
                 if member is None:
-                    reference,total,member,_,_=stage('measure_missing_latest_bin',lambda:measure_box(
-                        page,bounds,max(y0,y-.48*height),min(y1,y+.48*height)))
+                    raw_price=member_for(printed_prices,row,step)
+                    single_bin=bool(source_max and raw_price and printed_anchor)
+                    measured=stage('measure_missing_latest_bin',lambda:read_single(row,single_bin))
+                    reference,total,member,_,_=measured
                     check(number(reference)[0]==last_price)
+                    if member is None:
+                        member=stage('verify_single_bin_box',lambda:box_member(measured,raw_price,raw_step,printed_anchor))
+                        used_unlabelled_box=True
+                    rail=sidebar.get(number(raw_price)[0]) if raw_price else None
+                    if single_bin and rail and number(rail['raw_value'],True)[0]==number(source_max,True)[0]:
+                        measured_witness=True
+                        # Validate immediately if a leaderless box needs this control.
+                        # Otherwise a clearly readable native leader remains usable.
+                        try:
+                            corroborate(measured,rail)
+                        except StageFailure:
+                            pass
+                        else:
+                            witnessed_native_total=True
                     equivalent(total,[member['raw_value']])
                     method_counts['measure']+=1
                 else:
                     method_counts['dom' if direct is not None else 'hover']+=1
                 stage('validate_latest_bin',lambda:verified_member(row,member,step))
                 stage('compare_bin_to_sidebar',lambda:agrees_with_rail(member))
+                rail=sidebar.get(number(member['raw_price'])[0])
+                if source_max and rail and number(rail['raw_value'],True)[0]==number(source_max,True)[0]:
+                    max_control=(row,rail)
                 values.append(member)
             group_total=values[0]['raw_value'] if len(values)==1 else member_sum(values)
             if len(rows)>1 and supplemental is None:
@@ -730,14 +775,17 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
                 check(reference==last and leader in values)
             equivalent(group_total,[m['raw_value'] for m in values])
             groups.append({'side':rows[0]['side'],'colour':colour,'raw_total':group_total,'members':values})
-        # The full-height source Measure identifies the maximum cell as well.
-        # A grid offset or an incorrectly clipped right edge must not omit it.
-        def validate_maximum():
-            selected=[m for g in groups for m in g['members']
-                      if number(m['raw_price'])[0]==number(strongest['raw_price'])[0]]
-            check(len(selected)==1)
-            equivalent(strongest['raw_value'],[selected[0]['raw_value']])
-        stage('verify_strongest_in_coverage',validate_maximum)
+        if used_unlabelled_box and not witnessed_native_total:
+            if max_control is None or measured_witness:
+                stage('verify_single_bin_amount_method',lambda:unresolved_measure('single_bin_amount_uncorroborated'))
+            # The known maximum may already have been read via Hover. Only now
+            # use one same-width control to corroborate the liquidities of the boxes.
+            row,rail=max_control
+            control=stage('measure_known_native_bin',lambda:read_single(row,True))
+            stage('verify_single_bin_amount_method',lambda:corroborate(control,rail))
+            method_counts['measure']+=1
+        stage('verify_strongest_in_coverage',lambda:verify_covered_maximum(
+            groups,strongest,source_max,sidebar_rows))
         stage('validate_group_contiguity_and_sums',lambda:validate_groups(
             groups,last_price,raw_step,before['raw_above_total'],before['raw_below_total']))
         method_counts['hover_attempts']=hover_attempts

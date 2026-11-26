@@ -88,6 +88,72 @@ def table_rows(marks, anchor):
     return [dict(price=p,amount=a,time=t) for p,a,t in sorted(cells)]
 
 
+
+
+def _regular_ladder(points):
+    """Can one fixed increment reach every printed value within its rounding interval?"""
+    if len(points) < 3:
+        return False
+    direction = 1 if points[-1][0] > points[0][0] else -1
+    if any((b[0]-a[0])*direction <= 0 for a,b in zip(points,points[1:])):
+        return False
+    # Every pair restricts the same increment. Intersecting the intervals
+    # also stops small rounding differences from drifting across many rows.
+    lower = upper = None
+    for j, (end, end_error) in enumerate(points):
+        for i, (start, start_error) in enumerate(points[:j]):
+            span = (end-start)*direction
+            error = start_error + end_error
+            lo, hi = (span-error)/(j-i), (span+error)/(j-i)
+            lower = lo if lower is None else max(lower, lo)
+            upper = hi if upper is None else min(upper, hi)
+            if lower > upper:
+                return False
+    return upper > 0
+
+def price_labels(marks, column):
+    """Return actual row labels only for a tooltip explicitly tied to this column."""
+    target = column.strftime('%m/%d %H:%M')
+    times = [(raw, _timestamp(raw,column), x, y) for raw,x,y in marks if _TIME.fullmatch(raw)]
+    titles = {(stamp,x,y) for raw,stamp,x,y in times if '/' in raw}
+    if len(titles) != 1:
+        return []
+    title_stamp,title_x,title_y = next(iter(titles))
+    if title_stamp != target:
+        return []
+    short = [(stamp,x,y) for raw,stamp,x,y in times if '/' not in raw and stamp]
+    axes = set()
+    for header_y in {y for _,_,y in short if 3 < y-title_y <= 120}:
+        header = sorted({(x,stamp) for stamp,x,y in short if abs(y-header_y)<=3})
+        if not 3 <= len(header) <= 12 or header[-1][1] != target:
+            continue
+        left,right = header[0][0],header[-1][0]
+        if not left-145 <= title_x <= right+145:
+            continue
+        # Use the nearest date around the verified column (including midnight)
+        # and ensure the ticks advance both in space and in time.
+        instants = []
+        for _, stamp in header:
+            hour = datetime.strptime(stamp[-5:], '%H:%M').time()
+            instants.append(min((datetime.combine(column.date()+timedelta(days=d),hour,column.tzinfo)
+                                 for d in (-1,0,1)), key=lambda t: abs(t-column)))
+        deltas = {b-a for a,b in zip(instants,instants[1:])}
+        if len(deltas)!=1 or min(deltas)<=timedelta(0) or not _regular_ladder([(x,1) for x,_ in header]):
+            continue
+        numbers = [(raw,x,y) for raw,x,y in marks if re.fullmatch(PRICE,raw)
+                   and 3 < y-header_y <= 305]
+        for side in ([(raw,x,y) for raw,x,y in numbers if 13<=left-x<=145],
+                     [(raw,x,y) for raw,x,y in numbers if 13<=x-right<=145]):
+            if not side or max(x for _,x,_ in side)-min(x for _,x,_ in side)>4:
+                continue
+            rows = sorted({(y,raw) for raw,_,y in side})
+            if any(b[0]-a[0]<=3 for a,b in zip(rows,rows[1:])) or not _regular_ladder([(y,1) for y,_ in rows]):
+                continue
+            prices = [number(raw) for _,raw in rows]
+            if all(p>0 for p,_ in prices) and _regular_ladder(prices):
+                axes.add(tuple(raw for _,raw in rows))
+    return list(next(iter(axes))) if len(axes)==1 else []
+
 def read_tooltip(page,box,bounds,anchor,x,y,paint):
     """Compare pointer-off and pointer-on DOM. Use Canvas only for painted labels."""
     page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
@@ -108,15 +174,25 @@ def read_tooltip(page,box,bounds,anchor,x,y,paint):
         return left<=m[1]<=right and top<=m[2]<=bottom
     marks_by_source=[('dom',[m[:3] for m in dom if inside(m)]),
                      ('canvas',[m[:3] for m in seen if inside(m)])]
-    receipt={'source':'unresolved','rows':[],'marks':[],'dom_marks':0,'canvas_marks':0}
+    receipt={'source':'unresolved','rows':[],'marks':[],'dom_marks':0,'canvas_marks':0,
+             'raw_price_labels':[],'price_label_source':None}
+    label_sources={}
     for source,marks in marks_by_source:
         typed=sorted({(m[0],round(m[1]),round(m[2])) for m in marks})
         receipt[source+'_marks']=len(typed)
+        labels=price_labels(typed,anchor)
+        if labels:
+            label_sources[source]=labels
+        if receipt['rows']:
+            continue
         rows=table_rows(typed,anchor)
         if rows:
             receipt.update(source=source,rows=rows[:2048],marks=[list(t) for t in typed[:256]])
-            break
-        receipt['marks'].extend([list(t) for t in typed[:64]])
+        else:
+            receipt['marks'].extend([list(t) for t in typed[:64]])
+    if label_sources and len({tuple(rows) for rows in label_sources.values()})==1:
+        source,labels=next(iter(label_sources.items()))
+        receipt.update(raw_price_labels=labels,price_label_source=source)
     return receipt
 
 
