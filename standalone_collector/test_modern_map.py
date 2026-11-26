@@ -272,7 +272,7 @@ class BrowserReplay(unittest.TestCase):
 
 class ReaderReplay(unittest.TestCase):
     """Exercise read_map through file/evidence generation, with UI I/O simulated."""
-    def replay(self, changed=False):
+    def replay(self, changed=False, tooltip=False, buffered=False):
         import io
         import tempfile
         from contextlib import ExitStack
@@ -313,16 +313,42 @@ class ReaderReplay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             def stub(k,**kw):return stack.enter_context(patch.object(reader,k,**kw))
             stub('open_verified_map');stub('display_ready');stub('details',return_value=data)
+            side=dict(data,raw_total='100M',raw_column_period='5m',sidebar_levels=[])
+            stack.enter_context(patch('modern_map_overview.overview',return_value=side))
+            rows=[]
+            # Supplying a complete grid tests reuse of one effective hover.
+            if tooltip:
+                all_prices={p:v for p,v,_ in levels}
+                rows=[{'price':str(p),'amount':f'{all_prices.get(p,0)}M','time':stamp(clock)}
+                      for p in range(min(all_prices),max(all_prices)+1)]
+            tip={'source':'dom' if tooltip else 'unresolved','rows':rows,'marks':[]}
+            hover=stack.enter_context(patch('modern_map_tooltip.read_tooltip',side_effect=lambda *a:dict(tip)))
             stub('chart_box',return_value=(20,100,750,335));stub('rail_anchor',return_value=115)
-            stub('read_paint',side_effect=labels);stub('measure_box',side_effect=measure)
+            stub('read_paint',side_effect=labels);measures=stub('measure_box',side_effect=measure)
             stub('select_choice');stub('choice',return_value=True);stub('gate')
-            stub('option_control').return_value.inner_text.return_value='12 hour'
+            control_text={'Range':'12 hour','Layout':'Single chart','Lens':'Heat','Colours':'Viridis Default'}
+            stub('option_control',side_effect=lambda page,key:Mock(inner_text=lambda:control_text[key]))
             stub('evidence_controls',return_value=[dict(x=20,y=10,width=50,height=20)])
             stub('symbol_control').return_value.bounding_box.return_value=dict(x=160,y=10,width=45,height=20)
             path=Path(folder)/'evidence.png'
-            result=reader.read_map(page,'BTC',1,'12H',path)
-            self.assertTrue(path.read_bytes().startswith(b'\x89PNG'))
+            if buffered:
+                buffer=io.BytesIO()
+                events=[]
+                result=reader.read_selected_map(page,'BTC',1,'12H',buffer,guard=lambda:None,
+                                                observe=lambda k,v:events.append((k,v)))
+                evidence=[v for k,v in events if k=='png']
+                self.assertEqual(evidence,[buffer.getvalue()])
+                self.assertTrue(evidence[0].startswith(b'\x89PNG'))
+            else:
+                result=reader.read_map(page,'BTC',1,'12H',path)
+                self.assertTrue(path.read_bytes().startswith(b'\x89PNG'))
+            self.assertEqual(measures.call_count,1 if tooltip else 5)
+            self.assertEqual(hover.call_count,1 if tooltip else 2)
             return result
+
+    def test_covered_hover_grid_skips_all_per_bin_measurements(self):
+        result=self.replay(tooltip=True,buffered=True)
+        self.assertEqual([g['raw_total'] for g in result['groups']],['15M','27M','30M'])
 
     def test_raw_verification_through_saved_image(self):
         s=self.replay()

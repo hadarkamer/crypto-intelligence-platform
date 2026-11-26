@@ -11,7 +11,8 @@ def replace_once(text, old, new):
 
 def install(runtime):
     base=Path(__file__).resolve().parent
-    for name in ('modern_map_evidence.py','modern_map_reader.py','modern_map_task.py','collection_metrics.py',
+    for name in ('modern_map_evidence.py','modern_map_overview.py','modern_map_tooltip.py','modern_map_cells.py',
+                 'modern_map_reader.py','modern_map_task.py','collection_metrics.py',
                  'dedicated_login_form.py','dedicated_map_flow.py'):
         shutil.copyfile(base/name,runtime/name)
     path=runtime/'collection_model1_task.py'

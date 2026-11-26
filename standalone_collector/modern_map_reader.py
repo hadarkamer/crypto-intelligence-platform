@@ -300,10 +300,10 @@ PAINT = """box => {
     const own=Object.getOwnPropertyDescriptor(ctx,'fillText'), orig=ctx.fillText;
     ctx.fillText=function(txt,x,y,...args){
       const result=orig.call(this,txt,x,y,...args);
-      if(/^(?:[0-9]{1,2}\\/[0-9]{1,2} [0-9]{2}:[0-9]{2}|[0-9,]+(?:\\.\\d+)?)$/.test(String(txt))) {
+      if(this.globalAlpha>0 && /^(?:(?:[0-9]{1,2}\\/[0-9]{1,2} )?[0-9]{1,2}:[0-9]{2}|(?:\\$\\s*)?[0-9,]+(?:\\.\\d+)?\\s*[KMB]?)$/i.test(String(txt)) && String(txt).length<=32) {
         const p=new DOMPoint(x,y).matrixTransform(this.getTransform());
         const px=r.x+p.x*r.width/c.width, py=r.y+p.y*r.height/c.height;
-        if(Number.isFinite(px+py)) labels.push([String(txt),px,py,this.textBaseline]);
+        if(Number.isFinite(px+py) && px>=r.left-1 && px<=r.right+1 && py>=r.top-1 && py<=r.bottom+1) labels.push([String(txt),px,py,this.textBaseline]);
         if(labels.length>6000)labels.splice(0,3000);
       }
       return result;
@@ -325,14 +325,17 @@ def clear_cookie_notice(page, *, model=None):
         raise StageFailure('source_not_readable', error.reason) from error
 
 
-def read_paint(page, box, x, y):
+def read_paint(page, box, x, y, *, observe=None):
     page.mouse.move(box[0]-2, max(1,box[1]-2))
     watch = page.evaluate_handle(PAINT, list(box))
     try:
         page.mouse.move(x-2,y)
         page.mouse.move(x,y)
+        seen=[]
         def timestamp():
             labels=watch.evaluate('w=>w.labels')
+            seen[:]=[(v[0],round(v[1]),round(v[2])) for v in labels if ':' in v[0]]
+
             stamps = {p[0] for p in labels if '/' in p[0] and abs(p[1]-x)<115 and
                       box[1]+.78*box[3] <= p[2] <= box[1]+box[3]}
             for marker in visible(page.get_by_text(re.compile(r'^\d{1,2}/\d{1,2} \d{2}:\d{2}$'))):
@@ -345,7 +348,14 @@ def read_paint(page, box, x, y):
                 clear_cookie_notice(page)
                 return stamps.pop(), labels
             return None
-        return wait_for(page,timestamp,timeout=3)
+        try:
+            return wait_for(page,timestamp,timeout=3)
+        except StageFailure:
+            if observe:
+                observe('hover',{'source':'unresolved','rows':[],
+                                'marks':[list(m) for m in sorted(set(seen))[:256]],
+                                'expected':'bottom_crosshair_time_at_pointer','x':round(x),'y':round(y)})
+            raise
     finally:
         watch.evaluate('w=>w.restore()')
         watch.dispose()
@@ -518,47 +528,131 @@ def read_map(page, symbol, model, timeframe, output):
 
 
 @phase('map_read')
-def read_selected_map(page,symbol,model,timeframe,output,*,guard=None):
+def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None):
     if guard:guard()
     clear_cookie_notice(page, model=model)
     def clear_surface():
         if guard:guard()
         clear_cookie_notice(page)
     display_ready(page)
-    before = details(page)
+    pilot=(symbol,model,timeframe)==('BTC',1,'12H')
+    # The consent guard is repeated at capture boundaries. Only this job has
+    # access to its typed observations, never to credentials or storage state.
+    def emit(kind,value):
+        if observe:observe(kind,value)
+    def stage(name,action):
+        started=time.monotonic()
+        try:
+            value=action()
+        except Exception as error:
+            emit('stage',dict(name=name,status='failed',elapsed_ms=round((time.monotonic()-started)*1000),
+                              condition=getattr(error,'reason',None) or getattr(error,'code','reader_failed')))
+            raise
+        emit('stage',dict(name=name,status='ok',elapsed_ms=round((time.monotonic()-started)*1000)))
+        return value
+    supplemental=None
+    if pilot:
+        from modern_map_overview import overview
+        supplemental=stage('read_market_overview',lambda:overview(page))
+        emit('overview',supplemental)
+        required=('raw_total','raw_above_total','raw_below_total','raw_price_step','source_time')
+        missing=[k for k in required if not supplemental.get(k)]
+        if missing:
+            emit('stage',dict(name='validate_market_observation',status='failed',
+                              expected=list(required),missing=missing))
+        before=stage('verify_market_observation',lambda:core_observation(supplemental))
+    else:
+        before=details(page)
     with position_chart(page, clear_surface) as box:
-        return _measure_selected_map(page, symbol, model, timeframe, output, before, box, clear_surface)
+        return _measure_selected_map(page,symbol,model,timeframe,output,before,box,clear_surface,
+                                     supplemental,emit,stage)
 
 
-def _measure_selected_map(page, symbol, model, timeframe, output, before, box, guard):
+def core_observation(facts):
+    required=('raw_total','raw_above_total','raw_below_total','raw_price_step','source_time')
+    if any(not facts.get(k) for k in required):
+        raise StageFailure('source_not_readable','evidence_number_mismatch')
+    equivalent(facts['raw_total'],[facts['raw_above_total'],facts['raw_below_total']])
+    check(number(facts['raw_price_step'])[0]>0)
+    return {key:facts[key] for key in required[1:]}
+
+
+def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,supplemental,emit,stage):
+    from modern_map_tooltip import member_for,member_sum,read_tooltip
+    from modern_map_cells import merge_cells
     left,top,width,height=box
     page.mouse.move(max(0,left-2),max(0,top-2))
     controls=evidence_controls(page,symbol,model)
-    screen = market_surface(page,box,controls,guard)
+    screen=stage('capture_chart_and_controls',lambda:market_surface(page,box,controls,guard))
     try:
         check(0<=left and left+width<=screen.width and 0<=top and top+height<=screen.height)
-        bounds = dark_bounds(screen,box)
-        x0,y0,x1,y1 = bounds
-        prior,_ = read_paint(page,box,x0+(x1-x0)*.72,(y1+y0)//2)
-        raw_time,_ = read_paint(page,box,x1-1,(y1+y0)//2)
+        # Save once before any hover or Measure operation. Partial source
+        # survives even when the first axis label is unreadable.
+        stage('save_filtered_chart',lambda:save_evidence(screen,box,controls,output))
+        if supplemental is not None:
+            from pathlib import Path
+            emit('png',output.getvalue() if isinstance(output,BytesIO) else Path(output).read_bytes())
+        bounds=stage('locate_dark_price_plot',lambda:dark_bounds(screen,box))
+        x0,y0,x1,y1=bounds
+        def stamp_at(x):
+            return read_paint(page,box,x,(y1+y0)//2,observe=emit)
+        prior,_=stage('read_prior_crosshair_time',lambda:stamp_at(x0+(x1-x0)*.72))
+        raw_time,_=stage('read_latest_crosshair_time',lambda:stamp_at(x1-1))
         update = datetime.fromisoformat(before['source_time'])
         column = source_clock(raw_time,update,column=True)
-        check(column<=update and prior!=raw_time)
         previous=source_clock(prior,column,column=True,max_lag=48*3600)
-        check(0<(column-previous).total_seconds()<=int(timeframe[:-1])*3600)
-        raw_anchor = rail_anchor(page)
+        emit('stage',dict(name='observed_columns',status='ok',source_time=iso(update),
+                          prior=iso(previous),latest=iso(column)))
+        stage('verify_latest_clock',lambda:check(
+            column<=update and 0<(column-previous).total_seconds()<=int(timeframe[:-1])*3600))
+        raw_anchor=(float(number(supplemental['sidebar_levels'][0]['raw_price'])[0])
+                    if supplemental and supplemental['sidebar_levels'] else rail_anchor(page))
         raw_step = before['raw_price_step']
         step = float(number(raw_step)[0])
         # The first bounding rectangle spans the displayed price domain.
         # Its total must agree with the independently printed side totals
         # before those totals may be used as a group-share denominator.
-        last,full,strongest,low_bound,high_bound=measure_box(page,bounds,y0+.2,y1-.2)
-        equivalent(full,[before['raw_above_total'],before['raw_below_total']])
+        book={}
+        column_key=column.strftime('%m/%d %H:%M')
+        hover_attempts=0
+        usable=False
+        def hover(y):
+            nonlocal hover_attempts,usable
+            select_choice(page,'Pan')
+            event=stage('read_hover',lambda:read_tooltip(page,box,bounds,column,x1-1,y,PAINT))
+            hover_attempts+=1
+            try:
+                result=merge_cells(book,event['rows'],column_key,raw_step)
+            except StageFailure:
+                emit('hover',event)
+                raise
+            event['counts']=result
+            emit('hover',event)
+            usable=usable or bool(result['accepted'] or result['duplicates'])
+        if supplemental is not None:
+            hover((y1+y0)//2)
+        # Obtain the independently displayed reference, native price domain
+        # and maximum. A sidebar/table alone does not establish all three.
+        last,full,strongest,low_bound,high_bound=stage(
+            'measure_price_domain_and_maximum',lambda:measure_box(page,bounds,y0+.2,y1-.2))
+        emit('stage',dict(name='observed_price_domain',status='ok',last=last,raw_total=full,
+                          raw_above=before['raw_above_total'],raw_below=before['raw_below_total'],
+                          low=str(low_bound),high=str(high_bound),strongest=strongest))
+        stage('compare_map_and_side_totals',
+              lambda:equivalent(full,[before['raw_above_total'],before['raw_below_total']]))
         last_price = number(last)[0]
-        check(0 < low_bound < last_price < high_bound)
+        stage('validate_price_domain',lambda:check(0 < low_bound < last_price < high_bound))
         def where(price):
             return y1-.2-(price-float(low_bound))*(y1-y0-.4)/float(high_bound-low_bound)
-        height,runs=sample_groups(screen,bounds,model,raw_anchor,step,where,float(last_price))
+        height,runs=stage('locate_prominent_latest_bins',
+                          lambda:sample_groups(screen,bounds,model,raw_anchor,step,where,float(last_price)))
+        sidebar={number(m['raw_price'])[0]:m for m in (supplemental or {}).get('sidebar_levels',[])}
+        method_counts=dict(hover=0,measure=0,sidebar_matches=0,hover_attempts=0)
+        def agrees_with_rail(member):
+            label=sidebar.get(number(member['raw_price'])[0])
+            if label:
+                equivalent(label['raw_value'],[member['raw_value']])
+                method_counts['sidebar_matches']+=1
         groups=[]
         deadline=time.monotonic()+90
         for colour,rows in runs:
@@ -566,13 +660,23 @@ def _measure_selected_map(page, symbol, model, timeframe, output, before, box, g
             for row in rows:
                 if time.monotonic()>=deadline:raise StageFailure('source_timeout')
                 y = row['y']
-                reference,total,member,_,_=measure_box(page,bounds,max(y0,y-.48*height),min(y1,y+.48*height))
-                check(reference==last)
-                verified_member(row,member,step)
-                equivalent(total,[member['raw_value']])
+                member=member_for(book,row,step)
+                if supplemental is not None and member is None and (hover_attempts<2 or usable):
+                    hover(y)
+                    member=member_for(book,row,step)
+                if member is None:
+                    reference,total,member,_,_=stage('measure_missing_latest_bin',lambda:measure_box(
+                        page,bounds,max(y0,y-.48*height),min(y1,y+.48*height)))
+                    check(number(reference)[0]==last_price)
+                    equivalent(total,[member['raw_value']])
+                    method_counts['measure']+=1
+                else:
+                    method_counts['hover']+=1
+                stage('validate_latest_bin',lambda:verified_member(row,member,step))
+                stage('compare_bin_to_sidebar',lambda:agrees_with_rail(member))
                 values.append(member)
-            group_total=total
-            if len(rows)>1:
+            group_total=values[0]['raw_value'] if len(values)==1 else member_sum(values)
+            if len(rows)>1 and supplemental is None:
                 reference,group_total,leader,_,_=measure_box(page,bounds,max(y0,rows[-1]['y']-.48*height),
                                                             min(y1,rows[0]['y']+.48*height))
                 check(reference==last and leader in values)
@@ -580,18 +684,40 @@ def _measure_selected_map(page, symbol, model, timeframe, output, before, box, g
             groups.append({'side':rows[0]['side'],'colour':colour,'raw_total':group_total,'members':values})
         # The full-height source Measure identifies the maximum cell as well.
         # A grid offset or an incorrectly clipped right edge must not omit it.
-        check(any(strongest in g['members'] for g in groups))
-        validate_groups(groups,last_price,raw_step,before['raw_above_total'],before['raw_below_total'])
+        def validate_maximum():
+            selected=[m for g in groups for m in g['members']
+                      if number(m['raw_price'])[0]==number(strongest['raw_price'])[0]]
+            check(len(selected)==1)
+            equivalent(strongest['raw_value'],[selected[0]['raw_value']])
+        stage('verify_strongest_in_coverage',validate_maximum)
+        stage('validate_group_contiguity_and_sums',lambda:validate_groups(
+            groups,last_price,raw_step,before['raw_above_total'],before['raw_below_total']))
+        method_counts['hover_attempts']=hover_attempts
+        emit('stage',dict(name='latest_bin_methods',status='ok',**method_counts))
         select_choice(page,'Pan')
         check(chart_box(page)==box)
-        raw_after,_=read_paint(page,box,x1-1,(y1+y0)//2)
-        after=details(page)
-        check(before==after and raw_time==raw_after and page.url==map_url(symbol))
-        check(choice(page,f'Model {model}') and choice(page,'Coin'))
-        check(option_control(page,'Range').inner_text().strip()==RANGES[timeframe])
-        gate(page)
-        if guard:guard()
-        save_evidence(screen,box,controls,output)
+        raw_after,_=stage('recheck_latest_column',lambda:stamp_at(x1-1))
+        if supplemental is not None:
+            from modern_map_overview import overview
+            final_market=stage('recheck_market_update',lambda:overview(page))
+            check(all(final_market[k]==supplemental[k] for k in (
+                'source_time','raw_total','raw_above_total','raw_below_total','raw_price_step',
+                'raw_column_period','sidebar_levels')))
+            after=core_observation(final_market)
+        else:
+            after=details(page)
+        def identity():
+            check(before==after and raw_time==raw_after and page.url==map_url(symbol))
+            check(choice(page,f'Model {model}') and choice(page,'Coin'))
+            check(option_control(page,'Range').inner_text().strip()==RANGES[timeframe])
+            if supplemental is not None:
+                symbol_control(page,symbol)
+                check(option_control(page,'Layout').inner_text().strip()=='Single chart')
+                check(option_control(page,'Lens').inner_text().strip()=='Heat')
+                check(bool(re.fullmatch(r'Viridis(?:\s*Default)?',option_control(page,'Colours').inner_text().strip())))
+            gate(page)
+            if guard:guard()
+        stage('confirm_map_identity_and_update',identity)
     finally:
         screen.close()
     captured = datetime.now(timezone.utc)

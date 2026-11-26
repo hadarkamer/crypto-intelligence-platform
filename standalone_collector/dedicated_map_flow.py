@@ -180,8 +180,13 @@ def _refresh_rotated_state(session, context):
         return
 
 
-def collect_with_dedicated_session(session, context, page, target, output, *, allow_login=True):
+def collect_with_dedicated_session(session, context, page, target, output, *, allow_login=True, observe=None):
     """At most one renewal per work item. The parent durably fences all jobs."""
+    reader = read_selected_map
+    if observe is not None:
+        from functools import partial
+        reader = partial(read_selected_map, observe=observe)
+
     cooldown = session.source_cooldown()
     if cooldown['code'] != 'allowed':
         raise StageFailure(cooldown['code'])
@@ -193,7 +198,7 @@ def collect_with_dedicated_session(session, context, page, target, output, *, al
                 session.checkpoint(context)
             else:
                 _refresh_rotated_state(session, context)
-            return _map_action(session, read_selected_map, page, target, output)
+            return _map_action(session, reader, page, target, output)
         except StageFailure as error:
             if error.code in HARD_BLOCKERS and allow_login:
                 _record_block(session, error.code, error)
@@ -205,7 +210,7 @@ def collect_with_dedicated_session(session, context, page, target, output, *, al
     try:
         if target != PROTECTED_PROBE:
             _map_action(session, open_verified_map, page, target)
-        return _map_action(session, read_selected_map, page, target, output)
+        return _map_action(session, reader, page, target, output)
     except StageFailure as error:
         if error.code == 'source_login_required':
             _record_block(session, 'auth_gate_after_verification')
