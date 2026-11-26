@@ -15,7 +15,7 @@ import modern_map_reader as ui
 from model1_execution import StageFailure
 from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
-from modern_map_cells import merge_cells
+from modern_map_cells import _agree, merge_cells
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
 from modern_map_overview import _FIELDS, after_read_failure, overview
 from modern_map_surface import prepare_surface
@@ -100,6 +100,34 @@ def source_screen(page, box, padded_size, guard):
 def read_epoch(stamp, update):
     return source_clock(stamp,datetime.fromisoformat(update),column=True)
 
+
+
+def closing_column(page,box,bounds,column,same_document,emit):
+    """Reobserve the latest displayed time; a source-update clock alone cannot prove it."""
+    _,top,right,bottom=bounds
+    x,y=right-1,(top+bottom)//2
+    try:
+        return ui.read_paint(page,box,x,y,observe=emit)
+    except StageFailure as error:
+        if error.code!='source_not_readable' or error.reason is not None:
+            raise
+    same_document()
+    try:
+        event=read_tooltip(page,box,bounds,column,x,y,ui.PAINT,
+                           deadline=time.monotonic()+ui.limited_timeout(1000)/1000)
+        emit('hover',event)
+        # price_labels() already checked this *newly displayed* table has one
+        # full-datetime title, regular times ending at column, and a price axis.
+        stamps={m[0] for m in event.get('marks',()) if re.fullmatch(r'\d{1,2}/\d{1,2} \d{1,2}:\d{2}',m[0])}
+        require(event.get('price_label_source') in ('dom','canvas') and bool(event.get('raw_price_labels')) and
+                len(stamps)==1,'closing_column_display_unavailable')
+        stamp=stamps.pop()
+        require(read_epoch(stamp,iso(column))==column,'closing_column_changed')
+        same_document()
+        emit('stage',dict(name='closing_column_from_visible_tooltip',status='ok',source_timestamp=stamp))
+        return stamp,[]
+    finally:
+        page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
 
 def enrich_latest(page,box,bounds,side,column,scale,regions,height,deadline,stage,emit):
     """Try one tooltip and one missing bin; use a known-value control only for a leaderless box."""
@@ -201,7 +229,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
     from modern_map_basic_numbers import build_basic_snapshot
     require((symbol,model,timeframe)==('BTC',1,'12H'),'wrong_basic_target')
     def emit(kind,value):
-        if observe:observe(kind,value)
+        if observe:return observe(kind,value)
     def stage(name,fn):
         at=time.monotonic()
         try:
@@ -254,7 +282,6 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
                         column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
                 marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,initial_marks))
                 scale=stage('basic_verified_price_axis',lambda:axis_scale_live(screen,box,bounds,marks))
-                optional_end=time.monotonic()+5
                 source_method='chart_axis'
                 if scale is None:
                     source_method='measure_domain'
@@ -272,50 +299,72 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None):
                            chart_regions=len(regions),native_bins_inspected=native_bins)
                 emit('stage',dict(name='basic_start_observation',status='ok',reference_method=source_method,**start))
 
-                try:
-                    enrichment=enrich_latest(page,box,bounds,side,column,scale,regions,bin_height,optional_end,stage,emit)
-                finally:
-                    page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
+                def closing_arguments(prefix=''):
+                    def record(name,fn):
+                        return stage(prefix+name,fn)
+                    same_document()
+                    require(ui.chart_box(page)==box,'chart_geometry_changed')
+                    close_time,close_marks=record('recheck_latest_column',lambda:closing_column(
+                        page,box,bounds,column,same_document,emit))
+                    require(close_time==current,'closing_column_changed')
+                    with record('basic_closing_chart',lambda:source_screen(page,box,screen.size,protected)) as final:
+                        require(ui.dark_bounds(final,box)==bounds,'closing_price_domain_changed')
+                        end_marks=axis_marks(page,box,prior_marks,close_marks)
+                        end_scale=record('basic_closing_price_axis',lambda:axis_scale_live(final,box,bounds,end_marks))
+                        if end_scale is None:
+                            # A native boxed reference may be the only text readout. In
+                            # that case every pixel of the clean price axis must agree.
+                            axis=(right+1,top,box[0]+box[2],bottom+1)
+                            with screen.crop(axis) as a,final.crop(axis) as b:
+                                require(a.size[0]>=14 and a.tobytes()==b.tobytes(),'closing_axis_unverified')
+                            end_scale=scale
+                        require(number(end_scale[0])[0]==number(raw_ref)[0],'closing_reference_changed')
+                        final_regions,final_bins,_=right_edge_regions(final,bounds,side,end_scale,model)
+                        require(final_regions==regions and final_bins==native_bins,'closing_significant_regions_changed')
+                    after=record('recheck_market_update',lambda:overview(page))
+                    record('basic_verify_closing_market',lambda:prove_observations(side,after))
+                    record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
+                    same_document()
+                    end=dict(start,source_time=after['source_time'],column_time=iso(read_epoch(close_time,after['source_time'])),
+                             raw_last_price=end_scale[0],same_document=True,settings_verified=True,same_market_labels=True,
+                             symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin')
+                    emit('stage',dict(name=prefix+'basic_end_observation',status='ok',**end))
+                    return dict(symbol=symbol,model=model,timeframe=timeframe,source_url=ui.map_url(symbol),
+                              source_time_after=after['source_time'],column_time=iso(column),column_time_after=end['column_time'],
+                              raw_last_price=raw_ref,source_sha256=digest,chart_regions=regions,provenance='live',
+                              native_bins_inspected=native_bins,captured_at=iso(datetime.now(timezone.utc)),end_observation={**after,**end})
 
-                same_document()
-                require(ui.chart_box(page)==box,'chart_geometry_changed')
-                close_time,close_marks=stage('recheck_latest_column',lambda:ui.read_paint(
-                    page,box,right-1,middle,observe=emit))
-                require(close_time==current,'closing_column_changed')
-                with stage('basic_closing_chart',lambda:source_screen(page,box,screen.size,protected)) as final:
-                    require(ui.dark_bounds(final,box)==bounds,'closing_price_domain_changed')
-                    end_marks=axis_marks(page,box,prior_marks,close_marks)
-                    end_scale=stage('basic_closing_price_axis',lambda:axis_scale_live(final,box,bounds,end_marks))
-                    if end_scale is None:
-                        # A native boxed reference may be the only text readout. In
-                        # that case every pixel of the clean price axis must agree.
-                        axis=(right+1,top,box[0]+box[2],bottom+1)
-                        with screen.crop(axis) as a,final.crop(axis) as b:
-                            require(a.size[0]>=14 and a.tobytes()==b.tobytes(),'closing_axis_unverified')
-                        end_scale=scale
-                    require(number(end_scale[0])[0]==number(raw_ref)[0],'closing_reference_changed')
-                    final_regions,final_bins,_=right_edge_regions(final,bounds,side,end_scale,model)
-                    require(final_regions==regions and final_bins==native_bins,'closing_significant_regions_changed')
-                after=stage('recheck_market_update',lambda:overview(page))
-                stage('basic_verify_closing_market',lambda:prove_observations(side,after))
-                stage('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
-                same_document()
-                end=dict(start,source_time=after['source_time'],column_time=iso(read_epoch(close_time,after['source_time'])),
-                         raw_last_price=end_scale[0],same_document=True,settings_verified=True,same_market_labels=True,
-                         symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin')
-                emit('stage',dict(name='basic_end_observation',status='ok',**end))
-                args=dict(symbol=symbol,model=model,timeframe=timeframe,source_url=ui.map_url(symbol),
-                          source_time_after=after['source_time'],column_time=iso(column),column_time_after=end['column_time'],
-                          raw_last_price=raw_ref,source_sha256=digest,chart_regions=regions,provenance='live',
-                          native_bins_inspected=native_bins,captured_at=iso(datetime.now(timezone.utc)),end_observation={**after,**end})
-                if enrichment:
+                basic_args=closing_arguments()
+                base=stage('build_basic_result',lambda:build_basic_snapshot(side,**basic_args))
+                if emit('verified_basic',base) is False:
+                    raise StageFailure('state_store_failed')
+                try:
                     try:
+                        enrichment=enrich_latest(page,box,bounds,side,column,scale,regions,bin_height,
+                                                 time.monotonic()+5,stage,emit)
+                    finally:
+                        page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
+                    known={number(row['raw_price'])[0]:number(row['raw_value'],True) for row in base['levels']}
+                    novel=False
+                    for row in enrichment:
+                        prior=known.get(number(row['raw_price'])[0])
+                        if prior is None:
+                            novel=True
+                        else:
+                            require(_agree(prior,number(row['raw_value'],True)),'optional_overlap_amount_conflict')
+                    if enrichment and not novel:
+                        emit('stage',dict(name='optional_overlap_only',status='completed',count=len(enrichment)))
+                    if novel:
+                        args=closing_arguments('enrichment_')
                         return stage('validate_enriched_result',lambda:build_basic_snapshot(side,enrichment=enrichment,**args))
-                    except StageFailure:
-                        # Optional cell disagreement cannot invalidate independently confirmed sidebar facts.
-                        # Revalidate every base constraint before releasing the base-only observation.
-                        pass
-                return stage('build_basic_result',lambda:build_basic_snapshot(side,**args))
+                except StageFailure as error:
+                    if error.code not in ('source_not_readable','source_timeout'):
+                        raise
+                    emit('stage',dict(name='enrichment_discarded',status='skipped',
+                                      condition=getattr(error,'basic_reason',None) or error.reason or error.code))
+                except BrowserError:
+                    emit('stage',dict(name='enrichment_discarded',status='skipped',condition='browser_unavailable'))
+                return base
     except Exception:
         if observe:after_read_failure(page,same_document,emit)
         raise

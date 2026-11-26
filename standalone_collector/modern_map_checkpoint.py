@@ -15,6 +15,7 @@ KEY = 'measured_btc_v1'
 PARTIAL = 'measured_btc_partial_v1'
 FD = 'COINGLASS_MEASURED_ACK_FD'
 SOURCE = 'measured-source.json'
+UPGRADE = 'measured-enriched.json'
 MAX_RECORD = 2 * 1024 * 1024
 MAX_IMAGE = 4 * 1024 * 1024
 RETAIN_DIAGNOSTIC = """INSERT INTO public.ai_collection_bridge_evidence AS e(job_id,image_png,diagnostic)
@@ -159,18 +160,22 @@ class CheckpointStore:
                     (e.diagnostic ?| ARRAY['measured_btc_v1','measured_btc_partial_v1'])""",
                     (self.job,image,json.dumps({PARTIAL:partial},allow_nan=False)))
                 return
-            if action == b'S':
-                source = _json(root/SOURCE)
+            if action in (b'S',b'U'):
+                source = _json(root/(SOURCE if action == b'S' else UPGRADE))
                 image = (root/'image.png').read_bytes()
                 if len(image)>MAX_IMAGE or not image.startswith(b'\x89PNG\r\n\x1a\n'):
                     raise ValueError('measured_record_image')
                 digest = hashlib.sha256(image).hexdigest()
                 _identity(source,self.job,digest)
-                from modern_map_task import numeric_result
+                from modern_map_task import numeric_result, same_basic_with_enrichment
                 numeric_result(source['snapshot'],self.job,image)
-                if previous:
-                    if previous.get('source') != source: raise ValueError('measured_source_changed')
+                if previous and previous.get('source') == source:
                     return
+                if action == b'U':
+                    if not previous or not same_basic_with_enrichment(previous['source']['snapshot'],source['snapshot']):
+                        raise ValueError('measured_source_changed')
+                elif previous:
+                    raise ValueError('measured_source_changed')
                 connection.execute("""INSERT INTO public.ai_collection_bridge_evidence(job_id,image_png,diagnostic)
                     VALUES(%s,%s,%s::jsonb) ON CONFLICT(job_id) DO UPDATE SET image_png=EXCLUDED.image_png,
                     diagnostic=ai_collection_bridge_evidence.diagnostic || EXCLUDED.diagnostic""",
@@ -243,7 +248,7 @@ async def workspace(job,tf,model,symbol,store_factory,enabled):
             channel.channel.close()
             # If acknowledging a known local snapshot failed, make one
             # idempotent save before the private working directory is released.
-            if channel.failed in (b'P',b'S'):
+            if channel.failed in (b'P',b'S',b'U'):
                 await asyncio.to_thread(store.commit,channel.failed,Path(tmp))
 
 

@@ -227,43 +227,100 @@ def _run_basic_btc(root, run_id):
         return _process_basic_btc(root, run_id, acknowledge)
 
 
+def _same_basic_observation(basic, later):
+    """Compare two validated snapshots using their original market values and chart evidence."""
+    from datetime import datetime
+    replaceable = {'captured_at','collection_tier','enrichment','coverage','levels','chart_regions',
+                   'source_evidence','strongest_observed_prices'}
+    def identity(snapshot):
+        direct = {k:v for k,v in snapshot.items() if k not in replaceable}
+        evidence = {k:v for k,v in snapshot['source_evidence'].items() if k != 'enrichment'}
+        geometry = [(r['side'],r['colour'],r['prices']) for r in snapshot['chart_regions']]
+        return direct, evidence, geometry
+    start = datetime.fromisoformat(basic['captured_at'].replace('Z','+00:00'))
+    end = datetime.fromisoformat(later['captured_at'].replace('Z','+00:00'))
+    return end >= start and identity(basic)==identity(later)
+
+
+def same_basic_with_enrichment(basic, enriched):
+    return (basic['collection_tier']=='basic' and enriched['collection_tier']=='enriched'
+            and _same_basic_observation(basic,enriched))
+
+
 def _process_basic_btc(root, run_id, acknowledge):
+    from modern_map_checkpoint import SOURCE, UPGRADE, partial_record
     image_path = root / 'image.png'
-    source_path = root / 'measured-source.json'
-    if source_path.exists():
-        record = json.loads(source_path.read_text())
-        image = image_path.read_bytes()
-        if record.get('run_id') != run_id or record.get('image_sha256') != hashlib.sha256(image).hexdigest():
-            raise StageFailure('image_evidence_invalid')
+    source_path, enriched_path = root / SOURCE, root / UPGRADE
+
+    def record_result(record, image):
         result = numeric_result(record['snapshot'],run_id,image)
+        if record.get('run_id') != run_id or record.get('image_sha256') != result['evidence']['sha256']:
+            raise StageFailure('image_evidence_invalid')
+        return result
+
+    def persist(snapshot,path,action, *, basic=None):
+        result = numeric_result(snapshot,run_id,image_path.read_bytes())
+        if basic is not None and not same_basic_with_enrichment(basic,snapshot):
+            raise StageFailure('source_not_readable','basic_observation_changed')
+        record = dict(run_id=run_id,snapshot=snapshot,image_sha256=result['evidence']['sha256'])
+        if path.exists():
+            if json.loads(path.read_text()) != record:
+                raise StageFailure('image_evidence_invalid')
+        else:
+            _write_once(path,record)
+        acknowledge(action)
+        return result
+
+    if source_path.exists():
+        # The parent restores the strongest committed version to SOURCE, even after the
+        # old sandbox was destroyed. A local UPGRADE may be waiting for acknowledgement.
+        path,action = (enriched_path,b'U') if enriched_path.exists() else (source_path,b'S')
+        result = record_result(json.loads(path.read_text()),image_path.read_bytes())
+        acknowledge(action)
     else:
         overview, hovers, stages = {}, [], []
+        result = None
         def observe(kind, data):
+            nonlocal result
             if kind == 'overview':
                 overview.update(data)
             elif kind == 'stage':
                 stages.append(data)
             elif kind == 'hover':
                 hovers.append(data)
+            elif kind == 'verified_basic':
+                if data.get('collection_tier')!='basic':
+                    raise StageFailure('source_not_readable','invalid_first_basic_receipt')
+                from copy import deepcopy
+                result = persist(deepcopy(data),source_path,b'S')
         stage('capture')
         try:
             snapshot = capture('BTC',1,'12H',image_path,observe=observe)
-            stage('validation')
-            image = image_path.read_bytes()
-            result = numeric_result(snapshot,run_id,image)
         except Exception as error:
-            if overview or hovers or stages:
-                from modern_map_checkpoint import partial_record
-                partial = partial_record(run_id,overview,hovers,stages,error,image_path)
-                _write_once(root/'measured-partial.json',partial)
-                acknowledge(b'P')
-            raise
-        record = dict(run_id=run_id,snapshot=snapshot,image_sha256=result['evidence']['sha256'])
-        _write_once(source_path,record)
-    # Reacknowledging an identical source is idempotent. In particular a failed
-    # acknowledgement cannot be bypassed by retrying inside this directory.
+            if result is None:
+                if not source_path.exists() and (overview or hovers or stages):
+                    partial = partial_record(run_id,overview,hovers,stages,error,image_path)
+                    _write_once(root/'measured-partial.json',partial)
+                    acknowledge(b'P')
+                raise
+            # Only a read failure after the independently closed first observation can
+            # fall back immediately. Auth/storage/transport errors keep their own status.
+            if not isinstance(error,StageFailure) or error.code not in ('source_not_readable','source_timeout'):
+                raise
+        else:
+            stage('validation')
+            if result is None:
+                result = persist(snapshot,source_path,b'S')
+            elif snapshot!=result['basic_snapshot']:
+                basic = result['basic_snapshot']
+                if snapshot.get('collection_tier')=='basic':
+                    # A repeated, previously known row is not a stronger observation.
+                    numeric_result(snapshot,run_id,image_path.read_bytes())
+                    if not _same_basic_observation(basic,snapshot):
+                        raise StageFailure('source_not_readable','basic_observation_changed')
+                else:
+                    result = persist(snapshot,enriched_path,b'U',basic=basic)
     stage('saving')
-    acknowledge(b'S')
     out = root/'result.json'
     if out.exists():
         if json.loads(out.read_text()) != result:

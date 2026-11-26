@@ -177,6 +177,97 @@ class MeasuredCheckpoint(unittest.TestCase):
         retained,retained_image=durable.read()
         self.assertEqual((retained,retained_image),(complete,image))
 
+    def test_lost_worker_after_initial_fence_resumes_basic_without_recapture(self):
+        count = []
+        durable = checkpoint.CheckpointStore(self.store,self.job)
+        def die_after_first_fence(symbol,model,tf,path,observe):
+            count.append(True)
+            path.write_bytes(FIXTURE.read_bytes())
+            observe('verified_basic',self.snapshot)
+            self.assertEqual(durable.read()[0]['source']['snapshot'],self.snapshot)
+            raise OSError('worker exited during optional read')
+        with patch.object(self,'capture',side_effect=die_after_first_fence):
+            with self.assertRaises(OSError):
+                asyncio.run(self.attempt())
+            result = asyncio.run(self.attempt())
+        self.assertEqual(count,[True])
+        self.assertEqual(result['basic_snapshot'],self.snapshot)
+
+    def test_enrichment_upgrades_first_receipt_without_permitting_late_base(self):
+        from modern_map_basic_numbers import build_basic_snapshot
+        from test_modern_map_basic_numbers import live_inputs
+        market,args = live_inputs()
+        args.update(captured_at='2026-11-26T15:00:05Z',source_sha256=self.snapshot['source_sha256'])
+        cell=dict(source='hover',raw_price='115',raw_value='2.0M',raw_price_step='5.00',
+                  source_time=args['source_time_after'],column_time=args['column_time'])
+        enriched = build_basic_snapshot(market,**args,enrichment=[cell])
+        durable = checkpoint.CheckpointStore(self.store,self.job)
+        def complete(symbol,model,tf,path,observe):
+            path.write_bytes(FIXTURE.read_bytes())
+            observe('verified_basic',self.snapshot)
+            self.assertEqual(durable.read()[0]['source']['snapshot']['collection_tier'],'basic')
+            return enriched
+        with patch.object(self,'capture',side_effect=complete) as capture:
+            with self.assertRaises(OSError):
+                asyncio.run(self.attempt(fail_save=True))
+            previous,image=durable.read()
+            self.assertEqual(previous['source']['snapshot'],enriched)
+            with TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                (root/'image.png').write_bytes(image)
+                (root/checkpoint.SOURCE).write_text(json.dumps(dict(previous['source'],snapshot=self.snapshot)))
+                with self.assertRaisesRegex(ValueError,'measured_source_changed'):
+                    durable.commit(b'S',root)
+                # A later but valid enriched snapshot also cannot replace an already stronger receipt.
+                fresh = dict(enriched,captured_at='2026-11-26T15:00:06Z')
+                (root/checkpoint.UPGRADE).write_text(json.dumps(dict(previous['source'],snapshot=fresh)))
+                with self.assertRaisesRegex(ValueError,'measured_source_changed'):
+                    durable.commit(b'U',root)
+            result=asyncio.run(self.attempt())
+        self.assertEqual(capture.call_count,1)
+        self.assertEqual(result['basic_snapshot'],enriched)
+
+    def test_only_new_consistent_same_map_cells_can_upgrade_initial_basic(self):
+        from modern_map_basic_numbers import build_basic_snapshot
+        from test_modern_map_basic_numbers import live_inputs
+        market,args=live_inputs()
+        args.update(captured_at='2026-11-26T15:00:05Z',source_sha256=self.snapshot['source_sha256'])
+        cell=dict(source='hover',raw_price='110',raw_value='10.0M',raw_price_step='5.00',
+                  source_time=args['source_time_after'],column_time=args['column_time'])
+        duplicate=build_basic_snapshot(market,enrichment=[cell],**args)
+        self.assertEqual(duplicate['collection_tier'],'basic')
+        def capture_duplicate(symbol,model,tf,path,observe):
+            path.write_bytes(FIXTURE.read_bytes())
+            observe('verified_basic',self.snapshot)
+            return duplicate
+        with patch.object(self,'capture',side_effect=capture_duplicate):
+            self.assertEqual(asyncio.run(self.attempt())['basic_snapshot'],self.snapshot)
+        durable=checkpoint.CheckpointStore(self.store,self.job)
+        base,image=durable.read()
+        # Independently coherent figures on a different source observation with the
+        # same image must never be allowed to replace the acknowledged receipt.
+        market.update(raw_realized_total='102.0K',raw_realized_longs='67.0K')
+        args['end_observation'].update(raw_realized_total='102.0K',raw_realized_longs='67.0K')
+        cell.update(raw_price='115',raw_value='2.0M')
+        different=build_basic_snapshot(market,enrichment=[cell],**args)
+        with TemporaryDirectory() as workspace:
+            root=Path(workspace)
+            (root/'image.png').write_bytes(image)
+            (root/checkpoint.UPGRADE).write_text(json.dumps(dict(base['source'],snapshot=different)))
+            with self.assertRaisesRegex(ValueError,'measured_source_changed'):
+                durable.commit(b'U',root)
+        self.assertEqual(durable.read(),(base,image))
+
+    def test_read_failure_after_fence_still_publishes_verified_basic(self):
+        def fail_optional(symbol,model,tf,path,observe):
+            path.write_bytes(FIXTURE.read_bytes())
+            observe('verified_basic',self.snapshot)
+            raise StageFailure('source_timeout')
+        with patch.object(self,'capture',side_effect=fail_optional) as capture:
+            result=asyncio.run(self.attempt())
+        self.assertEqual(capture.call_count,1)
+        self.assertEqual(result['basic_snapshot'],self.snapshot)
+
     def test_unverified_receipt_cannot_displace_ready_source(self):
         original = asyncio.run(self.attempt())
         store = checkpoint.CheckpointStore(self.store,self.job)

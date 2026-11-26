@@ -13,7 +13,8 @@ import modern_map_reader as ui
 
 
 class BasicSourceReader(TestCase):
-    def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, native=False, box_case=None):
+    def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, native=False, box_case=None,
+               optional_change=None, ack=True, observed=None):
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         stamp=clock.isoformat().replace('+00:00','Z')
         token=clock.strftime('%m/%d %H:%M')
@@ -47,7 +48,7 @@ class BasicSourceReader(TestCase):
         doc.evaluate.return_value=True
         page.url=ui.map_url('BTC')
         control={'Range':'12 hour','Layout':'Single chart','Lens':'Heat','Colours':'Viridis Default'}
-        events=[]
+        events=[] if observed is None else observed
         with ExitStack() as stack:
             def stub(owner,k,**opts):
                 return stack.enter_context(patch.object(owner,k,**opts))
@@ -64,15 +65,19 @@ class BasicSourceReader(TestCase):
             stub(ui,'market_surface',side_effect=lambda *_:chart.copy())
             stub(basic,'source_screen',side_effect=lambda *_:chart.copy())
             stub(ui,'dark_bounds',return_value=bounds)
-            stub(ui,'read_paint',side_effect=[(prev,[]),(token,[]),(prev if change=='column' else token,[])])
+            optional_time=prev if optional_change=='column' else token
+            optional_paint=StageFailure('source_login_required') if optional_change=='auth' else (optional_time,[])
+            paint=stub(ui,'read_paint',side_effect=[(prev,[]),(token,[]),(prev if change=='column' else token,[]),optional_paint])
             stub(basic,'axis_marks',return_value=[])
             scales=[None,None] if native else [('100.00',where),('101.00' if change=='reference' else '100.00',where)]
+            scales.append(scales[-1])
             stub(basic,'axis_scale_live',side_effect=scales)
             measured=stub(basic,'from_native_box',return_value=('100.00',where))
-            stub(basic,'overview',side_effect=[side,final])
+            later=dict(final, source_time=(clock+timedelta(minutes=1)).isoformat().replace('+00:00','Z')) if optional_change=='epoch' else final
+            stub(basic,'overview',side_effect=[side,final,later])
             stub(basic,'after_read_failure')
             tip=stub(basic,'read_tooltip',side_effect=(StageFailure('source_timeout') if fail_hover else None),
-                     return_value={'source':'dom','rows':([{'time':token,'price':'103.00','amount':'49M','step':'1.00'}]
+                     return_value={'source':'dom','rows':([{'time':token,'price':'103.00','amount':('49M' if conflicting_hover is True else conflicting_hover),'step':'1.00'}]
                                                          if conflicting_hover else []),'marks':[],
                             'raw_price_labels':['96.00'] if box_case in ('witness','wrong_witness') else []})
             def one_bin(page, bounds, first, last, *, require_leader):
@@ -93,7 +98,18 @@ class BasicSourceReader(TestCase):
                 return PanelMeasurement(('100.00',value,leader,Decimal(low),Decimal(high)),(low,high))
             extra=stub(ui,'measure_box',side_effect=one_bin)
             output=BytesIO()
-            result=ui.read_selected_map(page,'BTC',1,'12H',output,observe=lambda k,v:events.append((k,v)))
+            def collect(k,v):
+                events.append((k,v))
+                if k=='verified_basic':
+                    self.assertEqual(v['collection_tier'],'basic')
+                    self.assertTrue(v['end_reference_verified'] and v['end_column_verified'])
+                    self.assertEqual(v['source_sha256'],sha256(output.getvalue()).hexdigest())
+                    tip.assert_not_called()
+                    extra.assert_not_called()
+                    return ack
+            result=ui.read_selected_map(page,'BTC',1,'12H',output,observe=collect)
+            self.assertEqual(sum(k=='verified_basic' for k,_ in events),1)
+            self.assertEqual(paint.call_count,4 if box_case in ('leader','witness') else 3)
             self.assertEqual(tip.call_count,1)
             self.assertEqual(extra.call_count,2 if box_case in ('witness','wrong_witness') else 1)
             self.assertEqual(measured.call_count,1 if native else 0)
@@ -111,9 +127,19 @@ class BasicSourceReader(TestCase):
         self.assertTrue(any(r['amount'] is None for r in result['chart_regions']))
 
     def test_conflicting_optional_cell_does_not_replace_verified_sidebar(self):
-        result=self.replay(conflicting_hover=True)
+        events=[]
+        result=self.replay(conflicting_hover=True,observed=events)
+        self.assertTrue(any(k=='stage' and v.get('condition')=='optional_overlap_amount_conflict' for k,v in events))
         self.assertEqual(result['collection_tier'],'basic')
         self.assertEqual(next(r['raw_value'] for r in result['levels'] if r['raw_price']=='103.00'),'25M')
+
+    def test_matching_optional_duplicate_rounds_within_native_precision_without_new_close(self):
+        events=[]
+        result=self.replay(conflicting_hover='25.3M',observed=events)
+        self.assertEqual(result['collection_tier'],'basic')
+        self.assertTrue(any(k=='stage' and v.get('name')=='optional_overlap_only' and v['count']==1
+                            for k,v in events))
+        self.assertFalse(any(k=='stage' and v.get('name','').startswith('enrichment_recheck_') for k,v in events))
 
     def test_domain_reference_preserves_targeted_enrichment_budget(self):
         self.assertEqual(self.replay(native=True)['coverage']['sidebar_count'],3)
@@ -140,3 +166,51 @@ class BasicSourceReader(TestCase):
                                        (10,30,100,200),(0,0,150,250)))
         self.assertFalse(basic.edge_open({'unknown':[(95,150,110,180)],'covered':[]},
                                         (10,30,100,200),(0,0,150,250)))
+
+    def test_previously_closed_basic_survives_newer_epoch_or_column_during_enrichment(self):
+        for changed in ('epoch','column'):
+            with self.subTest(changed=changed):
+                events=[]
+                result=self.replay(native=True,box_case='leader',optional_change=changed,observed=events)
+                self.assertEqual(result,next(v for k,v in events if k=='verified_basic'))
+                self.assertEqual(result['enrichment']['additional_verified_count'],0)
+                self.assertEqual(result['source_time'],result['source_time_after'])
+                self.assertTrue(any(k=='stage' and v['name']=='enrichment_discarded' for k,v in events))
+
+    def test_no_private_base_release_before_valid_close_and_security_errors_propagate(self):
+        for failure in ('column','source_epoch','reference'):
+            events=[]
+            with self.subTest(failure=failure),self.assertRaises(StageFailure):
+                self.replay(change=failure,observed=events)
+            self.assertFalse(any(k=='verified_basic' for k,_ in events))
+        with self.assertRaises(StageFailure) as failed:
+            self.replay(ack=False)
+        self.assertEqual(failed.exception.code,'state_store_failed')
+        with self.assertRaises(StageFailure) as denied:
+            self.replay(box_case='leader',optional_change='auth')
+        self.assertEqual(denied.exception.code,'source_login_required')
+
+    def test_closing_crosshair_requires_fresh_independent_visible_time(self):
+        page=Mock()
+        column=datetime(2026,11,26,16,5,tzinfo=timezone.utc)
+        args=page,(0,0,1074,850),(0,50,999,823),column,Mock(),Mock()
+        # F returned no bottom label and no tooltip marks. Unchanged source
+        # time 16:08 cannot supply a missing latest column of 16:05.
+        empty={'source':'unresolved','marks':[],'price_label_source':None,'raw_price_labels':[]}
+        with patch.object(ui,'read_paint',side_effect=StageFailure('source_not_readable')), \
+             patch.object(basic,'read_tooltip',return_value=empty) as tip:
+            with self.assertRaises(StageFailure) as failed:
+                basic.closing_column(*args)
+            self.assertEqual(failed.exception.basic_reason,'closing_column_display_unavailable')
+            base=dict(price_label_source='dom',raw_price_labels=['60,495','60,582','60,669'])
+            # These calls model a new tooltip whose parser already verified its
+            # dated title, regularly spaced times and row labels (separate tests).
+            tip.return_value=dict(base,marks=[('11/26 16:05',640,680)])
+            self.assertEqual(basic.closing_column(*args),('11/26 16:05',[]))
+            for marks in [[('11/26 16:00',640,680)], [('11/26 16:05',640,680),('11/26 16:10',640,681)]]:
+                tip.return_value=dict(base,marks=marks)
+                with self.assertRaises(StageFailure):basic.closing_column(*args)
+        with patch.object(ui,'read_paint',side_effect=StageFailure('source_login_required')), \
+             patch.object(basic,'read_tooltip') as tip, self.assertRaises(StageFailure):
+            basic.closing_column(*args)
+        tip.assert_not_called()
