@@ -68,6 +68,7 @@ def wait_for(page, read, timeout=8, *, requested=True):
     while True:
         limited_timeout(3000)
         if requested:gate(page)
+        last_reason = None
         try:
             value = read()
             if value:
@@ -75,8 +76,9 @@ def wait_for(page, read, timeout=8, *, requested=True):
         except StageFailure as error:
             if error.code != 'source_not_readable':
                 raise
+            last_reason = error.reason
         if time.monotonic() >= end:
-            raise StageFailure('source_not_readable')
+            raise StageFailure('source_not_readable', last_reason)
         page.wait_for_timeout(limited_timeout(120))
 
 

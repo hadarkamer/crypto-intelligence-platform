@@ -103,6 +103,21 @@ class ModernMapTests(unittest.TestCase):
         with self.assertRaises(StageFailure):
             read_side('479.9M48%', '12M52%')
 
+    def test_poll_reports_last_unreadable_side(self):
+        from model1_execution import failure_detail
+        from modern_map_reader import wait_for
+
+        at = datetime(2026, 11, 26, 11, 59, tzinfo=timezone.utc)
+        for shorts, longs, reason in (
+            ('bad', '530M52%', 'map_shorts_amount_unreadable'),
+            ('479.9M48%', 'bad', 'map_longs_amount_unreadable'),
+        ):
+            text = f'Shorts (above price) {shorts}\nLongs (below price) {longs}'
+            with self.subTest(reason=reason), self.assertRaises(StageFailure) as caught:
+                wait_for(None, lambda: observation(text, at), timeout=0, requested=False)
+            self.assertEqual(caught.exception.code, 'source_not_readable')
+            self.assertEqual(failure_detail(caught.exception)['validation_reason'], reason)
+
     def test_read_native_measurement(self):
         last,total,leader,lo,hi=measurement('Box total · 61,418 → 61,680 (0.44%)\n91.1M\n'
                                            'Largest cluster\n61,500 · 51.0M\nReference (last price)\n60,036')

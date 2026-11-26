@@ -83,18 +83,19 @@ def iso(stamp):
 
 
 def observation(text, clock):
-    def read(label, pattern):
+    def read(label, pattern, *, reason=None):
         match = re.search(label + r'\s*' + pattern, text, flags=re.I)
-        check(match)
+        if match is None:
+            raise StageFailure('source_not_readable', reason)
         return match.group(1)
-    def side(label):
+    def side(label, reason):
         # Adjacent market-card spans can render '479.9M48%'. Only a scale
         # suffix establishes a boundary when the site omits whitespace.
         percentage = r'(?:100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)%'
         boundary = r'(?=\s|$|(?<=[KMB])' + percentage + r'(?:\s|$))'
-        return read(label, '(' + AMOUNT + ')' + boundary)
-    above = side(r'Shorts\s*\(above price\)')
-    below = side(r'Longs\s*\(below price\)')
+        return read(label, '(' + AMOUNT + ')' + boundary, reason=reason)
+    above = side(r'Shorts\s*\(above price\)', 'map_shorts_amount_unreadable')
+    below = side(r'Longs\s*\(below price\)', 'map_longs_amount_unreadable')
     combined = read(r'Open liquidation levels\s*\(total\)', '('+AMOUNT+r')(?=\s|$)')
     step = read(r'Price step\s*/\s*column period', '('+PRICE+r')\s*/')
     update = read(r'Updated', r'(\d{2}:\d{2})(?!\d)')
