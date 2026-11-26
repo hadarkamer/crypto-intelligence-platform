@@ -48,3 +48,29 @@ class NativeGeometry(unittest.TestCase):
             self.assertEqual(page.evaluate('scrollY'),0)
             self.assertEqual(requests,[])
             print('Offline Firefox',browser.version,'before=495+800>1280 after=480+800=1280; both edge rows verified; clipped control rejected; rollback=0; requests=0')
+
+    def test_cookie_notice_cannot_validate_obscured_canvas_time(self):
+        from modern_map_reader import clear_cookie_notice, read_paint
+        with sync_playwright() as pw, pw.firefox.launch(headless=True) as browser:
+            context = browser.new_context(offline=True,viewport={'width':1440,'height':1280})
+            requests=[]
+            context.on('request',lambda request:requests.append(request.url))
+            page=context.new_page()
+            page.set_content('''<canvas style="position:absolute;left:17px;top:480px" width="1074" height="800"></canvas>
+                <div id="termly-code-snippet-support" style="position:fixed;bottom:0;left:0;height:99px;width:100%;background:white">
+                <p>We use essential cookies to make our site work.</p>
+                <button onclick="window.optionalAccepted=1">Accept</button>
+                <button onclick="window.declines++;this.parentNode.remove()">Decline</button></div>
+                <script>window.declines=0;window.optionalAccepted=0;window.painted=0;
+                const canvas=document.querySelector('canvas');
+                canvas.onmousemove=e=>{canvas.getContext('2d').fillText('11/26 12:08',e.offsetX,790);window.painted++};</script>''')
+            with self.assertRaises(StageFailure) as covered:
+                read_paint(page,(17,480,1074,800),800,700)
+            self.assertEqual(covered.exception.reason,'hover_cookie_overlay')
+            self.assertGreater(page.evaluate('window.painted'),0)
+            clear_cookie_notice(page,model=1)
+            stamp,_=read_paint(page,(17,480,1074,800),800,700)
+            self.assertEqual(stamp,'11/26 12:08')
+            self.assertEqual(page.evaluate('[window.declines,window.optionalAccepted]'),[1,0])
+            self.assertEqual(requests,[])
+            print('Covered real canvas time rejected; scope=Decline only; verified same time once axis clear; requests=0')
