@@ -45,7 +45,8 @@ def snapshot_coinglass(context, page, previous_state=None):
     """Read only cookies applicable to approved CoinGlass URLs, before close.
 
     Chromium's scoped cookie view preserves an absent SameSite. Playwright
-    1.55 normalizes it to Lax. No account-provider profile is requested.
+    1.55 normalizes it to Lax. Firefox supplies its own scoped cookie view
+    through BrowserContext.cookies. No account-provider profile is requested.
     """
     page_url = urlsplit(page.url)
     host = page_url.hostname
@@ -61,22 +62,26 @@ def snapshot_coinglass(context, page, previous_state=None):
         previous_state = validate_state(previous_state)
         urls.update('https://' + c['domain'].lstrip('.') + c['path']
                     for c in previous_state['cookies'])
-    client = context.new_cdp_session(page)
-    try:
-        native = client.send('Network.getCookies', {'urls': sorted(urls)})['cookies']
-        if not isinstance(native, list):
-            raise SessionStateError('session_snapshot_failed')
-        cookies = []
-        for item in native:
-            domain = item['domain'].lstrip('.').lower()
-            if domain != 'coinglass.com' and not domain.endswith('.coinglass.com'):
-                continue
-            if item.get('partitionKey') is not None or item.get('partitionKeyOpaque') is True:
-                raise SessionStateError('session_cookie_attributes_unsupported')
-            cookies.append({key: item[key] for key in COOKIE_FIELDS if key in item})
-        return validate_state({'cookies': cookies, 'origins': []})
-    finally:
-        client.detach()
+    browser=getattr(context,'browser',None)
+    if browser is not None and browser.browser_type.name=='firefox':
+        native=context.cookies(sorted(urls))
+    else:
+        client=context.new_cdp_session(page)
+        try:
+            native=client.send('Network.getCookies',{'urls':sorted(urls)})['cookies']
+        finally:
+            client.detach()
+    if not isinstance(native,list):
+        raise SessionStateError('session_snapshot_failed')
+    cookies=[]
+    for item in native:
+        domain=item['domain'].lstrip('.').lower()
+        if domain!='coinglass.com' and not domain.endswith('.coinglass.com'):
+            continue
+        if item.get('partitionKey') is not None or item.get('partitionKeyOpaque') is True:
+            raise SessionStateError('session_cookie_attributes_unsupported')
+        cookies.append({key:item[key] for key in COOKIE_FIELDS if key in item})
+    return validate_state({'cookies':cookies,'origins':[]})
 
 
 class CaptureSession:

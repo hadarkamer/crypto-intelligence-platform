@@ -19,7 +19,8 @@ import tempfile
 from typing import Any
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from urllib.parse import urlsplit
+from unittest.mock import Mock, patch
 
 from model1_execution import StageFailure
 from session_capture import (ACCOUNT_URL, CaptureSession, FRAME_LIMIT, METADATA,
@@ -96,6 +97,36 @@ class CaptureSessionTests(unittest.TestCase):
         session.finish(None)
         self.assertEqual(self.receive(read_fd)['outcome'], 'unconfirmed')
         self.assertEqual(session.state, {})
+
+    def test_firefox_restored_state_rotates_only_after_protected_confirmation(self):
+        page=Page()
+        context=Mock(browser=SimpleNamespace(browser_type=SimpleNamespace(name='firefox')))
+        context.cookies.return_value=[dict(COOKIE)]
+        session=CaptureSession(copy.deepcopy(STATE),None,RUN_ID,4)
+        session.dedicated=True
+        session.attach(context,page)
+        self.assertFalse(session.state_changed(context))
+        rotated=dict(COOKIE,value='SYNTHETIC_ROTATION')
+        context.cookies.return_value=[rotated,dict(COOKIE,domain='unrelated.invalid')]
+        self.assertTrue(session.state_changed(context))
+        with self.assertRaises(StageFailure) as caught:session.checkpoint(context)
+        self.assertEqual(caught.exception.code,'session_observation_failed')
+        note_protected_map_ready(page)
+        with patch.object(session,'_request',return_value={'revision':5}) as write:
+            session.checkpoint(context)
+        expected={'cookies':[rotated],'origins':[]}
+        write.assert_called_once_with('checkpoint',state=expected,incident_id=None)
+        self.assertEqual((session.state,session.revision),(expected,5))
+        for call in context.cookies.call_args_list:
+            self.assertTrue(call.args[0])
+            self.assertTrue(all(urlsplit(u).hostname in
+                ('coinglass.com','www.coinglass.com','fapi.coinglass.com','capi.coinglass.com') for u in call.args[0]))
+        context.new_cdp_session.assert_not_called()
+        context.storage_state.assert_not_called()
+        context.cookies.return_value=[dict(rotated,partitionKey='unsupported')]
+        with self.assertRaises(StageFailure) as caught:session.state_changed(context)
+        self.assertEqual(caught.exception.code,'session_snapshot_failed')
+        self.assertEqual((session.state,session.revision),(expected,5))
 
     def test_partial_metadata_never_falls_back_to_legacy(self):
         for metadata in ({METADATA[1]:RUN_ID}, {METADATA[2]:'4'}):
