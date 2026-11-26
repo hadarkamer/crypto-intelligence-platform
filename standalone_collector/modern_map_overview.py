@@ -10,7 +10,8 @@ from model1_execution import StageFailure
 
 # Only complete, labelled market values or price/amount/distance triples leave
 # the page. Parent text, DOM markup and input values are never returned.
-_READ = r"""() => {
+_READ = r"""(postFailure = false) => {
+    const stop = postFailure ? performance.now() + 500 : Infinity;
     const privateRegions = 'form,header,footer,iframe,dialog,[role=dialog],[contenteditable=true]';
     const excluded = privateRegions + ',nav';
     const visible = el => !el.closest('[hidden],[inert],[aria-hidden=true]') && el.getClientRects().length > 0 &&
@@ -50,13 +51,32 @@ _READ = r"""() => {
     };
     // Match the caption to its smallest enclosing card. Do not obtain a value
     // from the next caption when its own card has not yet loaded.
-    for (const el of document.querySelectorAll('div,span,p,dt,th,b,small,label,strong,time')) {
-        if (el.closest(privateRegions) || el.childElementCount > 6 || el.textContent.length > 160) continue;
-        const nav = el.closest('nav');
-        if ((nav && !chartNav.has(nav)) || !visible(el)) continue;
-        const caption = text(el);
+    const candidates = document.querySelectorAll('div,span,p,dt,th,b,small,label,strong,time');
+    const eligible = el => !el.closest(privateRegions) && el.childElementCount <= 6 &&
+        (!el.closest('nav') || chartNav.has(el.closest('nav'))) && el.textContent.length <= 160;
+    const readStamp = caption => {
         const updated = /^Updated\s+(\d{2}:\d{2})$/i.exec(caption);
-        if (updated) { push('raw_updated_at', updated[1]); continue; }
+        if (updated) push('raw_updated_at', updated[1]);
+        return !!updated;
+    };
+    if (postFailure) {
+        // Read the source's clock independently before attempting any numerical
+        // cards. If the bounded pass stops, a partial scan cannot establish a
+        // unique clock in the presence of duplicate UI controls.
+        for (const el of candidates) {
+            if (performance.now() >= stop) return {values:{}, clock_complete:false, totals_complete:false};
+            if (eligible(el) && /^Updated/i.test(el.textContent.trim()) && visible(el)) readStamp(text(el));
+        }
+    }
+    let totalsComplete = true;
+    for (const el of candidates) {
+        if (postFailure && performance.now() >= stop) { totalsComplete = false; break; }
+        if (!eligible(el)) continue;
+        if (postFailure && !/^(?:Open liquidation levels|Shorts|Longs)/i.test(el.textContent.trim())) continue;
+        if (!visible(el)) continue;
+        const nav = el.closest('nav');
+        const caption = text(el);
+        if (!postFailure && readStamp(caption)) continue;
         if (nav) continue;
         const key = caption.toLowerCase();
         const card = labels.get(key);
@@ -75,6 +95,7 @@ _READ = r"""() => {
             break;
         }
     }
+    if (postFailure) return {values, clock_complete:true, totals_complete:totalsComplete};
     const row = new RegExp(String.raw`(?:^|\s)(${price})\s+(${amount})\s+([+−-]${price}%)(?=\s|$)`, 'gi');
     let unreadableRail = 0;
     for (const el of document.querySelectorAll('[data-lv]')) {
@@ -177,3 +198,40 @@ def parse_overview(batch, clock):
 
 def overview(page, clock=None):
     return parse_overview(page.evaluate(_READ), clock or datetime.now(timezone.utc))
+
+
+def after_read_failure(page, guard, emit):
+    """Best effort timestamp on the same guarded document; never changes its UI."""
+    try:
+        if guard:
+            guard()
+        # Locator resolution is bounded and the in-page diagnostic limits its
+        # synchronous scan. There is no navigation, retry or additional image.
+        batch = page.locator('body').evaluate('body => (' + _READ + ')(true)', timeout=1000)
+        at = datetime.now(timezone.utc)
+        record = {'name':'post_failure_market_observation', 'status':'unavailable',
+                  'post_failure_observed_at':iso(at), 'post_failure_raw_updated_at':None,
+                  'post_failure_source_time':None}
+        source = batch['values']
+        stamps = set(source.get('raw_updated_at', []))
+        if batch['clock_complete'] and len(stamps) == 1:
+            stamp = stamps.pop()
+            if re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', stamp):
+                record['post_failure_raw_updated_at'] = stamp
+                try:
+                    record['post_failure_source_time'] = iso(source_clock(stamp, at))
+                    record['status'] = 'observed'
+                except StageFailure:
+                    record['status'] = 'stale_or_unverified_time'
+        if batch['totals_complete']:
+            for key in ('raw_total', 'raw_above_total', 'raw_below_total'):
+                vals = set(source.get(key, []))
+                if len(vals) == 1:
+                    token = vals.pop()
+                    if re.fullmatch(r'\$?\s*\d[\d,]*(?:\.\d+)?\s*[KMBT]?', token, re.I):
+                        record['post_failure_' + key] = _raw(token)
+        emit('stage', record)
+    except Exception:
+        # The original source-read exception remains the cause even if the
+        # page has disappeared, its guard rejects it, or the evidence sink fails.
+        return

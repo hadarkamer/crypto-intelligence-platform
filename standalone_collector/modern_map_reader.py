@@ -565,8 +565,19 @@ def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=No
     else:
         before=details(page)
     with position_chart(page, clear_surface) as box:
-        return _measure_selected_map(page,symbol,model,timeframe,output,before,box,clear_surface,
-                                     supplemental,emit,stage)
+        try:
+            return _measure_selected_map(page,symbol,model,timeframe,output,before,box,clear_surface,
+                                         supplemental,emit,stage)
+        except Exception:
+            if pilot and observe:
+                from modern_map_overview import after_read_failure
+                def still_present():
+                    limited_timeout(1000)
+                    if page.is_closed() or page.url!=map_url(symbol):
+                        raise StageFailure('source_navigation_changed')
+                    if guard:guard()
+                after_read_failure(page,still_present,emit)
+            raise
 
 
 def core_observation(facts):
@@ -583,16 +594,31 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
     from modern_map_cells import merge_cells
     left,top,width,height=box
     page.mouse.move(max(0,left-2),max(0,top-2))
+    surface=None
+    if supplemental is not None:
+        from modern_map_surface import prepare_surface
+        surface=stage('inspect_chart_obstruction',lambda:prepare_surface(page,box,guard,limited_timeout))
+        emit('stage',dict(name='chart_obstruction',status='partial' if surface['covered'] or surface['unknown'] else 'clear',**surface))
+        if surface['close_attempts']:
+            box=chart_box(page)
+            left,top,width,height=box
     controls=evidence_controls(page,symbol,model)
     screen=stage('capture_chart_and_controls',lambda:market_surface(page,box,controls,guard))
     try:
         check(0<=left and left+width<=screen.width and 0<=top and top+height<=screen.height)
         # Save once before any hover or Measure operation. Partial source
         # survives even when the first axis label is unreadable.
+        if surface:
+            # Unknown UI is omitted only in the exported partial image. The
+            # browser remains untouched and its actual coverage is recorded.
+            for rect in surface['unknown']:
+                screen.paste((10,13,18),tuple(rect))
         stage('save_filtered_chart',lambda:save_evidence(screen,box,controls,output))
         if supplemental is not None:
             from pathlib import Path
             emit('png',output.getvalue() if isinstance(output,BytesIO) else Path(output).read_bytes())
+        if surface and (surface['covered'] or surface['unknown']):
+            raise StageFailure('source_not_readable','hover_plot_clipped')
         bounds=stage('locate_dark_price_plot',lambda:dark_bounds(screen,box))
         x0,y0,x1,y1=bounds
         def stamp_at(x):

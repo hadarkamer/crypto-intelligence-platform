@@ -313,6 +313,8 @@ class ReaderReplay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             def stub(k,**kw):return stack.enter_context(patch.object(reader,k,**kw))
             stub('open_verified_map');stub('display_ready');stub('details',return_value=data)
+            stack.enter_context(patch('modern_map_surface.prepare_surface',return_value={
+                'covered':[],'unknown':[],'eligible':0,'cards':0,'close_attempts':0}))
             side=dict(data,raw_total='100M',raw_column_period='5m',raw_largest_value=None,sidebar_levels=[])
             if covered:
                 side['raw_largest_value']='30M'

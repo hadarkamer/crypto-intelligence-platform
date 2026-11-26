@@ -101,3 +101,32 @@ class BrowserOverviewTest(TestCase):
         self.assertEqual(result['raw_updated_at'], '12:08')
         self.assertEqual((result['raw_price_step'], result['raw_column_period']), ('49.33', '5m'))
         self.assertNotIn('private-sentinel', str(result))
+
+
+class FailureReceiptTest(TestCase):
+    def test_stamp_survives_missing_or_conflicting_market_cards(self):
+        from modern_map_overview import after_read_failure
+        page, guard, emit = Mock(), Mock(), Mock()
+        stamp = datetime.now(timezone.utc).strftime('%H:%M')
+        page.locator.return_value.evaluate.return_value = {
+            'values': {'raw_updated_at': [stamp], 'raw_total': ['1B'], 'raw_above_total': ['1M', '2M']},
+            'clock_complete': True, 'totals_complete': True}
+        after_read_failure(page, guard, emit)
+        guard.assert_called_once_with()
+        page.locator.return_value.evaluate.assert_called_once()
+        kind, record = emit.call_args.args
+        self.assertEqual((kind, record['name'], record['status']), ('stage', 'post_failure_market_observation', 'observed'))
+        self.assertEqual(record['post_failure_raw_updated_at'], stamp)
+        self.assertTrue(record['post_failure_source_time'].endswith('Z'))
+        self.assertEqual(record['post_failure_raw_total'], '1B')
+        self.assertNotIn('post_failure_raw_above_total', record)
+        self.assertNotIn('source_time', record)
+
+    def test_refused_guard_and_page_loss_cannot_replace_original_failure(self):
+        from modern_map_overview import after_read_failure
+        page, emit = Mock(), Mock()
+        after_read_failure(page, Mock(side_effect=ValueError('private error')), emit)
+        page.locator.assert_not_called()
+        page.locator.return_value.evaluate.side_effect = RuntimeError('page gone')
+        after_read_failure(page, None, emit)
+        emit.assert_not_called()
