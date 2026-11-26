@@ -88,8 +88,11 @@ def observation(text, clock):
         check(match)
         return match.group(1)
     def side(label):
-        # Some layouts place the two side headings on the same visual row.
-        return read(label, '('+AMOUNT+r')(?=\s|$)')
+        # Adjacent market-card spans can render '479.9M48%'. Only a scale
+        # suffix establishes a boundary when the site omits whitespace.
+        percentage = r'(?:100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)%'
+        boundary = r'(?=\s|$|(?<=[KMB])' + percentage + r'(?:\s|$))'
+        return read(label, '(' + AMOUNT + ')' + boundary)
     above = side(r'Shorts\s*\(above price\)')
     below = side(r'Longs\s*\(below price\)')
     combined = read(r'Open liquidation levels\s*\(total\)', '('+AMOUNT+r')(?=\s|$)')

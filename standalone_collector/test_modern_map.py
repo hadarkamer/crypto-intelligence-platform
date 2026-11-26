@@ -81,6 +81,28 @@ class ModernMapTests(unittest.TestCase):
         with self.assertRaises(StageFailure):equivalent('1.29B',['47.1M','822.5M'])
         with self.assertRaises(StageFailure):verified_member({'price':61_500},{'raw_price':'61,549','raw_value':'40.1M'},49.33)
 
+    def test_adjacent_side_amount_and_percentage(self):
+        at = datetime(2026, 11, 26, 11, 59, tzinfo=timezone.utc)
+        # The shorts cell is the recorded live fragment. The longs amount
+        # below is an independent test value for the existing sum check.
+        def read_side(shorts, longs='530M52%'):
+            return observation(
+                'Open liquidation levels (total) 1.01B\n'
+                f'Longs (below price) {longs}\nShorts (above price) {shorts}\n'
+                'Price step / column period 45.69 / 5m\nUpdated 11:59', at)
+
+        for raw in ('479.9M48%', '479.9M 48%', '479.9M'):
+            with self.subTest(raw=raw):
+                totals = read_side(raw)
+                self.assertEqual(totals['raw_above_total'], '479.9M')
+                self.assertEqual(totals['raw_below_total'], '530M')
+        for raw in ('479.948%', '479.9M148%', '479.9M100.1%', '479.9M48%%',
+                    '479.9M48', '479.9M48%other'):
+            with self.subTest(raw=raw), self.assertRaises(StageFailure):
+                read_side(raw)
+        with self.assertRaises(StageFailure):
+            read_side('479.9M48%', '12M52%')
+
     def test_read_native_measurement(self):
         last,total,leader,lo,hi=measurement('Box total · 61,418 → 61,680 (0.44%)\n91.1M\n'
                                            'Largest cluster\n61,500 · 51.0M\nReference (last price)\n60,036')
