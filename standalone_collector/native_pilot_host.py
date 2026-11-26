@@ -10,14 +10,14 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SERVICE = 'decision-hub-coinglass-pilot-20261125'
-BRANCH = 'qa/coinglass-native-pilot-service-20261125'
+BRANCH = 'qa/coinglass-native-app-20261126c'
 PRODUCT = 'f8412b67417f8636f9bebb11a028096bbc0ed1eb'
 RUNTIME_DIGEST = 'a0fdcfbbf446a426ae0f2adcbd62c46718a3ad816e8ff1926bf178cfeed71070'
 CLEAN = frozenset({
     'PATH','HOME','USER','TMPDIR','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ',
     'LD_LIBRARY_PATH','VIRTUAL_ENV','PLAYWRIGHT_BROWSERS_PATH','XDG_CACHE_HOME',
     'XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','FONTCONFIG_PATH','PORT',
-    'IS_PULL_REQUEST','RENDER','RENDER_SERVICE_NAME','RENDER_GIT_BRANCH','RENDER_GIT_COMMIT',
+    'IS_PULL_REQUEST','RENDER','RENDER_SERVICE_ID','RENDER_SERVICE_NAME','RENDER_GIT_BRANCH','RENDER_GIT_COMMIT',
     'PYTHONDONTWRITEBYTECODE','COINGLASS_QA_CLEAN_STAGE',
 })
 
@@ -118,7 +118,10 @@ def entry(args, root):
     if args:
         print(json.dumps(info,sort_keys=True),flush=True)
         return
-    with make_server(int(os.environ.get('PORT','10000')),info) as server:
+    # The temporary test server receives only the environment allowlist from isolate().
+    sys.path.insert(0, str(root))
+    from qa_job_server import make_server as make_job_server
+    with make_job_server(int(os.environ.get('PORT','10000')), os.environ['RENDER_SERVICE_ID']) as server:
         server.serve_forever()
 
 def build(root):
@@ -144,3 +147,4 @@ if __name__ == '__main__':
         manual_pilot(root, sys.argv[2], sys.argv[3])
     else:
         raise SystemExit('native_pilot_command_unavailable')
+

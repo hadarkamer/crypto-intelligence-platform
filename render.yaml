@@ -3,7 +3,7 @@ services:
     name: decision-hub-coinglass-pilot-20261125
     runtime: python
     repo: https://github.com/hadarkamer/crypto-intelligence-platform
-    branch: qa/coinglass-native-pilot-service-20261125
+    branch: qa/coinglass-native-app-20261126c
     region: oregon
     plan: 1c-2g
     numInstances: 1
@@ -17,7 +17,7 @@ services:
       RENDER_SERVICE_NAME="$RENDER_SERVICE_NAME" RENDER_GIT_BRANCH="$RENDER_GIT_BRANCH"
       RENDER_GIT_COMMIT="$RENDER_GIT_COMMIT"
       python -I -S -B standalone_collector/native_pilot_host.py build
-    startCommand: python -I -S -B standalone_collector/native_pilot_host.py serve
+    startCommand: python -I -B standalone_collector/native_pilot_host.py serve
     envVars:
       - key: COINGLASS_MODERN_UI_ENABLED
         value: "true"
@@ -43,3 +43,9 @@ services:
           type: web
           name: decision-hub-model1-collector
           envVarKey: DATABASE_URL
+
+      - key: OPENAI_API_KEY
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: OPENAI_API_KEY
