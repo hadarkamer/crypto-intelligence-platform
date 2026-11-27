@@ -9,6 +9,7 @@ import re
 from uuid import uuid4
 
 from heatmap_models import schema_version, source_url
+from modern_map_basic_numbers import BASIC_SYMBOLS, BASIC_RANGES, basic_target
 
 MAX_ATTEMPTS = 3
 MEASURE_SCHEMA = 'coinglass.right-edge-measure.v1'
@@ -26,8 +27,16 @@ def modern_enabled():
 
 
 def numeric_only():
-    """An existing collector without model credentials can still serve this one numerical profile."""
-    return modern_enabled() and not os.getenv('OPENAI_API_KEY')
+    """The modern account worker runs the verified numerical reader for every admitted map."""
+    return modern_enabled()
+
+
+def bridge_ranges():
+    return BASIC_RANGES if modern_enabled() else ('12H', '24H', '48H')
+
+
+def active_basic_symbols():
+    return sorted(verified_symbols().intersection(BASIC_SYMBOLS))
 
 
 def canonical_auth_failure(connection, store, jid, code):
@@ -119,7 +128,7 @@ def initialize_dimensions(connection):
         ADD COLUMN IF NOT EXISTS attempt integer NOT NULL DEFAULT 1 CHECK (attempt BETWEEN 1 AND 3),
         ADD COLUMN IF NOT EXISTS logical_request_id uuid""")
     connection.execute('DROP INDEX IF EXISTS public.ai_collection_bridge_one_active_model_tf')
-    # Explicit cycle IDs have separate queued work; the existing global worker still runs just one.
+    # Legacy callers may share a pending map; modern callers also arbitrate under CREATE_LOCK.
     connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ai_collection_bridge_active_shared_map
         ON public.ai_collection_bridge_jobs(symbol,heatmap_model,timeframe)
         WHERE logical_request_id IS NULL AND status IN ('queued','running')""")
@@ -152,8 +161,9 @@ def _continue_attempt(connection, prior, rid, attempt):
             (prior['id'],)).fetchone()
         if not confirmed:
             raise BridgeError('login_pending', 'The source login event has not been resolved', 409)
+    _guard_active_map(connection, prior['symbol'], prior['heatmap_model'], prior['timeframe'], prior['id'])
     retained = None
-    if modern_enabled() and (prior.get('symbol'),prior.get('heatmap_model'),prior.get('timeframe')) == ('BTC',1,'12H'):
+    if modern_enabled() and basic_target(prior['symbol'],prior['heatmap_model'],prior['timeframe']):
         retained = connection.execute("""SELECT diagnostic ? 'measured_btc_v1' AND image_png IS NOT NULL AS complete
             FROM public.ai_collection_bridge_evidence WHERE job_id=%s AND
             diagnostic ?| ARRAY['measured_btc_v1','measured_btc_partial_v1']""",(prior['id'],)).fetchone()
@@ -168,11 +178,47 @@ def _continue_attempt(connection, prior, rid, attempt):
         (attempt, prior['id'], current)).fetchone()
 
 
+def _guard_active_map(connection, symbol, model, timeframe, exclude=None):
+    if not modern_enabled() or not basic_target(symbol, model, timeframe):
+        return
+    active = connection.execute("""SELECT id FROM public.ai_collection_bridge_jobs
+        WHERE symbol=%s AND heatmap_model=%s AND timeframe=%s
+        AND status IN ('queued','running') AND id IS DISTINCT FROM %s LIMIT 1""",
+        (symbol, model, timeframe, exclude)).fetchone()
+    if active:
+        from collection_bridge import BridgeError
+        raise BridgeError('map_in_progress', 'Another request owns this active map', 409)
+
+
+def finish_claim(store, row, result, image, error=None):
+    """Compare the claim timestamp so a disconnected worker cannot finish a later claim."""
+    from psycopg.types.json import Jsonb
+    status = 'failed' if error else 'ready'
+    payload = Jsonb(result) if result is not None else None
+    key = (row['id'], row['started_at'], row['attempt'])
+    with store.connect() as connection:
+        updated = connection.execute("""UPDATE public.ai_collection_bridge_jobs SET status=%s,result=%s,
+            image_png=%s,error_code=%s,finished_at=now()
+            WHERE id=%s AND status='running' AND started_at=%s AND attempt=%s RETURNING id""",
+            (status, payload, image, error, *key)).fetchone()
+        if updated:
+            return True
+        # An ambiguous commit can be acknowledged on a retry only for the same
+        # claim, terminal state and payload. A reclaimed job must stay independent.
+        existing = connection.execute("""SELECT 1 FROM public.ai_collection_bridge_jobs
+            WHERE id=%s AND started_at=%s AND attempt=%s AND status=%s
+              AND result IS NOT DISTINCT FROM %s AND image_png IS NOT DISTINCT FROM %s
+              AND error_code IS NOT DISTINCT FROM %s""", (*key, status, payload, image, error)).fetchone()
+        return existing is not None
+
+
 def start_job(store, rid, timeframe, symbol=None, attempt=1):
     from collection_bridge import BridgeError, CREATE_LOCK, envelope
     explicit = symbol is not None
     symbol = verify_symbol('BTC' if symbol is None else symbol)
     verify_attempt(attempt)
+    if timeframe not in bridge_ranges() or timeframe == '1W' and not basic_target(symbol,store.heatmap_model,timeframe):
+        raise BridgeError('unsupported_timeframe', 'Unsupported horizon for this map', 400)
     if symbol != 'BTC' and not modern_enabled():
         raise BridgeError('unsupported_symbol', 'This symbol requires the modern CoinGlass map')
     with store.connect() as connection:
@@ -180,18 +226,15 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
         prior = connection.execute("""SELECT j.* FROM public.ai_collection_bridge_requests r
             JOIN public.ai_collection_bridge_jobs j ON j.id=r.job_id WHERE r.id=%s
             FOR UPDATE OF j""", (rid,)).fetchone()
-        if (numeric_only() and (symbol,store.heatmap_model,timeframe) != ('BTC',1,'12H')
+        if (numeric_only() and not basic_target(symbol,store.heatmap_model,timeframe)
                 and (not prior or prior['status'] != 'ready' and attempt > prior['attempt'])):
-            raise BridgeError('not_configured','This collection profile requires the analysis configuration',503)
+            raise BridgeError('unsupported_symbol','This symbol has no numerical CoinGlass collection profile',400)
         if prior:
             if (prior['symbol'], prior['heatmap_model'], prior['timeframe']) != (symbol, store.heatmap_model, timeframe):
                 raise BridgeError('idempotency_conflict', 'Request id belongs to another CoinGlass map', 409)
             return _job_envelope(connection,_continue_attempt(connection, prior, rid, attempt))
         if attempt != 1:
             raise BridgeError('invalid_retry', 'A new request must begin at attempt 1', 409)
-        connection.execute("""UPDATE public.ai_collection_bridge_jobs SET status='failed',
-            error_code='interrupted',finished_at=now() WHERE status='running'
-            AND started_at < now()-interval '15 minutes'""")
         connection.execute("""UPDATE public.ai_collection_bridge_jobs SET image_png=NULL
             WHERE COALESCE(finished_at,created_at)<now()-interval '6 hours' AND image_png IS NOT NULL""")
         connection.execute("""DELETE FROM public.ai_collection_bridge_jobs
@@ -204,15 +247,16 @@ def start_job(store, rid, timeframe, symbol=None, attempt=1):
             row = connection.execute("""SELECT * FROM public.ai_collection_bridge_jobs
                 WHERE symbol=%s AND heatmap_model=%s AND timeframe=%s AND logical_request_id IS NULL
                 AND (status IN ('queued','running') OR (status='ready'
-                    AND CASE WHEN %s AND (symbol,heatmap_model,timeframe)=('BTC',1,'12H') THEN
+                    AND CASE WHEN %s THEN
                              result->>'result_type'='verified_basic' AND result->'basic_snapshot'->>'schema'='coinglass.basic.v1'
                              ELSE result->>'selection_policy'='prominent_right_edge.v1' AND CASE WHEN %s THEN
                              result->'measure_snapshot'->>'schema'=%s ELSE
                              result->'hover_snapshot'->>'version'='displayed-hover.v1' END END
                     AND (result->>'captured_at')::timestamptz BETWEEN now()-interval '15 minutes' AND now()))
                 ORDER BY created_at DESC LIMIT 1""",
-                (symbol, store.heatmap_model, timeframe, modern_enabled(), modern_enabled(), MEASURE_SCHEMA)).fetchone()
+                (symbol, store.heatmap_model, timeframe, modern_enabled() and basic_target(symbol,store.heatmap_model,timeframe), modern_enabled(), MEASURE_SCHEMA)).fetchone()
         if row is None:
+            _guard_active_map(connection,symbol,store.heatmap_model,timeframe)
             _allow_new_source_work(connection)
             row = connection.execute("""INSERT INTO public.ai_collection_bridge_jobs
                 (id,timeframe,status,heatmap_model,symbol,logical_request_id)
@@ -271,7 +315,9 @@ def valid_result(result, image, jid, timeframe, model, symbol, modern):
     if not isinstance(result, dict):
         return False
     if 'basic_snapshot' in result or result.get('result_type') == 'verified_basic':
-        if not modern or (symbol,model,timeframe) != ('BTC',1,'12H') or type(result.get('heatmap_model')) is not int:
+        if (not modern or not basic_target(symbol,model,timeframe)
+                or type(result.get('heatmap_model')) is not int
+                or (result.get('symbol'),result.get('heatmap_model'),result.get('timeframe')) != (symbol,model,timeframe)):
             return False
         from modern_map_task import numeric_result
         from model1_execution import StageFailure

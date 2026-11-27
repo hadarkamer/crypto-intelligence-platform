@@ -1,4 +1,4 @@
-"""Acquire one BTC/1/12H basic snapshot from its rendered, protected Coin map."""
+"""Acquire a basic snapshot from one verified, rendered Coin map."""
 from __future__ import annotations
 
 from contextlib import nullcontext
@@ -17,7 +17,7 @@ from model1_execution import StageFailure
 from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
 from modern_map_cells import _agree, merge_cells
-from modern_map_basic_numbers import market_amounts, period_seconds
+from modern_map_basic_numbers import HORIZON_SECONDS, basic_target, market_amounts, period_seconds
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
 from modern_map_overview import _FIELDS, after_read_failure, overview
 from modern_map_surface import prepare_surface
@@ -36,11 +36,13 @@ def identity(page, symbol, model, timeframe):
     require(page.url==ui.map_url(symbol) and ui.choice(page,f'Model {model}') and ui.choice(page,'Coin'),
             'map_identity_changed')
     ui.symbol_control(page,symbol)
-    expected={'Range':ui.RANGES[timeframe],'Layout':'Single chart','Lens':'Heat'}
+    selection=ui.selected_range(page,timeframe)
+    expected={'Layout':'Single chart','Lens':'Heat'}
     require(all(ui.option_control(page,key).inner_text().strip()==value for key,value in expected.items()),
             'map_selection_changed')
     require(re.fullmatch(r'Viridis(?:\s*Default)?',ui.option_control(page,'Colours').inner_text().strip())
             and ui.full_intensity(page),'colour_or_intensity_changed')
+    return selection
 
 
 def prove_observations(before, after, emit=None):
@@ -94,8 +96,8 @@ def source_screen(page, box, padded_size, guard):
         return result
 
 
-def read_epoch(stamp, update):
-    return source_clock(stamp,datetime.fromisoformat(update),column=True)
+def read_epoch(stamp, update, period=None):
+    return source_clock(stamp,datetime.fromisoformat(update),column=True,max_lag=period_seconds(period) if period else 1200)
 
 
 
@@ -103,7 +105,7 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
     """Observe a displayed time. At opening the supplied date is an anchor only."""
     phase='opening' if opening else 'closing'
     def verify(stamp):
-        actual=read_epoch(stamp,iso(column))
+        actual=read_epoch(stamp,iso(column),period)
         if opening:
             valid=0<=(column-actual).total_seconds()<=period_seconds(period)
             condition='latest_column_not_within_period'
@@ -261,7 +263,7 @@ def enrich_latest(page,box,bounds,side,column,scale,regions,height,deadline,stag
 @ui.phase('map_read')
 def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,base_only=False):
     from modern_map_basic_numbers import build_basic_snapshot
-    require((symbol,model,timeframe)==('BTC',1,'12H'),'wrong_basic_target')
+    require(basic_target(symbol,model,timeframe),'wrong_basic_target')
     def emit(kind,value):
         if observe:return observe(kind,value)
     def stage(name,fn):
@@ -287,7 +289,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
         require(not page.is_closed() and doc.evaluate('d=>d===document'),'source_document_changed')
         protected()
     try:
-        stage('basic_identity_start',lambda:identity(page,symbol,model,timeframe))
+        start_range=stage('basic_identity_start',lambda:identity(page,symbol,model,timeframe))
         side=stage('read_market_overview',lambda:overview(page))
         emit('overview',side)
         def validate_market():
@@ -318,9 +320,9 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                                 base_only=True,period=side.get('raw_column_period'),opening=True)
                     return ui.read_paint(page,box,right-1,middle,observe=emit)
                 current,initial_marks=stage('read_latest_crosshair_time',read_opening_column)
-                column=read_epoch(current,side['source_time'])
-                previous=source_clock(prior,column,column=True,max_lag=12*3600)
-                require(0<(column-previous).total_seconds()<=12*3600 and
+                column=read_epoch(current,side['source_time'],side.get('raw_column_period'))
+                previous=source_clock(prior,column,column=True,max_lag=HORIZON_SECONDS[timeframe])
+                require(0<(column-previous).total_seconds()<=HORIZON_SECONDS[timeframe] and
                         column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
                 marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,initial_marks))
                 ocr_cache={}
@@ -377,7 +379,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                 require(closing_bounds==bounds,'closing_price_domain_changed')
                             close_time,close_marks=record('recheck_latest_column',lambda:displayed_column(
                                 page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period')))
-                            require(read_epoch(close_time,side['source_time'])==column,'closing_column_changed')
+                            require(read_epoch(close_time,side['source_time'],side.get('raw_column_period'))==column,'closing_column_changed')
                             end_marks=axis_marks(page,closing_box,prior_marks if box==closing_box else [],close_marks)
                             # Collect a fresh overview after the closing image and cursor
                             # observation. Its explicitly labeled price can supply the tag.
@@ -411,11 +413,12 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                         received=dict(chart_regions=final_regions,native_bins_inspected=final_bins)))
                                     require(False,'closing_significant_regions_changed')
                             require(ui.chart_box(page)==closing_box,'closing_geometry_changed_at_pointer')
-                    record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
+                    end_range=record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
+                    require(start_range==end_range, 'closing_range_changed')
                     same_document()
-                    end=dict(start,source_time=after['source_time'],column_time=iso(read_epoch(close_time,after['source_time'])),
+                    end=dict(start,source_time=after['source_time'],column_time=iso(read_epoch(close_time,after['source_time'],after.get('raw_column_period'))),
                              raw_last_price=end_scale[0],same_document=True,settings_verified=True,same_market_labels=True,
-                             symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin')
+                             symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin',range_control=end_range)
                     emit('stage',dict(name=prefix+'basic_end_observation',status='ok',**end))
                     return dict(symbol=symbol,model=model,timeframe=timeframe,source_url=ui.map_url(symbol),
                               source_time_after=after['source_time'],column_time=iso(column),column_time_after=end['column_time'],

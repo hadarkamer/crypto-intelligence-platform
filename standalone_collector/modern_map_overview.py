@@ -33,7 +33,7 @@ _READ = r"""(postFailure = false) => {
             // A compact unsuffixed amount is ambiguous, e.g. 12345%.
             String.raw`(${amount})(?:(?:\s+|(?<=[KMBT]))(${percent}))?`]),
         ['Price step / column period', ['raw_price_step', 'raw_column_period'],
-            String.raw`(${price})\s*/\s*(\d+\s*(?:s|m|h|min|minutes?))`],
+            String.raw`(${price})\s*/\s*(\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?))`],
         ['Liquidated in 24h', ['raw_realized_total'], `(${amount})`],
         ['of which longs / shorts', ['raw_realized_longs', 'raw_realized_shorts'],
             String.raw`(${amount})\s*/\s*(${amount})`],

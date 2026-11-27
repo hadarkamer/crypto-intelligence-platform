@@ -57,9 +57,10 @@ def guard_surface(page, target):
     # A retained gate on a different default model or range is not evidence
     # that the requested map needs the account. Confirm the live controls.
     try:
+        from modern_map_reader import range_matches
         matches = (choice(page,f'Model {target.model}') and choice(page,'Coin')
                    and symbol_control(page,target.symbol)
-                   and option_control(page,'Range').inner_text().strip() == RANGES[target.timeframe])
+                   and range_matches(target.timeframe,option_control(page,'Range').inner_text().strip()))
     except Exception:
         matches = False
     raise StageFailure('source_login_required' if matches else 'source_not_readable')

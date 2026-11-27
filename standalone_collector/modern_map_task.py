@@ -96,6 +96,23 @@ def _normalized_result(raw, snapshot, run_id, image, scores):
                 quality='visual_estimate',quantity_status='unavailable',quantity_reason='source_usd_unverified')
 
 
+def check_ocr_runtime(observe=None):
+    from modern_map_axis_ocr import BINARY
+    # The build verifies the binary's version and the language model's
+    # digest. Catch an incomplete runtime before any new map navigation.
+    for asset,mode,cause in (
+            (BINARY,os.X_OK,'ocr_launcher_unavailable'),
+            (BINARY.parent/'bin/tesseract',os.X_OK,'ocr_binary_unavailable'),
+            (BINARY.parent/'tessdata/eng.traineddata',os.R_OK,'ocr_english_unavailable'),
+            (Path('/usr/bin/prlimit'),os.X_OK,'ocr_process_limiter_unavailable')):
+        if not asset.is_file() or not os.access(asset,mode):
+            if observe:
+                observe('stage',dict(name='basic_ocr_readiness',status='failed',condition=cause))
+            error=StageFailure('source_capture_failed')
+            error.basic_reason=cause
+            raise error
+
+
 def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=None, observe=None, base_only=False):
     from contextlib import ExitStack
     from dedicated_map_flow import collect_with_dedicated_session, MapTarget
@@ -107,21 +124,8 @@ def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=N
         session = CaptureSession.from_environment()
     if session is None or not session.dedicated:
         raise StageFailure('session_input_invalid')
-    if base_only and (symbol,model,timeframe)==('BTC',1,'12H'):
-        from modern_map_axis_ocr import BINARY
-        # The build verifies the binary's version and the language model's
-        # digest. Catch an incomplete runtime before any new map navigation.
-        for asset,mode,cause in (
-                (BINARY,os.X_OK,'ocr_launcher_unavailable'),
-                (BINARY.parent/'bin/tesseract',os.X_OK,'ocr_binary_unavailable'),
-                (BINARY.parent/'tessdata/eng.traineddata',os.R_OK,'ocr_english_unavailable'),
-                (Path('/usr/bin/prlimit'),os.X_OK,'ocr_process_limiter_unavailable')):
-            if not asset.is_file() or not os.access(asset,mode):
-                if observe:
-                    observe('stage',dict(name='basic_ocr_readiness',status='failed',condition=cause))
-                error=StageFailure('source_capture_failed')
-                error.basic_reason=cause
-                raise error
+    if base_only:
+        check_ocr_runtime(observe)
     context = None
     # The private session IPC removes credentials before this point. The AI
     # client runs later in this process. Its key must not reach the driver
@@ -132,7 +136,7 @@ def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=N
             try:
                 with phase('browser_context'):
                     pw = resources.enter_context(sync_playwright())
-                    if (symbol,model,timeframe)==('BTC',1,'12H'):
+                    if base_only or (symbol,model,timeframe)==('BTC',1,'12H'):
                         browser=pw.firefox.launch(headless=True,timeout=20000,env={
                             k:os.environ[k] for k in ('HOME','LANG','PATH','LD_LIBRARY_PATH') if k in os.environ})
                     else:
@@ -173,30 +177,10 @@ def _run(timeframe,run_id,root):
     symbol=os.environ['COLLECTION_HEATMAP_SYMBOL']
     map_url(symbol)
     raw_model=os.environ['COLLECTION_HEATMAP_MODEL']
-    if raw_model not in ('1','2','3') or timeframe not in ('12H','24H','48H'):
+    from modern_map_basic_numbers import basic_target
+    if raw_model not in ('1','2','3') or not basic_target(symbol,int(raw_model),timeframe):
         raise ValueError('Invalid capture identity')
-    if (symbol,raw_model,timeframe) == ('BTC','1','12H'):
-        return _run_basic_btc(root,run_id,base_only=True)
-    from market_vision.openai_heatmap_scanner import analyze_heatmap_images
-    path=root/'image.png'
-    stage('capture')
-    snapshot=capture(symbol,int(raw_model),timeframe,path)
-    stage('image_check')
-    image=path.read_bytes()
-    if len(image)>4*1024*1024 or not image.startswith(b'\x89PNG\r\n\x1a\n'):
-        raise StageFailure('image_evidence_invalid')
-    candidates=[dict(candidate_id=f'c{i}',colour=g['colour'],side=g['side'],
-                     low=g['members'][0]['raw_price'],high=g['members'][-1]['raw_price']) for i,g in enumerate(snapshot['groups'])]
-    stage('analysis')
-    with phase('analysis'):
-        raw=analyze_heatmap_images([dict(image=str(path),timeframe=timeframe,measure_candidates=candidates)],
-                                symbol=symbol,timeout_seconds=120,evidence_schema=scan_schema(),evidence_instructions=INSTRUCTIONS)
-    remember_analysis(raw)
-    stage('validation')
-    result=normalized(raw,snapshot,run_id,image)
-    stage('saving')
-    with phase('result_write'):
-        (root/'result.json').write_text(json.dumps(result,allow_nan=False),encoding='utf-8')
+    return _run_basic_btc(root,run_id,base_only=True,target=(symbol,int(raw_model),timeframe))
 
 
 def _write_once(path, value):
@@ -231,16 +215,17 @@ def numeric_result(snapshot, job_id, png_bytes, *, restored=False):
     if (snapshot.get('provenance') != 'live' or snapshot.get('end_column_verified') is not True
             or snapshot.get('end_reference_verified') is not True):
         raise StageFailure('source_not_readable','live_basic_verification_missing')
-    return dict(schema_version='coinglass-model1.v1', result_type='verified_basic', run_id=job_id,
-                symbol='BTC', heatmap_model=1, timeframe='12H', source_url=snapshot['source_url'],
+    return dict(schema_version=f"coinglass-model{snapshot['heatmap_model']}.v1", result_type='verified_basic', run_id=job_id,
+                symbol=snapshot['symbol'],heatmap_model=snapshot['heatmap_model'],
+                timeframe=snapshot['timeframe'],source_url=snapshot['source_url'],
                 captured_at=snapshot['captured_at'], source_updated_at=snapshot['source_time'],provider='CoinGlass',
                 evidence=dict(artifact_id=job_id,sha256=digest,content_type='image/png'),basic_snapshot=snapshot)
 
 
-def _run_basic_btc(root, run_id, *, base_only=True):
+def _run_basic_btc(root, run_id, *, base_only=True,target=('BTC',1,'12H')):
     from modern_map_checkpoint import acknowledgements
     with acknowledgements() as acknowledge:
-        return _process_basic_btc(root, run_id, acknowledge, base_only=base_only)
+        return _process_basic_btc(root, run_id, acknowledge, base_only=base_only,target=target)
 
 
 def _same_basic_observation(basic, later):
@@ -263,18 +248,24 @@ def same_basic_with_enrichment(basic, enriched):
             and _same_basic_observation(basic,enriched))
 
 
-def _process_basic_btc(root, run_id, acknowledge, *, base_only):
+def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'12H'),capture_fn=None):
     from modern_map_checkpoint import SOURCE, UPGRADE, partial_record
     image_path = root / 'image.png'
     source_path, enriched_path = root / SOURCE, root / UPGRADE
 
+    def check_target(snapshot):
+        if (snapshot.get('symbol'),snapshot.get('heatmap_model'),snapshot.get('timeframe'))!=target:
+            raise StageFailure('screenshot_identity_mismatch')
+
     def record_result(record, image):
+        check_target(record['snapshot'])
         result = numeric_result(record['snapshot'],run_id,image,restored=True)
         if record.get('run_id') != run_id or record.get('image_sha256') != result['evidence']['sha256']:
             raise StageFailure('image_evidence_invalid')
         return result
 
     def persist(snapshot,path,action, *, basic=None):
+        check_target(snapshot)
         result = numeric_result(snapshot,run_id,image_path.read_bytes())
         if basic is not None and not same_basic_with_enrichment(basic,snapshot):
             raise StageFailure('source_not_readable','basic_observation_changed')
@@ -313,11 +304,11 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only):
                 result = persist(deepcopy(data),source_path,b'S')
         stage('capture')
         try:
-            snapshot = capture('BTC',1,'12H',image_path,observe=observe,base_only=base_only)
+            snapshot = (capture_fn or capture)(*target,image_path,observe=observe,base_only=base_only)
         except Exception as error:
             if result is None:
                 if not source_path.exists() and (overview or hovers or stages):
-                    partial = partial_record(run_id,overview,hovers,stages,error,image_path)
+                    partial = partial_record(run_id,overview,hovers,stages,error,image_path,identity=target)
                     _write_once(root/'measured-partial.json',partial)
                     acknowledge(b'P')
                 raise

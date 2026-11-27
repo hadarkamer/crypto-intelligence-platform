@@ -12,8 +12,8 @@ from heatmap_hover import MODEL2_GREEN_BLUE_HUE
 from model1_execution import StageFailure
 
 PRICE = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
-AMOUNT = PRICE + r'[KMB]?'
-SCALE = {'K': Decimal(1000), 'M': Decimal(1000000), 'B': Decimal(1000000000)}
+AMOUNT = PRICE + r'[KMBT]?'
+SCALE = {'K': Decimal(1000), 'M': Decimal(1000000), 'B': Decimal(1000000000), 'T': Decimal(10)**12}
 
 
 # This DOM/Measure adapter uses the same Viridis thresholds as the pinned
@@ -150,7 +150,7 @@ def observation(text, clock):
         # Adjacent market-card spans can render '479.9M48%'. Only a scale
         # suffix establishes a boundary when the site omits whitespace.
         percentage = r'(?:100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)%'
-        boundary = r'(?=\s|$|(?<=[KMB])' + percentage + r'(?:\s|$))'
+        boundary = r'(?=\s|$|(?<=[KMBT])' + percentage + r'(?:\s|$))'
         return read(label, '(' + AMOUNT + ')' + boundary, reason=reason)
     above = side(r'Shorts\s*\(above price\)', 'map_shorts_amount_unreadable')
     below = side(r'Longs\s*\(below price\)', 'map_longs_amount_unreadable')
@@ -182,14 +182,18 @@ def sample_groups(image, bounds, model, anchor_price, price_step, y_for_price, l
     """Coordinates select rows. Every returned price/value is subsequently read from the source."""
     left, top, right, bottom = bounds
     check(0 <= left < right < image.width and 0 <= top < bottom < image.height)
-    y0 = y_for_price(anchor_price)
-    height = y0 - y_for_price(anchor_price + price_step)
+    # Printed grid coordinates are decimal. Convert only when projecting a
+    # price to image pixels, avoiding binary artefacts in persisted endpoints.
+    anchor = Decimal(str(anchor_price))
+    step = Decimal(str(price_step))
+    y0 = y_for_price(float(anchor))
+    height = y0 - y_for_price(float(anchor + step))
     check(isfinite(height) and 1.5 <= height <= (bottom-top)/3)
     first, last = ceil((y0-bottom)/height), floor((y0-top)/height)
     check(2 <= last-first <= 1600)
     labeled = []
     for index in range(first, last+1):
-        price = anchor_price + index*price_step
+        price = float(anchor + index*step)
         y = y0-index*height
         votes = [classic_colour(image.getpixel((right-1, max(top, min(bottom, round(y+offset*height))))), model)
                  for offset in (-.2,0,.2)]

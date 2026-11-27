@@ -174,11 +174,12 @@ class SessionTransport:
         # The child has a deadline for each response and the job manager owns
         # its overall deadline. Closing this socket wakes an idle reader.
         try:
-            for _ in range(32):
+            for _ in range(getattr(self.owner,'message_budget',32)):
                 message = session_channel.receive(self.control)
                 result = None
                 try:
-                    result = self._dispatch(message)
+                    with self.owner.connection_guard:
+                        result = self._dispatch(message)
                     session_channel.send(self.control, {'result': result})
                 except SessionError as error:
                     session_channel.send(self.control, {'error': error.code})
@@ -237,6 +238,7 @@ class ManagedSession:
         self.store, self.run_id = store, str(run_id)
         self.lease = None
         self.finished = False
+        self.connection_guard = threading.RLock()
 
     @classmethod
     def from_environment(cls, connection, run_id):
@@ -268,8 +270,10 @@ class ManagedSession:
             raise SessionError('session_conflict')
         from collection_metrics import logged_phase
         with logged_phase(self.run_id, 'session_load_ms'):
-            self.lease = await asyncio.to_thread(self.store.begin, self.run_id,
-                                             recover_orphan=True, allow_initial_probe=True)
+            def load():
+                with self.connection_guard:
+                    return self.store.begin(self.run_id,recover_orphan=True,allow_initial_probe=True)
+            self.lease = await asyncio.to_thread(load)
 
     async def open_transport(self, environment):
         if self.lease is None or self.finished:

@@ -14,11 +14,12 @@ import modern_map_reader as ui
 
 class BasicSourceReader(TestCase):
     def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, box_case=None,
-               optional_change=None, ack=True, observed=None, base_only=False, shifted=False):
+               optional_change=None, ack=True, observed=None, base_only=False, shifted=False,
+               target=('BTC',1,'12H'), lookback=timedelta(hours=2)):
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         stamp=clock.isoformat().replace('+00:00','Z')
         token=clock.strftime('%m/%d %H:%M')
-        prev=(clock-timedelta(hours=2)).strftime('%m/%d %H:%M')
+        prev=(clock-lookback).strftime('%m/%d %H:%M')
         fmt=lambda p:f'{p:.2f}'
         rail=[{'raw_price':fmt(p),'raw_value':v,'raw_distance_pct':f'{p-100:+.2f}%'}
               for p,v in ((103,'25M'),(97,'20M'),(104,'10M'))]
@@ -46,13 +47,14 @@ class BasicSourceReader(TestCase):
         page.is_closed.return_value=False
         doc=page.evaluate_handle.return_value
         doc.evaluate.return_value=True
-        page.url=ui.map_url('BTC')
+        symbol,model,timeframe=target
+        page.url=ui.map_url(symbol)
         page.viewport_size={'width':width+12,'height':height}
         current_box=[box]
         delta=(8,-7) if shifted else (0,0)
         closing_box=(box[0]+delta[0],box[1]+delta[1],box[2],box[3])
         closing_bounds=tuple(v+delta[i%2] for i,v in enumerate(bounds))
-        control={'Range':'12 hour','Layout':'Single chart','Lens':'Heat','Colours':'Viridis Default'}
+        control={'Range':ui.RANGES[timeframe],'Layout':'Single chart','Lens':'Heat','Colours':'Viridis Default'}
         events=[] if observed is None else observed
         with ExitStack() as stack:
             def stub(owner,k,**opts):
@@ -124,7 +126,7 @@ class BasicSourceReader(TestCase):
                     tip.assert_not_called()
                     extra.assert_not_called()
                     return ack
-            result=ui.read_selected_map(page,'BTC',1,'12H',output,observe=collect,base_only=base_only)
+            result=ui.read_selected_map(page,*target,output,observe=collect,base_only=base_only)
             self.assertEqual(sum(k=='verified_basic' for k,_ in events),1)
             self.assertEqual(paint.call_count,4 if not base_only and box_case in ('leader','witness') else 3)
             self.assertEqual(tip.call_count,0 if base_only else 1)
@@ -280,9 +282,16 @@ class BasicSourceReader(TestCase):
         self.assertIsNone(dated_column(labels[:1],column))  # dated title alone
         self.assertIsNone(dated_column(labels[:-1],column))  # historical headers
 
-    def test_base_only_does_not_select_other_job_or_change_defaults(self):
+    def test_base_only_week_uses_observed_column_and_selected_identity(self):
+        result=self.replay(base_only=True,target=('DOGE',3,'1W'),lookback=timedelta(days=2))
+        self.assertEqual((result['symbol'],result['heatmap_model'],result['timeframe']),('DOGE',3,'1W'))
+        self.assertEqual(result['source_evidence']['closing']['range_control'],{'label':'1 week','value':None})
+        self.assertEqual(result['enrichment']['observations'],0)
+
+    def test_base_only_does_not_select_unapproved_job_or_change_enrichment_defaults(self):
         with patch.object(ui,'read_strict_selected_map') as legacy:
-            with self.assertRaises(ValueError):ui.read_selected_map(Mock(),'BTC',1,'48H',BytesIO(),base_only=True)
+            with self.assertRaises(ValueError):ui.read_selected_map(Mock(),'DOG',1,'12H',BytesIO(),base_only=True)
+            with self.assertRaises(ValueError):ui.read_selected_map(Mock(),'BTC',4,'1W',BytesIO(),base_only=True)
             legacy.assert_not_called()
             ui.read_selected_map(Mock(),'BTC',1,'48H',BytesIO())
             legacy.assert_called_once()

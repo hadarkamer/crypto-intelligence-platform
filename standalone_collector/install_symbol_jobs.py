@@ -58,12 +58,16 @@ def install(runtime):
     substitute(guard, guard[:len(guard)-len(guard.lstrip())] + 'if not symbol_jobs.valid_result(result, image, jid, tf, heatmap_model, symbol, _modern_map):')
     substitute("run_existing_scanner(row['timeframe'], jid, row.get('heatmap_model', 1))",
                "run_existing_scanner(row['timeframe'], jid, row.get('heatmap_model', 1), symbol=row.get('symbol', 'BTC'))")
-    # A service that has only numerical collection configured must leave jobs
-    # requiring model analysis queued for their existing configured worker.
-    substitute("WHERE status='queued'", "WHERE status='queued' AND (NOT %s OR (symbol,heatmap_model,timeframe)=('BTC',1,'12H'))")
+    # The dedicated numeric path always uses explicit source identities. Legacy bridge
+    # endpoints keep their original three horizons when the modern UI is disabled.
+    substitute('if tf not in TIMEFRAMES:', 'if tf not in symbol_jobs.bridge_ranges():', expected=2)
+    substitute('Only 12H, 24H and 48H are supported', 'Unsupported CoinGlass timeframe')
+    substitute("if row and '48H' not in row['definition']:", "if row and '1W' not in row['definition']:")
+    substitute("CHECK(timeframe IN ('12H','24H','48H'))", "CHECK(timeframe IN ('12H','24H','48H','1W'))", expected=2)
+    substitute("WHERE status='queued'", "WHERE status='queued' AND (NOT %s OR symbol=ANY(%s) AND timeframe=ANY(%s))")
     substitute('ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *").fetchone()',
-               'ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *", (symbol_jobs.numeric_only(),)).fetchone()')
-    # Only the measured BTC pilot receives the private numeric checkpoint channel.
+               'ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *", '
+               '(symbol_jobs.numeric_only(), symbol_jobs.active_basic_symbols(), list(symbol_jobs.BASIC_RANGES))).fetchone()')
     substitute('from aiohttp import web\nimport symbol_jobs', 'from aiohttp import web\nimport symbol_jobs\nimport modern_map_checkpoint')
     scope = "async with modern_map_checkpoint.workspace(jid,tf,heatmap_model,symbol,JobStore,symbol_jobs.modern_enabled()) as (tmp,_market_channel):"
     anchor = next(line for line in text.splitlines() if 'with tempfile.TemporaryDirectory(' in line and 'collection-model1-' in line)

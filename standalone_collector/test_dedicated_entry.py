@@ -58,6 +58,7 @@ class Entry(TestCase):
         db=Mock()
         rid=str(uuid4())
         prior={'id':str(uuid4()),'attempt':1,'status':'failed','logical_request_id':rid,
+               'symbol':'BTC','heatmap_model':1,'timeframe':'12H',
                'error_code':'source_login_required'}
         with patch.dict('sys.modules',{'collection_bridge':SimpleNamespace(BridgeError=BridgeError),
                  'session_runtime':runtime,'dedicated_auth_state':SimpleNamespace(incident_status=status)}),\
@@ -68,17 +69,21 @@ class Entry(TestCase):
                 symbol_jobs._continue_attempt(db,prior,rid,2)
             self.assertEqual(err.exception.code,'login_pending')
             db.execute.assert_not_called()
+            db.execute.return_value.fetchone.return_value=None  # no competing map
             for progress in ('none','resolved'):
                 db.reset_mock()
                 status.return_value={'status':progress}
                 symbol_jobs._continue_attempt(db,prior,rid,2)
-                self.assertEqual(db.execute.call_count,2)
+                self.assertEqual(db.execute.call_count,4)
+                self.assertEqual(sum("status IN ('queued','running')" in item.args[0]
+                                     for item in db.execute.call_args_list),1)
                 self.assertTrue(all('coinglass_login_incidents' not in item.args[0] for item in db.execute.call_args_list))
 
     def test_source_cooldown_rejects_before_spending_a_job_attempt_and_preserves_its_deadline(self):
         from model1_cache_policy import error_response
         rid=str(uuid4())
         prior={'id':str(uuid4()),'attempt':1,'status':'failed','logical_request_id':rid,
+               'symbol':'BTC','heatmap_model':1,'timeframe':'12H',
                'error_code':'source_rate_limited'}
         db=Mock()
         retry={'retry_at':'2026-11-26T01:00:00+00:00','retry_after_seconds':7200}
@@ -118,27 +123,31 @@ class RoutesAndWorker(IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(response.body),{**status.return_value,'auth_mode':'dedicated'})
             self.assertEqual(response.headers['Cache-Control'],'no-store')
 
-    async def test_job_save_retry_uses_same_result_and_does_not_open_legacy_incident(self):
+    async def test_dedicated_app_worker_retries_lost_final_ack_without_scanning_twice(self):
+        import modern_map_cycle as cycle
         store=Mock()
         held=Mock()
-        jid=str(uuid4())
-        store.claim.return_value=(held,{'id':jid,'symbol':'BTC','heatmap_model':1,'timeframe':'12H'})
-        store.finish.side_effect=[TimeoutError,None]
+        row=dict(id=uuid4(),symbol='BTC',heatmap_model=1,timeframe='12H',attempt=1,started_at='one lease')
         result={'fixture':True}
         scan=AsyncMock(return_value=(result,b'fixture'))
-        runtime=SimpleNamespace(ManagedSession=Mock(),SessionError=RuntimeError)
         old=Mock()
-        with patch.dict('sys.modules',{
-            'session_runtime':runtime, 'collection_bridge':SimpleNamespace(BridgeError=BridgeError,run_existing_scanner=scan),
-            'collection_metrics':SimpleNamespace(logged_phase=lambda *_:nullcontext(),queue_wait=lambda *_:None),
-            'operator_login':old}), patch.dict(os.environ,{'COINGLASS_MODERN_UI_ENABLED':'true'}),\
-                patch.object(asyncio,'sleep',side_effect=asyncio.CancelledError):
+        async def done_poll(_):
+            raise asyncio.CancelledError()
+        with patch.dict('sys.modules',{'operator_login':old}), \
+                patch.dict(os.environ,{'COINGLASS_MODERN_UI_ENABLED':'true','COINGLASS_CYCLE_TABS':'1'}), \
+                patch.object(cycle,'first_claim',return_value=(held,row)), \
+                patch.object(cycle,'next_claim',return_value=None), \
+                patch.object(cycle.ManagedSession,'from_environment'), patch.object(cycle,'require_owner'), \
+                patch.object(cycle.QueueDrain,'process',scan), \
+                patch.object(cycle,'finish_claim',side_effect=[TimeoutError,True]) as publish, \
+                patch.object(asyncio,'sleep',done_poll):
+            held.transaction.side_effect=nullcontext
             with self.assertRaises(asyncio.CancelledError):
                 await app.run_worker(store)
-        self.assertEqual(scan.await_count,1)
-        self.assertEqual(store.finish.call_count,2)
-        for item in store.finish.call_args_list:
-            self.assertEqual(item.args,(jid,result,b'fixture'))
+        scan.assert_awaited_once_with(0,row)
+        self.assertEqual(publish.call_count,2)
+        for item in publish.call_args_list:
+            self.assertEqual(item.args,(store,row,result,b'fixture',None))
         old.waiting_incident.assert_not_called()
         old.record_login_required.assert_not_called()
         held.close.assert_called_once()

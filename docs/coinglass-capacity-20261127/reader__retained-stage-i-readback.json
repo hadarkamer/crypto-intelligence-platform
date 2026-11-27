@@ -1,0 +1,82 @@
+{
+  "job_id": "854b6909-035f-4d15-8b2c-72a74332bebd",
+  "replay": "retained market-only source chart, top 50 evidence header rows excluded",
+  "source_sha256": "a9ef270646a838347f35a4e62ef37659082d1f6b7d1538da75e88a01859d7a08",
+  "historic_snapshot_valid": true,
+  "printed_reference": "61,680",
+  "source_time": "2026-11-27T09:16:00Z",
+  "column_time": "2026-11-27T09:15:00Z",
+  "bounds": [
+    0,
+    0,
+    999,
+    773
+  ],
+  "result": [
+    "61,680",
+    "<function axis_scale.<locals>.where at 0x7fd759fdae80>"
+  ],
+  "method": "tesseract",
+  "reference_candidates": [
+    "61,680"
+  ],
+  "ticks": [
+    {
+      "text": "64,000",
+      "y": 61.875
+    },
+    {
+      "text": "63,500",
+      "y": 119.875
+    },
+    {
+      "text": "63,000",
+      "y": 176.875
+    },
+    {
+      "text": "62,500",
+      "y": 234.875
+    },
+    {
+      "text": "62,000",
+      "y": 292.875
+    },
+    {
+      "text": "61,500",
+      "y": 349.875
+    },
+    {
+      "text": "61,000",
+      "y": 407.875
+    },
+    {
+      "text": "60,500",
+      "y": 464.875
+    },
+    {
+      "text": "60,000",
+      "y": 522.875
+    },
+    {
+      "text": "59,500",
+      "y": 579.875
+    },
+    {
+      "text": "59,000",
+      "y": 637.875
+    },
+    {
+      "text": "58,500",
+      "y": 694.875
+    },
+    {
+      "text": "58,000",
+      "y": 752.875
+    }
+  ],
+  "condition": "verified",
+  "ocr_calls": 1,
+  "ocr_ms": 233,
+  "sidebar_count": 14,
+  "regions_total": 3
+}

@@ -1,4 +1,4 @@
-"""Commit one BTC/1/12H capture and its protected numerical evidence in the bridge's existing private evidence row."""
+"""Commit a dimension-checked Coin map capture and its protected numerical evidence in the bridge's existing private evidence row."""
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +12,7 @@ from pathlib import Path
 import socket
 import tempfile
 
+# The original evidence keys are on disk in accepted jobs. Scope by the ledger identity.
 KEY = 'measured_btc_v1'
 PARTIAL = 'measured_btc_partial_v1'
 FD = 'COINGLASS_MEASURED_ACK_FD'
@@ -176,13 +177,14 @@ def _measure_detail(detail):
     return result
 
 
-def partial_record(job, overview, hovers, stages, error, image_path):
+def partial_record(job, overview, hovers, stages, error, image_path, *, identity=None):
     """Keep validated public market fields and the failing step. A partial cannot authorize analysis."""
     from modern_map_overview import _FIELDS
     allowed = (*_FIELDS,'source_time','sidebar_levels','missing_fields','ambiguous_fields',
                'display_values','parsed_values')
     typed = {k: overview[k] for k in allowed if k in overview}
-    dims = {'symbol':'BTC','heatmap_model':1,'timeframe':'12H','mode':'Coin'}
+    symbol, model, tf = _dimensions(identity)
+    dims = {'symbol':symbol,'heatmap_model':model,'timeframe':tf,'mode':'Coin'}
     safe = re.compile(r'[a-zA-Z0-9_]{1,100}\Z')
     failed = [row for row in stages if row.get('status')=='failed']
     last = failed[-1] if failed else {}
@@ -212,25 +214,41 @@ def _json(path, limit=MAX_RECORD):
     return json.loads(data)
 
 
-def _identity(source, job, digest):
+def _dimensions(identity):
+    from modern_map_basic_numbers import basic_target
+    if identity is None:
+        identity = ('BTC', 1, '12H')  # legacy callers with a BTC checkpoint
+    if isinstance(identity, dict):
+        identity = (identity.get('symbol'), identity.get('heatmap_model'), identity.get('timeframe'))
+    if not isinstance(identity, tuple) or len(identity) != 3 or not basic_target(*identity):
+        raise ValueError('measured_record_identity')
+    return identity
+
+
+def _identity(source, job, digest, identity):
+    from modern_map_basic_numbers import basic_source_url
+    symbol, model, tf = _dimensions(identity)
     snap = source['snapshot']
-    if (source.get('run_id'),source.get('image_sha256'),snap.get('symbol'),snap.get('heatmap_model'),
-            snap.get('timeframe'),snap.get('mode'),snap.get('source_url')) != (
-            job,digest,'BTC',1,'12H','Coin','https://www.coinglass.com/LiquidationHeatMap/BTC?mode=coin'):
+    if (source.get('run_id') != job or source.get('image_sha256') != digest
+            or _dimensions(snap) != (symbol, model, tf) or snap.get('mode') != 'Coin'
+            or snap.get('source_url') != basic_source_url(symbol)):
         raise ValueError('measured_record_identity')
 
 
 class CheckpointStore:
-    def __init__(self, job_store, job):
+    def __init__(self, job_store, job, symbol='BTC', model=1, tf='12H', *, started_at=None):
         self.job_store, self.job = job_store, job
+        self.identity = _dimensions((symbol, model, tf))
+        self.started_at = started_at
 
     def read(self):
         with self.job_store.connect() as connection:
             row = connection.execute("""SELECT e.diagnostic->'measured_btc_v1' AS checkpoint,e.image_png
                 FROM public.ai_collection_bridge_evidence e
                 JOIN public.ai_collection_bridge_jobs j ON j.id=e.job_id
-                WHERE e.job_id=%s AND j.symbol='BTC' AND j.heatmap_model=1 AND j.timeframe='12H'
-                  AND e.diagnostic ? 'measured_btc_v1'""",(self.job,)).fetchone()
+                WHERE e.job_id=%s AND j.symbol=%s AND j.heatmap_model=%s AND j.timeframe=%s
+                  AND e.image_png IS NOT NULL
+                  AND e.diagnostic ? 'measured_btc_v1'""",(self.job,*self.identity)).fetchone()
         if not row: return None
         return row['checkpoint'],bytes(row['image_png'])
 
@@ -238,8 +256,9 @@ class CheckpointStore:
         """Acknowledge verified source or partial evidence only after the database commit."""
         with self.job_store.connect() as connection:
             job = connection.execute("""SELECT id FROM public.ai_collection_bridge_jobs WHERE id=%s
-                AND status='running' AND symbol='BTC' AND heatmap_model=1 AND timeframe='12H'
-                FOR UPDATE""",(self.job,)).fetchone()
+                AND status='running' AND symbol=%s AND heatmap_model=%s AND timeframe=%s
+                AND (%s::timestamptz IS NULL OR started_at=%s)
+                FOR UPDATE""",(self.job,*self.identity,self.started_at,self.started_at)).fetchone()
             if not job:
                 raise ValueError('measured_job_not_active')
             row = connection.execute("""SELECT diagnostic->'measured_btc_v1' AS checkpoint
@@ -251,6 +270,8 @@ class CheckpointStore:
                 image = (root/'image.png').read_bytes() if (root/'image.png').is_file() else None
                 digest = hashlib.sha256(image).hexdigest() if image is not None else None
                 if (partial.get('run_id') != self.job or partial.get('status') != 'partial' or
+                        not isinstance(partial.get('identity'),dict) or partial['identity'].get('mode') != 'Coin' or
+                        _dimensions(partial['identity']) != self.identity or
                         partial.get('image_sha256') != digest or image is not None and
                         (len(image)>MAX_IMAGE or not image.startswith(b'\x89PNG\r\n\x1a\n'))):
                     raise ValueError('measured_partial_identity')
@@ -268,7 +289,7 @@ class CheckpointStore:
                 if len(image)>MAX_IMAGE or not image.startswith(b'\x89PNG\r\n\x1a\n'):
                     raise ValueError('measured_record_image')
                 digest = hashlib.sha256(image).hexdigest()
-                _identity(source,self.job,digest)
+                _identity(source,self.job,digest,self.identity)
                 from modern_map_task import numeric_result, same_basic_with_enrichment
                 restored=previous is not None and previous.get('source')==source
                 numeric_result(source['snapshot'],self.job,image,restored=restored)
@@ -287,14 +308,14 @@ class CheckpointStore:
             raise ValueError('measured_checkpoint_action')
 
 
-def restore(root, job, entry):
+def restore(root, job, entry, *, identity=None):
     if entry is None:
         return False
     from modern_map_task import _write_once
     record, image = entry
     digest = hashlib.sha256(image).hexdigest()
     source = record['source']
-    _identity(source,job,digest)
+    _identity(source,job,digest,identity)
     (root/'image.png').write_bytes(image)
     _write_once(root/SOURCE,source)
     return True
@@ -334,14 +355,15 @@ class CheckpointChannel:
 @asynccontextmanager
 async def workspace(job,tf,model,symbol,store_factory,enabled):
     with tempfile.TemporaryDirectory(prefix='collection-model1-') as tmp:
-        if not enabled or (symbol,model,tf) != ('BTC',1,'12H'):
+        from modern_map_basic_numbers import basic_target
+        if not enabled or not basic_target(symbol,model,tf):
             yield tmp,None
             return
-        store = CheckpointStore(store_factory(os.getenv('DATABASE_URL','')),job)
+        store = CheckpointStore(store_factory(os.getenv('DATABASE_URL','')),job,symbol,model,tf)
         channel = CheckpointChannel(store,Path(tmp))
         task = None
         try:
-            channel.restored = restore(Path(tmp),job,await asyncio.to_thread(store.read))
+            channel.restored = restore(Path(tmp),job,await asyncio.to_thread(store.read),identity=store.identity)
             task = asyncio.create_task(channel.serve())
             yield tmp,channel
         finally:

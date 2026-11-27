@@ -140,15 +140,17 @@ def prepare():
         'pilot_browser':{'symbol':'BTC','model':1,'timeframe':'12H','engine':'firefox','playwright':'1.55.0'},
         'capture_flows':{'modern':'Coin map, requested asset/model/horizon, verified right-edge measurements and cropped map PNG',
             'legacy':'Model-specific BTC map, DOM hover column and same-image crop'},
-        'numeric_readers':{'modern':'coinglass.right-edge-measure.v1','legacy':'displayed-hover.v1'},
+        'numeric_readers':{'modern_basic':'coinglass.basic.v1','optional_measure':'coinglass.right-edge-measure.v1','legacy':'displayed-hover.v1'},
         'reader_switch':'COINGLASS_MODERN_UI_ENABLED','symbol_configuration':'COINGLASS_VERIFIED_SYMBOLS (default BTC)',
         'quantity_scope':'displayed latest column; explicit units only; rounded source values',
-        'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
-        'analysis':'computed pool candidates then one bounded visual verification and interpretation request',
+        'supported_models':[1,2,3],'modern_timeframes':['12H','24H','48H','1W'],'supported_timeframes':['12H','24H','48H'],
+        'analysis':{'basic':'deterministic numerical publication; zero model requests',
+                    'legacy':'computed pool candidates followed by a bounded visual analysis'},
         'identity':'strict model-specific source, schema, screenshot label and job',
         'price_reference':{'modern':'observed Reference (last price) label','legacy':'verified tooltip Close for Models 1/2 or Model 3 candle envelope'},
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
         'cache_scope':['symbol','heatmap_model','timeframe'],'single_worker':True,
+        'basic_tab_limit':{'variable':'COINGLASS_CYCLE_TABS','default':1,'maximum':8},
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
         'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
         'capture_diagnostics':'bounded per-operation duration and failure phase',
@@ -161,6 +163,6 @@ def prepare():
         'store_readiness':'bounded SELECT 1; errors log only operation, class and SQLSTATE',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
-    print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
+    print('HEATMAP_MODELS_INSTALLED models=1,2,3 modern_horizons=12H,24H,48H,1W source_scans=0',flush=True)
 
 if __name__=='__main__':prepare()

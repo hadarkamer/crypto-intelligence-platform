@@ -16,7 +16,11 @@ from modern_map_evidence import (PRICE, box_member, check, equivalent, iso, meas
                                  verified_member, verify_covered_maximum)
 from model1_execution import StageFailure
 
-RANGES = {'12H':'12 hour', '24H':'24 hour', '48H':'48 hour'}
+from modern_map_basic_numbers import BASIC_RANGES, HORIZON_SECONDS, RANGE_PATTERNS, basic_target, period_seconds, range_matches
+
+# Canonical labels from the previous UI are kept for existing callers. The
+# reader selects an actual visible unit-bearing option on the active coin.
+RANGES = {'12H':'12 hour', '24H':'24 hour', '48H':'48 hour', '1W':'1 week'}
 GATE = re.compile(r'sign in to view (?:the )?liquidation heatmap', re.I)
 
 
@@ -113,8 +117,11 @@ def symbol_control(page,symbol):
 
 
 def select_choice(page,wanted,*,requested=True):
-    if not choice(page,wanted):
-        choice_target(page,wanted).click(timeout=limited_timeout(2500))
+    if choice(page,wanted):
+        if requested:
+            gate(page)
+        return
+    choice_target(page,wanted).click(timeout=limited_timeout(2500))
     wait_for(page,lambda:choice(page,wanted),requested=requested)
 
 
@@ -134,18 +141,96 @@ def option_control(page, name):
     return handle
 
 
-def select_option(page, name, value):
-    control = option_control(page,name)
-    def matches():
-        text = option_control(page,name).inner_text().strip()
-        return text == value or (name == 'Colours' and re.fullmatch('Viridis(?:\\s*Default)?',text))
-    if not matches():
+def _range_value(element):
+    value = element.get_attribute('data-value') or element.get_attribute('value')
+    return value if isinstance(value,str) and re.fullmatch(r'[a-zA-Z0-9 ._-]{1,32}',value) else None
+
+
+def selected_range(page, timeframe):
+    control = option_control(page, 'Range')
+    try:
+        shown = control.inner_text().strip()
+        check(range_matches(timeframe, shown))
+        return {'label': shown, 'value': _range_value(control)}
+    finally:
+        control.dispose()
+
+
+def select_range(page, timeframe):
+    """Only choose a visibly labelled range in this map's Range picker."""
+    control = option_control(page, 'Range')
+    try:
+        shown = control.inner_text().strip()
+        if range_matches(timeframe, shown):
+            return {'label': shown, 'value': _range_value(control)}
         control.click(timeout=limited_timeout(2500))
-        menu = visible(page.get_by_role('listbox')) or visible(page.get_by_role('menu'))
-        scope = menu[0] if len(menu)==1 else page
-        option = scope.get_by_text(value, exact=True)
-        one(option).click(timeout=limited_timeout(2500))
-    wait_for(page,matches)
+    finally:
+        control.dispose()
+    def options():
+        menus = visible(page.get_by_role('listbox')) or visible(page.get_by_role('menu'))
+        check(len(menus)<=1)
+        # Older source controls render plain labelled elements with no popup
+        # role. Retain their exact-text selection and verify the trigger after.
+        menu = menus[0] if menus else None
+        matches = visible((menu or page).get_by_text(RANGE_PATTERNS[timeframe]))
+        if len(matches)==1:
+            return matches[0]
+        # A partially rendered or virtual menu does not prove non-support.
+        # Wait for a matching row or positive evidence of complete enumeration.
+        if not matches and menu is not None and menu.evaluate("""e => {
+            const rows = [...e.querySelectorAll('[role=option]')];
+            return rows.length > 0 && !e.matches('[aria-busy=true]') &&
+                rows.every((n,i) => n.getAttribute('aria-setsize')===String(rows.length) &&
+                    n.getAttribute('aria-posinset')===String(i+1) && n.textContent.trim());
+        }"""):
+            gate(page)
+            raise StageFailure('source_map_unavailable')
+        return None
+    try:
+        item = wait_for(page,options,timeout=2.5,requested=False)
+    except StageFailure as error:
+        if error.code=='source_not_readable':
+            error.basic_reason='range_option_unverified'
+        raise
+    option = item.evaluate_handle("""e => e.closest('[role=option],[role=menuitemradio],option,button') || e""")
+    try:
+        element = option.as_element()
+        if element.is_disabled() or element.get_attribute('aria-disabled')=='true':
+            gate(page)
+            raise StageFailure('source_map_unavailable')
+        value = _range_value(element)
+    finally:
+        option.dispose()
+    item.click(timeout=limited_timeout(2500))
+    selected = wait_for(page,lambda:selected_range(page,timeframe),requested=False)
+    check(value is None or selected['value'] is None or value==selected['value'])
+    return dict(selected, value=selected['value'] or value)
+
+
+def select_option(page, name, value):
+    def matches(control):
+        text = control.inner_text().strip()
+        return text == value or (name == 'Colours' and re.fullmatch(r'Viridis(?:\s*Default)?',text))
+
+    control = option_control(page,name)
+    try:
+        if matches(control):
+            gate(page)
+            return
+        control.click(timeout=limited_timeout(2500))
+    finally:
+        control.dispose()
+    menu = visible(page.get_by_role('listbox')) or visible(page.get_by_role('menu'))
+    scope = menu[0] if len(menu)==1 else page
+    one(scope.get_by_text(value, exact=True)).click(timeout=limited_timeout(2500))
+    def selected():
+        # The source can replace the combobox when an option is chosen.
+        current = option_control(page,name)
+        try:
+            return matches(current)
+        finally:
+            current.dispose()
+    wait_for(page,selected)
 
 
 def details(page):
@@ -180,7 +265,7 @@ from collection_metrics import phase
 
 @phase('map_access')
 def open_verified_map(page, symbol, model, timeframe, *, guard=None):
-    if type(model) is not int or model not in (1,2,3) or timeframe not in RANGES:
+    if type(model) is not int or model not in (1,2,3) or timeframe not in BASIC_RANGES:
         raise ValueError('Invalid requested heatmap identity')
     url = map_url(symbol)
     response = page.goto(url,wait_until='domcontentloaded',timeout=limited_timeout(40000))
@@ -191,7 +276,10 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None):
             error.retry_after_seconds = retry_after_seconds(response.header_value('retry-after'))
             raise error
         if response and response.status == 404 and page.url == url:
-            raise StageFailure('source_map_unavailable')
+            # Model and range have not been selected on this symbol document.
+            error = StageFailure('source_navigation_changed')
+            error.basic_reason = 'map_document_http_404'
+            raise error
         if response and response.status >= 500:
             raise StageFailure('source_capture_failed')
         # Controls can initially show a different, gated horizon. Handle
@@ -203,7 +291,7 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None):
     prefer_dark(page)
     select_choice(page,f'Model {model}',requested=False)
     select_choice(page,'Coin',requested=False)
-    select_option(page,'Range',RANGES[timeframe])
+    range_selection = select_range(page, timeframe)
     def ready():
         check(page.url == url)
         check(not visible(page.get_by_text(re.compile(r'^Loading(?:…|\.\.\.)$'))))
@@ -211,10 +299,11 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None):
         # The public name and the visible symbol must both agree with the URL.
         check(visible(page.get_by_text(re.compile('^'+re.escape(symbol)+r' Liquidation Heatmap$',re.I))))
         symbol_control(page,symbol)
-        check(option_control(page,'Range').inner_text().strip() == RANGES[timeframe])
+        check(range_matches(timeframe, option_control(page,'Range').inner_text().strip()))
         check(visible(page.get_by_text('Market overview',exact=True)))
         return details(page)
     result = wait_for(page,ready,timeout=24)
+    result['range_selection'] = range_selection
     # A public shell can retain sidebars while the protected chart is still
     # loading. Require real chart geometry, source level labels and multiple
     # coloured liquidation rows before reporting authentication success.
@@ -224,17 +313,18 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None):
         check(x>=0 and y>=0)
         shot=protected_clip(page, {'x':x,'y':y,'width':w,'height':h}, guard)
         with Image.open(BytesIO(shot)) as chart:
-            pixels=chart.convert('RGB')
-            try:
-                # Sample the interior; exclude toolbar text, axes and overlay
-                # controls. A blank canvas or login-pressure card cannot pass.
-                for fraction in (.72,.81,.90):
-                    xx=round(w*fraction)
-                    palette={tuple(c//20 for c in pixels.getpixel((xx,yy))) for yy in range(h//8,h*7//8,2)
-                             if max(pixels.getpixel((xx,yy)))-min(pixels.getpixel((xx,yy)))>55}
-                    if len(palette)>=5:return True
+            with chart.convert('RGB') as pixels:
+                for fraction in (.72, .81, .90):
+                    x_sample = round(w * fraction)
+                    palette = set()
+                    # Only five distinct coloured rows are needed for the access proof.
+                    for y_sample in range(h // 8, h * 7 // 8, 2):
+                        rgb = pixels.getpixel((x_sample, y_sample))
+                        if max(rgb) - min(rgb) > 55:
+                            palette.add(tuple(channel // 20 for channel in rgb))
+                            if len(palette) >= 5:
+                                return True
                 return False
-            finally:pixels.close()
     wait_for(page,plotted,timeout=10)
     if guard:guard()
     if timeframe=='12H':
@@ -544,11 +634,11 @@ def read_map(page, symbol, model, timeframe, output):
 
 
 def read_selected_map(page,symbol,model,timeframe,output,*,guard=None,observe=None,base_only=False):
-    if (symbol,model,timeframe)==('BTC',1,'12H'):
+    if base_only and not basic_target(symbol, model, timeframe):
+        raise ValueError('Unsupported basic Coin map')
+    if base_only or (symbol,model,timeframe)==('BTC',1,'12H'):
         from modern_map_basic import capture_basic
         return capture_basic(page,symbol,model,timeframe,output,guard=guard,observe=observe,base_only=base_only)
-    if base_only:
-        raise ValueError('base_only requires BTC / Model 1 / Coin / 12H')
     return read_strict_selected_map(page,symbol,model,timeframe,output,guard=guard,observe=observe)
 
 
@@ -663,11 +753,11 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         raw_time,current_marks=stage('read_latest_crosshair_time',lambda:stamp_at(x1-1))
         update = datetime.fromisoformat(before['source_time'])
         column = source_clock(raw_time,update,column=True)
-        previous=source_clock(prior,column,column=True,max_lag=48*3600)
+        previous=source_clock(prior,column,column=True,max_lag=HORIZON_SECONDS[timeframe])
         emit('stage',dict(name='observed_columns',status='ok',source_time=iso(update),
                           prior=iso(previous),latest=iso(column)))
         stage('verify_latest_clock',lambda:check(
-            column<=update and 0<(column-previous).total_seconds()<=int(timeframe[:-1])*3600))
+            column<=update and 0<(column-previous).total_seconds()<=HORIZON_SECONDS[timeframe]))
         raw_anchor=(float(number(supplemental['sidebar_levels'][0]['raw_price'])[0])
                     if supplemental and supplemental['sidebar_levels'] else rail_anchor(page))
         raw_step = before['raw_price_step']
@@ -829,7 +919,7 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         def identity():
             check(before==after and raw_time==raw_after and page.url==map_url(symbol))
             check(choice(page,f'Model {model}') and choice(page,'Coin'))
-            check(option_control(page,'Range').inner_text().strip()==RANGES[timeframe])
+            check(range_matches(timeframe, option_control(page,'Range').inner_text().strip()))
             if supplemental is not None:
                 symbol_control(page,symbol)
                 check(option_control(page,'Layout').inner_text().strip()=='Single chart')

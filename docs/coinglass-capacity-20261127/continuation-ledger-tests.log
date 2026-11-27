@@ -1,0 +1,26 @@
+test_allowlist_requires_exact_provider_symbols (test_symbol_jobs.IdentityTests.test_allowlist_requires_exact_provider_symbols) ... ok
+test_modern_provenance_and_artifact_guard (test_symbol_jobs.IdentityTests.test_modern_provenance_and_artifact_guard) ... ok
+test_capacity_queue_scope_and_single_account_owner (test_symbol_jobs.LedgerTests.test_capacity_queue_scope_and_single_account_owner) ... ok
+test_cycle_isolation_partial_completion_and_retry (test_symbol_jobs.LedgerTests.test_cycle_isolation_partial_completion_and_retry) ... ok
+test_login_retry_requires_a_verified_incident_resolution (test_symbol_jobs.LedgerTests.test_login_retry_requires_a_verified_incident_resolution) ... ok
+test_migrated_rows_default_to_btc_and_only_explicit_work_retries (test_symbol_jobs.LedgerTests.test_migrated_rows_default_to_btc_and_only_explicit_work_retries) ... ok
+test_throttle_defers_new_work_without_spending_attempt_or_blocking_saved_reads (test_symbol_jobs.LedgerTests.test_throttle_defers_new_work_without_spending_attempt_or_blocking_saved_reads) ... ok
+test_weekly_checkpoint_restore_and_stale_claim_fences (test_symbol_jobs.LedgerTests.test_weekly_checkpoint_restore_and_stale_claim_fences) ... ok
+test_health_reports_mode_specific_allowlist_without_starting_source (test_symbol_jobs.Routes.test_health_reports_mode_specific_allowlist_without_starting_source) ... ok
+test_normal_handlers_propagate_verified_job_dimensions (test_symbol_jobs.Routes.test_normal_handlers_propagate_verified_job_dimensions) ... ok
+test_session_status_survives_retirement_of_viewer_in_both_modes (test_symbol_jobs.Routes.test_session_status_survives_retirement_of_viewer_in_both_modes) ... ok
+test_misconfigured_reader_cannot_fall_back_when_dedicated_secrets_are_staged (test_dedicated_entry.Entry.test_misconfigured_reader_cannot_fall_back_when_dedicated_secrets_are_staged) ... ok
+test_new_mode_never_activates_from_classic_cookie (test_dedicated_entry.Entry.test_new_mode_never_activates_from_classic_cookie) ... ok
+test_non_auth_failures_and_transient_auth_do_not_open_incident_wait (test_dedicated_entry.Entry.test_non_auth_failures_and_transient_auth_do_not_open_incident_wait) ... ok
+test_old_unbound_request_can_resume_and_terminal_dedicated_event_waits (test_dedicated_entry.Entry.test_old_unbound_request_can_resume_and_terminal_dedicated_event_waits) ... ok
+test_preflight_requires_dedicated_server_credentials (test_dedicated_entry.Entry.test_preflight_requires_dedicated_server_credentials) ... ok
+test_source_cooldown_rejects_before_spending_a_job_attempt_and_preserves_its_deadline (test_dedicated_entry.Entry.test_source_cooldown_rejects_before_spending_a_job_attempt_and_preserves_its_deadline) ... ok
+test_dedicated_app_worker_retries_lost_final_ack_without_scanning_twice (test_dedicated_entry.RoutesAndWorker.test_dedicated_app_worker_retries_lost_final_ack_without_scanning_twice) ... COINGLASS_METRICS {"job_id":"e4dbc1e9-5af9-4988-9b6d-b84fa2414603","collector_db_save_ms":2}
+COINGLASS_CYCLE_MAP {"job_id":"e4dbc1e9-5af9-4988-9b6d-b84fa2414603","outcome":"ready","elapsed_ms":2}
+ok
+test_only_safe_authenticated_status (test_dedicated_entry.RoutesAndWorker.test_only_safe_authenticated_status) ... ok
+
+----------------------------------------------------------------------
+Ran 19 tests in 2.624s
+
+OK

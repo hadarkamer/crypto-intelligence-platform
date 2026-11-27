@@ -65,7 +65,7 @@ def safe_progress(value):
         'capture_operations':[]}
     if type(value.get('heatmap_model')) is int and value['heatmap_model'] in (1,2,3):
         out['heatmap_model']=value['heatmap_model']
-    if isinstance(value.get('timeframe'),str) and value['timeframe'] in ('12H','24H','48H'):
+    if isinstance(value.get('timeframe'),str) and value['timeframe'] in ('12H','24H','48H','1W'):
         out['timeframe']=value['timeframe']
     events=value.get('capture_operations')
     for event in events[-24:] if isinstance(events,list) else ():

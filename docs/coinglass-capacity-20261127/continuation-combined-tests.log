@@ -1,0 +1,62 @@
+test_admission_is_persistent_ordered_and_bounded_independently_of_http_loads (test_capacity_meter.CapacityMeter.test_admission_is_persistent_ordered_and_bounded_independently_of_http_loads) ... ok
+test_expired_qa_session_stops_before_incident_or_access_to_credentials (test_capacity_meter.CapacityMeter.test_expired_qa_session_stops_before_incident_or_access_to_credentials) ... ok
+test_fixture_staging_changes_only_the_new_qa_runtime (test_capacity_meter.CapacityMeter.test_fixture_staging_changes_only_the_new_qa_runtime) ... ok
+test_host_sampler_reports_one_total_even_when_fixture_fails (test_capacity_meter.CapacityMeter.test_host_sampler_reports_one_total_even_when_fixture_fails) ... ok
+test_job_throughput_requires_commit_and_full_refresh (test_capacity_meter.CapacityMeter.test_job_throughput_requires_commit_and_full_refresh) ... ok
+test_physical_requests_redirects_and_closed_tabs_do_not_become_jobs (test_capacity_meter.CapacityMeter.test_physical_requests_redirects_and_closed_tabs_do_not_become_jobs) ... ok
+test_probe_restores_patches_when_reader_raises (test_capacity_meter.CapacityMeter.test_probe_restores_patches_when_reader_raises) ... ok
+test_shared_resource_totals_are_counted_once_across_overlapping_jobs (test_capacity_meter.CapacityMeter.test_shared_resource_totals_are_counted_once_across_overlapping_jobs) ... ok
+test_concurrent_reader_calls_keep_page_and_context_identity (test_cycle_playwright_api.CyclePlaywrightAPI.test_concurrent_reader_calls_keep_page_and_context_identity) ... ok
+test_firefox_two_tabs_with_offline_html (test_cycle_playwright_api.CyclePlaywrightAPI.test_firefox_two_tabs_with_offline_html) ... ok
+test_all_96_combinations_use_the_same_basic_reader_and_numeric_contract (test_modern_map_capacity_reader.CapacityReader.test_all_96_combinations_use_the_same_basic_reader_and_numeric_contract) ... ok
+test_decimal_grid_bounds_follow_printed_step (test_modern_map_capacity_reader.CapacityReader.test_decimal_grid_bounds_follow_printed_step) ... ok
+test_incomplete_menu_explicitly_disabled_and_missing_complete_range_are_distinct (test_modern_map_capacity_reader.CapacityReader.test_incomplete_menu_explicitly_disabled_and_missing_complete_range_are_distinct) ... ok
+test_mixed_identity_wrong_week_source_url_and_boolean_model_are_rejected (test_modern_map_capacity_reader.CapacityReader.test_mixed_identity_wrong_week_source_url_and_boolean_model_are_rejected) ... ok
+test_packaged_ocr_decimals_and_contradictory_axis (test_modern_map_capacity_reader.CapacityReader.test_packaged_ocr_decimals_and_contradictory_axis) ... ok
+test_selects_the_real_printed_week_option_and_records_its_value (test_modern_map_capacity_reader.CapacityReader.test_selects_the_real_printed_week_option_and_records_its_value) ... ok
+test_symbol_document_404_does_not_declare_combination_unsupported (test_modern_map_capacity_reader.CapacityReader.test_symbol_document_404_does_not_declare_combination_unsupported) ... ok
+test_weekly_column_uses_printed_period_crossing_midnight (test_modern_map_capacity_reader.CapacityReader.test_weekly_column_uses_printed_period_crossing_midnight) ... ok
+test_correct_setting_and_choice_still_check_gate (test_modern_map_selection.VerifiedSelection.test_correct_setting_and_choice_still_check_gate) ... ok
+test_correct_setting_read_once_and_handles_released (test_modern_map_selection.VerifiedSelection.test_correct_setting_read_once_and_handles_released) ... ok
+test_default_gate_does_not_block_model_change_before_requested_range (test_modern_map_selection.VerifiedSelection.test_default_gate_does_not_block_model_change_before_requested_range) ... ok
+test_replaced_combobox_checked_after_click (test_modern_map_selection.VerifiedSelection.test_replaced_combobox_checked_after_click) ... ok
+test_packaged_engine_reads_real_market_tags_and_ticks_in_one_pass (test_modern_map_axis_ocr.PrintedPriceTests.test_packaged_engine_reads_real_market_tags_and_ticks_in_one_pass) ... ok
+test_parallel_lanes_reuse_pages_and_independently_commit_all_dimensions (test_modern_map_cycle.DrainTests.test_parallel_lanes_reuse_pages_and_independently_commit_all_dimensions) ... COINGLASS_METRICS {"job_id":"1dd7902e-0ec5-4777-891d-5ddf1b13df18","collector_db_save_ms":2}
+COINGLASS_CYCLE_MAP {"job_id":"1dd7902e-0ec5-4777-891d-5ddf1b13df18","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":3,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":15}
+COINGLASS_METRICS {"job_id":"4b5c19b3-3ab4-48ce-b7b4-f1a5e253f10c","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"4b5c19b3-3ab4-48ce-b7b4-f1a5e253f10c","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":1,"receipt_commit_calls":2,"receipt_commit_ms":3,"elapsed_ms":10}
+COINGLASS_METRICS {"job_id":"5d466951-2351-4229-af00-0cafc680d01c","collector_db_save_ms":2}
+COINGLASS_CYCLE_MAP {"job_id":"5d466951-2351-4229-af00-0cafc680d01c","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":0,"receipt_commit_calls":1,"receipt_commit_ms":2,"elapsed_ms":9}
+COINGLASS_METRICS {"job_id":"44e48739-5ba9-4ad2-b21c-2aab41cf2179","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"44e48739-5ba9-4ad2-b21c-2aab41cf2179","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":2,"receipt_commit_calls":1,"receipt_commit_ms":2,"elapsed_ms":9}
+ok
+test_single_slot_and_unavailable_map_preserve_other_result_publications (test_modern_map_cycle.DrainTests.test_single_slot_and_unavailable_map_preserve_other_result_publications) ... COINGLASS_METRICS {"job_id":"f09ef313-925a-4eeb-a2f7-cd9692c1527d","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"f09ef313-925a-4eeb-a2f7-cd9692c1527d","outcome":"source_map_unavailable","receipt_read_calls":1,"receipt_read_ms":1,"elapsed_ms":3}
+COINGLASS_METRICS {"job_id":"51a1ee20-ae17-48af-8bf8-0855b34caf86","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"51a1ee20-ae17-48af-8bf8-0855b34caf86","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":0,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":4}
+COINGLASS_METRICS {"job_id":"8221e73c-9b25-4715-a781-0edb2055446b","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"8221e73c-9b25-4715-a781-0edb2055446b","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":0,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":4}
+COINGLASS_METRICS {"job_id":"79db5a46-4acb-49b9-8390-4ae873789554","collector_db_save_ms":0}
+COINGLASS_CYCLE_MAP {"job_id":"79db5a46-4acb-49b9-8390-4ae873789554","outcome":"ready","receipt_read_calls":1,"receipt_read_ms":0,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":4}
+ok
+test_stalled_channel_retires_only_that_slot (test_modern_map_cycle.DrainTests.test_stalled_channel_retires_only_that_slot) ... COINGLASS_CYCLE_MAP {"job_id":"158175ed-8cd8-468c-97a4-7250edeb4c7d","outcome":"source_timeout","receipt_read_calls":1,"receipt_read_ms":1,"elapsed_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"d76f5db2-068f-49b8-8b6d-5851cb3dad26","outcome":"ready","elapsed_ms":0}
+COINGLASS_CYCLE_MAP {"job_id":"d6689b22-a89d-49dc-8e69-fbe1b731c63a","outcome":"ready","elapsed_ms":0}
+COINGLASS_CYCLE_MAP {"job_id":"45f4b3fa-c451-4a9a-8b83-2f7f86ae649b","outcome":"ready","elapsed_ms":0}
+ok
+test_worker_eof_after_verified_receipt_publishes_without_recapture (test_modern_map_cycle.DrainTests.test_worker_eof_after_verified_receipt_publishes_without_recapture) ... COINGLASS_METRICS {"job_id":"8a525250-2790-458a-85c7-27078834c90f","collector_db_save_ms":3}
+COINGLASS_CYCLE_MAP {"job_id":"8a525250-2790-458a-85c7-27078834c90f","outcome":"ready","receipt_read_calls":2,"receipt_read_ms":2,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":12}
+COINGLASS_METRICS {"job_id":"fa55a819-6db3-44b5-a4ba-95ef08978639","collector_db_save_ms":1}
+COINGLASS_CYCLE_MAP {"job_id":"fa55a819-6db3-44b5-a4ba-95ef08978639","outcome":"ready","receipt_read_calls":2,"receipt_read_ms":3,"receipt_commit_calls":1,"receipt_commit_ms":1,"elapsed_ms":14}
+ok
+test_explicit_cooldown_stops_next_navigation_in_an_already_running_reader (test_modern_map_cycle.SharedAccountTests.test_explicit_cooldown_stops_next_navigation_in_an_already_running_reader) ... ok
+test_number_of_tabs_defaults_to_one_and_rejects_invalid_input (test_modern_map_cycle.SharedAccountTests.test_number_of_tabs_defaults_to_one_and_rejects_invalid_input) ... ok
+test_two_anonymous_tabs_renew_once_and_subsequent_jobs_reuse (test_modern_map_cycle.SharedAccountTests.test_two_anonymous_tabs_renew_once_and_subsequent_jobs_reuse) ... ok
+test_parent_spawn_failure_always_releases_lease_and_strips_secrets (test_modern_map_cycle.TeardownTests.test_parent_spawn_failure_always_releases_lease_and_strips_secrets) ... ok
+test_saved_cooldown_stops_whole_new_child_before_launch_and_releases_session (test_modern_map_cycle.TeardownTests.test_saved_cooldown_stops_whole_new_child_before_launch_and_releases_session) ... ok
+test_worker_cancel_shuts_both_tabs_context_browser_and_account (test_modern_map_cycle.TeardownTests.test_worker_cancel_shuts_both_tabs_context_browser_and_account) ... ok
+
+----------------------------------------------------------------------
+Ran 33 tests in 8.363s
+
+OK

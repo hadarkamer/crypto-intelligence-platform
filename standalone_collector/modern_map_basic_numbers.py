@@ -8,7 +8,33 @@ from modern_map_evidence import equivalent, number
 from model1_execution import StageFailure
 
 SCHEMA = 'coinglass.basic.v1'
-SOURCE_URL = 'https://www.coinglass.com/LiquidationHeatMap/BTC?mode=coin'
+BASIC_SYMBOLS = ('BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'BNB', 'DOGE', 'ZEC')
+BASIC_MODELS = (1, 2, 3)
+BASIC_RANGES = ('12H', '24H', '48H', '1W')
+HORIZON_SECONDS = {'12H': 43200, '24H': 86400, '48H': 172800, '1W': 604800}
+RANGE_PATTERNS = {
+    key: re.compile(rf'^{int(key[:-1])}\s*(?:h|hours?)$', re.I)
+    for key in BASIC_RANGES if key.endswith('H')
+}
+RANGE_PATTERNS['1W'] = re.compile(r'^(?:1\s*(?:w|week)|7\s*(?:d|days?))$', re.I)
+
+
+def basic_target(symbol, model, timeframe):
+    return symbol in BASIC_SYMBOLS and type(model) is int and model in BASIC_MODELS and timeframe in BASIC_RANGES
+
+
+def basic_source_url(symbol):
+    if symbol not in BASIC_SYMBOLS:
+        raise ValueError('Unsupported basic Coin symbol')
+    return f'https://www.coinglass.com/LiquidationHeatMap/{symbol}?mode=coin'
+
+
+def range_matches(timeframe, label):
+    return timeframe in BASIC_RANGES and isinstance(label, str) and bool(RANGE_PATTERNS[timeframe].fullmatch(label.strip()))
+
+
+# Retained receipts and offline BTC examples import this historic URL.
+SOURCE_URL = basic_source_url('BTC')
 AMOUNTS = ('raw_total', 'raw_above_total', 'raw_below_total', 'raw_realized_total',
            'raw_realized_longs', 'raw_realized_shorts', 'raw_largest_value')
 PERCENTAGES = ('raw_above_pct','raw_below_pct')
@@ -39,10 +65,10 @@ def stamp(raw):
 
 
 def period_seconds(raw):
-    match=re.fullmatch(r'([1-9]\d{0,3})(s|m|h|min|minutes?)',raw) if isinstance(raw,str) else None
+    match=re.fullmatch(r'([1-9]\d{0,3})(s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?)',raw) if isinstance(raw,str) else None
     if match is None:
         reject_observation('column_period_missing_or_invalid','hover_time_invalid')
-    return int(match[1])*({'s':1,'h':3600}.get(match[2],60))
+    return int(match[1])*{'s':1,'m':60,'h':3600,'d':86400}[match[2][0]]
 
 
 def market_amounts(overview):
@@ -137,21 +163,21 @@ def raw_display(overview):
             elif key in PERCENTAGES:
                 require(norm==overview.get(key))
             else:
-                require(re.fullmatch(r'\s*\$?\s*[\d,.]+\s*[KMB]?\s*',token,re.I))
+                require(re.fullmatch(r'\s*\$?\s*[\d,.]+\s*[KMBT]?\s*',token,re.I))
                 require(number(norm,key in AMOUNTS)[0]==number(overview[key],key in AMOUNTS)[0])
             values.append(token)
         result[key]=values
     return result
 
 
-def normalize_enrichment(entries, column, epoch, step):
+def normalize_enrichment(entries, column, epoch, step, symbol, model, timeframe):
     result=[]
     require(isinstance(entries,(list,tuple)) and len(entries)<=1600)
     for entry in entries:
         require(isinstance(entry,dict) and entry.get('source') in ('hover','measure'))
         require(entry.get('source_time')==epoch and entry.get('column_time')==column, 'hover_snapshot_changed')
         require(number(entry['raw_price_step'])[0]==step[0], 'hover_resolution_insufficient')
-        require(all(entry.get(k,v)==v for k,v in [('symbol','BTC'),('heatmap_model',1),('timeframe','12H'),('mode','Coin')]))
+        require(all(entry.get(k,v)==v for k,v in [('symbol',symbol),('heatmap_model',model),('timeframe',timeframe),('mode','Coin')]))
         verified_number(entry.get('raw_price'),positive=True)
         verified_number(entry.get('raw_value'),True)
         result.append({k:entry[k] for k in ('raw_price','raw_value','raw_price_step','column_time','source')} |
@@ -247,7 +273,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
                          chart_regions=None, provenance='live', native_bins_inspected=None,
                          enrichment=(), end_observation=None, raw_last_price_after=None):
     """Build from visible market observations and explicit live or retained closing evidence."""
-    require((symbol,model,timeframe,source_url)==('BTC',1,'12H',SOURCE_URL) and type(model) is int)
+    require(basic_target(symbol, model, timeframe) and source_url == basic_source_url(symbol))
     require(provenance in ('live','retained_reconstruction'))
     require(isinstance(source_sha256,str) and re.fullmatch(r'[0-9a-f]{64}',source_sha256))
     source_time=overview.get('source_time')
@@ -296,7 +322,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
         _verify_percent(raw['raw_'+side+'_pct'],val,nums['raw_total'])
         sides[side]=ratio(val[0],nums['raw_total'][0])
     sidebar=fact_rows(overview)
-    extra=normalize_enrichment(enrichment,column_time,source_time,step)
+    extra=normalize_enrichment(enrichment,column_time,source_time,step,symbol,model,timeframe)
     total=nums['raw_total'][0]
     levels,duplicates=collect_levels(sidebar,extra,ref,total)
     sidebar_unique={}
@@ -341,6 +367,13 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
     if provenance=='live':
         source_rows.update({k:end_observation[k] for k in ('symbol','heatmap_model','timeframe','mode','column_time',
                           'same_document','settings_verified','same_market_labels','sidebar_rows','chart_regions','native_bins_inspected')})
+    if 'range_control' in end_observation:
+        selection = end_observation['range_control']
+        require(isinstance(selection,dict) and set(selection)=={'label','value'} and
+                range_matches(timeframe,selection['label']) and (selection['value'] is None or
+                isinstance(selection['value'],str) and re.fullmatch(r'[a-zA-Z0-9 ._-]{1,32}', selection['value'])),
+                'hover_snapshot_changed')
+        source_rows['range_control'] = dict(selection)
     strongest={}
     for side in ('above','below'):
         members=[row for row in levels if row['side']==side]
