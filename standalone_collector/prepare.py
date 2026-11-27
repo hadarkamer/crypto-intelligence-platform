@@ -143,4 +143,7 @@ def prepare():
         'bot_started':False,'automatic_source_checks':False},indent=2))
     print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
 
-if __name__=='__main__':prepare()
+if __name__=='__main__':
+    prepare()
+    subprocess.run([sys.executable, '-I', '-B', str(HERE/'prepare_numeric_worker.py')], check=True)
+    subprocess.run([sys.executable, '-I', '-B', str(HERE/'install_paired_ledger.py')], check=True)

@@ -149,9 +149,13 @@ def create_app():
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
     active=enabled and configured
     store=JobStore(os.getenv('DATABASE_URL','')) if active else None
-    async def health(_):
+    async def health(request):
         from prominent_levels import SELECTION_POLICY, CONTRACT
         from store_diagnostics import store_readiness
+        if request.path == '/health' and request.query.get('fixed_cycle') == 'btc-eth':
+            import scoped_http
+            ready = await asyncio.to_thread(store_readiness, store)
+            return await scoped_http.capabilities(request, active, ready['ready'])
         result={'ok':True,'service':'decision-hub-model1-collector',
             'mode':'collection' if active else 'not_configured','bot_started':False,
             'scheduled_collection':False,'source_session_configured':source_session_configured(),
@@ -171,25 +175,31 @@ def create_app():
     if active:
         async def lifecycle(app):
             await asyncio.to_thread(store.initialize)
-            task=asyncio.create_task(run_worker(store))
-            yield
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):await task
+            import scoped_worker
+            legacy = asyncio.create_task(run_worker(store))
+            paired = asyncio.create_task(scoped_worker.run(store))
+            try:
+                yield
+            finally:
+                legacy.cancel()
+                paired.cancel()
+                await asyncio.gather(legacy, paired, return_exceptions=True)
         application.cleanup_ctx.append(lifecycle)
     return application
 
 
-def deployment_check():
+def deployment_check(*,check_metadata=True):
     import unittest
     from configuration_check import main as check_configuration
     checked=unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromName('test_configuration_check'))
     if not checked.wasSuccessful():raise SystemExit(1)
-    check_configuration()
+    check_configuration(check_metadata=check_metadata)
     print('MODEL1_SOURCE_PROBE_SKIPPED explicit --source-probe required; no browser or inference started',flush=True)
 
 
 if __name__=='__main__':
-    if '--probe' in sys.argv or '--check-config' in sys.argv:deployment_check()
+    if '--probe' in sys.argv or '--check-config' in sys.argv:
+        deployment_check(check_metadata='--probe' not in sys.argv)
     elif '--source-probe' in sys.argv:probe()
     else:
         if os.getenv('COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START','').strip().lower()=='true':

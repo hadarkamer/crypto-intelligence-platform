@@ -1,0 +1,149 @@
+{
+  "base": "81505afa9a235edaeac95ede7beca3850beaf1c6",
+  "modules": {
+    "capture_failure_diagnostics.py": {
+      "path": "capture_failure_diagnostics.py",
+      "sha256": "cceba361a68533f0603a373088f15c97af80f515edb1fa1bf0e79b8202e76a68"
+    },
+    "capture_failure_observer.py": {
+      "path": "capture_failure_observer.py",
+      "sha256": "71296d89a9be7aa4fd86ea968ad1baef9443497b1c639b8a368a6e066f18f9ae"
+    },
+    "capture_readiness.py": {
+      "path": "capture_readiness.py",
+      "sha256": "a21fcb00acfc4ba20bb1d54d6342e2f89521ad2d941792822cbbd20de7cc437a"
+    },
+    "collection_bridge.py": {
+      "path": "numeric_inputs/collection_bridge.py",
+      "sha256": "1d74009fab3a94db00883a727f9ef36967924cbabc088340ed181daa045adb2b"
+    },
+    "collection_metrics.py": {
+      "path": "numeric_inputs/collection_metrics.py",
+      "sha256": "b9cfabdd765b12742205c1c93abeb2593a3bb13d579636cc71832e8dba3cf0ce"
+    },
+    "dedicated_auth_state.py": {
+      "path": "numeric_inputs/dedicated_auth_state.py",
+      "sha256": "13310127ed4d172b16f6d1202a7310540929075ab69421e0ec4fcc730a252624"
+    },
+    "dedicated_login_form.py": {
+      "path": "numeric_inputs/dedicated_login_form.py",
+      "sha256": "f6b6d0e569cfe637050296f9360ad91cea17bd73f910709d84294a10132e43cb"
+    },
+    "dedicated_map_flow.py": {
+      "path": "numeric_inputs/dedicated_map_flow.py",
+      "sha256": "70d1f48f42f932844868a86563b2eca9905c038ece1749a516ce8c9e9e212b1f"
+    },
+    "heatmap_hover.py": {
+      "path": "heatmap_hover.py",
+      "sha256": "693aa6739a8b1f50d0550cd802dde99cff4c68edfad6c643c1adf8d6bc05f820"
+    },
+    "heatmap_models.py": {
+      "path": "numeric_inputs/heatmap_models.py",
+      "sha256": "953922d6279419d4ec149b274d3fad25ee6e8ea6bd48d776f22457e0b9b92b3b"
+    },
+    "image_detail.py": {
+      "path": "image_detail.py",
+      "sha256": "3f627a2713c17c02b7fd64e2ec1af1daaef62fd7fee91f80c29ebc777292c30c"
+    },
+    "model1_cache_policy.py": {
+      "path": "numeric_inputs/model1_cache_policy.py",
+      "sha256": "931f0c5a8c841b1a391d3f5f9bacc3755ea7bbc20b1c936dda42182c57b3ade9"
+    },
+    "model1_evidence_format.py": {
+      "path": "model1_evidence_format.py",
+      "sha256": "1a0676b0a6389e5e29eecc5072ffbaed149ab516b75d924baa1a5e0c2ee77125"
+    },
+    "model1_execution.py": {
+      "path": "numeric_inputs/model1_execution.py",
+      "sha256": "a20c7580e5bcbe3b321247f7e7b2f0165fedd4c9bf8014bd4ee50b7088ecf23f"
+    },
+    "model1_price_range.py": {
+      "path": "runtime/model1_price_range.py",
+      "sha256": "208678109f933cd13cf6a93313dcc27520f58cb4b7e4137b646ba98dc094c57f"
+    },
+    "modern_map_axis.py": {
+      "path": "numeric_inputs/modern_map_axis.py",
+      "sha256": "e1868d33fc5eae26a15b93c23d41e04e384323e53311edb119c3229369da4798"
+    },
+    "modern_map_axis_ocr.py": {
+      "path": "numeric_inputs/modern_map_axis_ocr.py",
+      "sha256": "b619aedac3fc660edfafee7f1a3e8d9135a69e3b06a9417a15468c09770503b4"
+    },
+    "modern_map_basic.py": {
+      "path": "numeric_inputs/modern_map_basic.py",
+      "sha256": "15a0607a7af0704851ef8172ba2bc3c8ce29728a84f3bcac6dc420e37b902138"
+    },
+    "modern_map_basic_numbers.py": {
+      "path": "numeric_inputs/modern_map_basic_numbers.py",
+      "sha256": "f7ee20af2b056c81542778b52389cab1c54f9e8fba4a4f6dfd13bf432684ccca"
+    },
+    "modern_map_cells.py": {
+      "path": "numeric_inputs/modern_map_cells.py",
+      "sha256": "d362a10e34654e06a06d7bda0f9abc4462a1cdf0cfab40ea5a176ae0480ed6fd"
+    },
+    "modern_map_checkpoint.py": {
+      "path": "numeric_inputs/modern_map_checkpoint.py",
+      "sha256": "8fc774e4f386f5a90a1601f6df4cf2cff5d3aa490dd63f0519c6a9d9261f1640"
+    },
+    "modern_map_cycle_browser.py": {
+      "path": "numeric_inputs/modern_map_cycle_browser.py",
+      "sha256": "46dbb453830538f0c7fa6fa7a249918e8c2f19c7dea94f87e020e6641aef6db0"
+    },
+    "modern_map_evidence.py": {
+      "path": "numeric_inputs/modern_map_evidence.py",
+      "sha256": "bfd97ebe9d7dc87b0c0b77f21e14547b2d89ee4825a53df9744459d8f58c72c1"
+    },
+    "modern_map_measure_panel.py": {
+      "path": "numeric_inputs/modern_map_measure_panel.py",
+      "sha256": "20a1878d31c4aad8fdc2f73d99082533b1d78a622469296eaaab2ae9ae16498b"
+    },
+    "modern_map_overview.py": {
+      "path": "numeric_inputs/modern_map_overview.py",
+      "sha256": "25d1a731481414b4fbe2d58945c21bc833b94acba7c5cf2171e3f350fef11458"
+    },
+    "modern_map_reader.py": {
+      "path": "numeric_inputs/modern_map_reader.py",
+      "sha256": "e35c29382a97f9486acea16e08a1b98706bd985a6819abf9f5a14a8821c60276"
+    },
+    "modern_map_surface.py": {
+      "path": "numeric_inputs/modern_map_surface.py",
+      "sha256": "585bb61469732b6c8569d98d4377867c4410aeadca46234c83562b315211bd5a"
+    },
+    "modern_map_task.py": {
+      "path": "numeric_inputs/modern_map_task.py",
+      "sha256": "8bd2fda5a19c6536a29ada1db0965538fea9700e3e20400a2db0365df4f01d58"
+    },
+    "modern_map_tooltip.py": {
+      "path": "numeric_inputs/modern_map_tooltip.py",
+      "sha256": "8f30840d157c865bf21add033a20b0e94039be330609a2d24b8d227e115617cc"
+    },
+    "price_detail_input.py": {
+      "path": "runtime/price_detail_input.py",
+      "sha256": "03d0577f996aa05bfade8f61c8cf3b8cf83a3dd40de3442d3cb13f58fed88655"
+    },
+    "session_capture.py": {
+      "path": "numeric_inputs/session_capture.py",
+      "sha256": "1b10cb49f86a429c338d888f1ad99903cba4582261c66e1110138b7ad0564a3d"
+    },
+    "session_channel.py": {
+      "path": "numeric_inputs/session_channel.py",
+      "sha256": "60ab66ec896c24e4acb8f48910d5b37c7afc9b88f995d1f55bf63d5a52f8c808"
+    },
+    "session_runtime.py": {
+      "path": "numeric_inputs/session_runtime.py",
+      "sha256": "914241355cefae14c41417f811e3328764998d308aa96e865c6e740270a5a405"
+    },
+    "session_state.py": {
+      "path": "numeric_inputs/session_state.py",
+      "sha256": "2d7c568e229fb51f224f30458844d41e60af0e8e7e6c63f6dc0337b9e1bf19f0"
+    },
+    "store_diagnostics.py": {
+      "path": "store_diagnostics.py",
+      "sha256": "e72a339ca4c7e6bd2a9830ebc1703a8856b600d791158b342ba47b5ede07909e"
+    },
+    "symbol_jobs.py": {
+      "path": "numeric_inputs/symbol_jobs.py",
+      "sha256": "27b5a67ec03d654f7bd491b4ba425314e5ebd670c919f436c4fe4e2979b6a61a"
+    }
+  }
+}

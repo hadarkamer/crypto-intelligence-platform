@@ -52,7 +52,7 @@ def source_setting_structure(env: Mapping[str, str]) -> dict:
     }
 
 
-def check_configuration(*, env=None, http_get=None) -> dict:
+def check_configuration(*, env=None, http_get=None, check_metadata=True) -> dict:
     environment = os.environ if env is None else env
     report = {
         'checked_at': datetime.now(timezone.utc).isoformat(),
@@ -68,6 +68,9 @@ def check_configuration(*, env=None, http_get=None) -> dict:
     model = environment.get('OPENAI_MARKET_SCANNER_MODEL', 'gpt-5.6').strip()
     if re.fullmatch(r'(?:gpt-|o[1-9])[A-Za-z0-9._:-]{1,90}', model) is None:
         report['openai_check'] = 'invalid_model_setting'
+        return report
+    if not check_metadata:
+        report['openai_check'] = 'metadata_skipped_during_deploy'
         return report
     if http_get is None:
         import requests
@@ -107,9 +110,9 @@ def check_configuration(*, env=None, http_get=None) -> dict:
     return report
 
 
-def main() -> None:
+def main(*,check_metadata=True) -> None:
     print('MODEL1_SOURCE_SETTING_STRUCTURE ' + json.dumps(source_setting_structure(os.environ)), flush=True)
-    print('MODEL1_CONFIG_CHECK ' + json.dumps(check_configuration()), flush=True)
+    print('MODEL1_CONFIG_CHECK ' + json.dumps(check_configuration(check_metadata=check_metadata)), flush=True)
 
 
 if __name__ == '__main__':
