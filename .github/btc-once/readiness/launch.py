@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import threading
 
 HERE=Path(__file__).resolve().parent
 PACK=HERE.parent/'unpacked'
@@ -24,6 +25,20 @@ incident='11111111-2222-4333-8444-555555555555'
 state={'cookies':[dict(name='qa_synthetic_account',value='not-a-real-account',
     domain='.coinglass.com',path='/',expires=-1,httpOnly=True,secure=True,sameSite='Lax')],'origins':[]}
 source=get_server(Path('/tmp/readiness-source'),cleanup_mode='delete')
+# Mirror qa_boot's stdout capture, including output from the real browser child.
+root=Path('/tmp/coinglass-btc-once')
+root.mkdir(mode=0o700,exist_ok=True)
+original_stdout=os.dup(1)
+read_fd,write_fd=os.pipe()
+os.dup2(write_fd,1)
+os.dup2(write_fd,2)
+os.close(write_fd)
+def capture_log():
+    with os.fdopen(read_fd,'rb',buffering=0) as stream, (root/'metrics.log').open('ab',buffering=0) as log:
+        while data:=stream.read(65536):
+            log.write(data)
+            os.write(original_stdout,data)
+threading.Thread(target=capture_log,daemon=True).start()
 os.environ.update(DATABASE_URL=source.get_uri(),COINGLASS_SESSION_KEY=base64.b64encode(key).decode(),
     COINGLASS_LOGIN_EMAIL=email,CG_QA_ROOT='/tmp/coinglass-btc-once',PORT='10000')
 try:
