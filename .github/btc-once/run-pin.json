@@ -7,6 +7,6 @@
   "repository_owner": "hadarkamer",
   "workflow_ref": "hadarkamer/trade-plan-pad/.github/workflows/test-v2-rls-behavior.yml@refs/heads/qa/coinglass-btc-once-20261127",
   "ref": "refs/heads/qa/coinglass-btc-once-20261127",
-  "sha": "b0f1f90dadb87c7fa20eca704e41800511cc614f",
-  "experiment_started_epoch": 1795779094
+  "sha": "cf4f3641c4f556b9b624e1c289869efa90e00f20",
+  "experiment_started_epoch": 1795785262
 }
