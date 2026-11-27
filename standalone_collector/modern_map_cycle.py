@@ -28,6 +28,18 @@ def tab_limit():
     return int(value)
 
 
+def fixed_tab_symbols(width):
+    """Optional mapping in lane order for a single full model/range cycle."""
+    from symbol_jobs import active_basic_symbols
+    raw = os.environ.get('COINGLASS_CYCLE_FIXED_SYMBOLS')
+    if raw is None:
+        return ()
+    symbols = tuple(item.strip() for item in raw.split(','))
+    if len(symbols) != width or sorted(symbols) != active_basic_symbols():
+        raise ValueError('invalid_coinglass_cycle_fixed_symbols')
+    return symbols
+
+
 def require_owner(conn):
     from collection_bridge import WORK_LOCK
     row = conn.execute("""SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory'
@@ -38,21 +50,22 @@ def require_owner(conn):
         raise RuntimeError('cycle_ownership_lost')
 
 
-def next_claim(conn, guard):
+def next_claim(conn, guard, *, symbols=None, model=None, timeframe=None):
     """The first and every subsequent tab share the same scope and owner fence."""
     from symbol_jobs import BASIC_RANGES, active_basic_symbols
     with guard, conn.transaction():
         require_owner(conn)
         return conn.execute("""UPDATE public.ai_collection_bridge_jobs SET status='running',started_at=clock_timestamp()
             WHERE id=(SELECT q.id FROM public.ai_collection_bridge_jobs q WHERE q.status='queued'
-            AND q.symbol=ANY(%s) AND q.heatmap_model BETWEEN 1 AND 3 AND q.timeframe=ANY(%s)
+            AND q.symbol=ANY(%s) AND q.heatmap_model BETWEEN %s AND %s AND q.timeframe=ANY(%s)
             AND NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs r WHERE r.status='running'
                 AND (r.symbol,r.heatmap_model,r.timeframe)=(q.symbol,q.heatmap_model,q.timeframe))
             ORDER BY q.created_at,q.id FOR UPDATE OF q SKIP LOCKED LIMIT 1) RETURNING *""",
-            (active_basic_symbols(),list(BASIC_RANGES))).fetchone()
+            (active_basic_symbols() if symbols is None else list(symbols),
+             model or 1, model or 3, [timeframe] if timeframe else list(BASIC_RANGES))).fetchone()
 
 
-def first_claim(store):
+def first_claim(store, fixed_symbols=()):
     """Use the existing advisory owner and stale-job policy for the numerical maps."""
     from collection_bridge import WORK_LOCK
     from contextlib import nullcontext
@@ -79,7 +92,10 @@ def first_claim(store):
                 AND started_at < now()-interval '15 minutes' AND symbol=ANY(%s)
                 AND heatmap_model BETWEEN 1 AND 3 AND timeframe=ANY(%s)""",
                 scope)
-        row = next_claim(conn,nullcontext())
+        if fixed_symbols:
+            row = next_claim(conn, nullcontext(), symbols=fixed_symbols, model=1, timeframe=BASIC_RANGES[0])
+        else:
+            row = next_claim(conn,nullcontext())
         if row:
             return conn,row
     except BaseException:
@@ -176,9 +192,10 @@ def attach_blocked_job(owner, row, code):
 
 
 class QueueDrain:
-    def __init__(self, store, held, row, root, width):
+    def __init__(self, store, held, row, root, width, fixed_symbols=()):
         self.store, self.held, self.root = store, held, root
         self.first, self.width, self.count = row, width, 0
+        self.fixed_symbols = fixed_symbols
         self.owner = ManagedSession.from_environment(held,str(row['id']))
         self.database = asyncio.Lock()
         self.starting = asyncio.Lock()
@@ -210,17 +227,38 @@ class QueueDrain:
             require_owner(self.held)
         return action(*args)
 
-    async def claim(self):
+    async def claim(self, symbol=None, model=None, timeframe=None):
         async with self.database:
             if self.closed or self.count >= MAX_JOBS:
                 return None
-            if self.first is not None:
+            if self.first is not None and (symbol is None or self.first['symbol'] == symbol):
                 row,self.first = self.first,None
+            elif symbol is not None:
+                row = await asyncio.to_thread(next_claim, self.held, self.owner.connection_guard,
+                    symbols=(symbol,), model=model, timeframe=timeframe)
             else:
-                row = await asyncio.to_thread(next_claim,self.held,self.owner.connection_guard)
+                row = await asyncio.to_thread(next_claim, self.held, self.owner.connection_guard)
             if row:
                 self.count += 1
             return row
+
+    async def rows_for_slot(self, index):
+        if not self.fixed_symbols:
+            while row := await self.claim():
+                yield row
+            return
+        # The app may submit ranges from different model boxes out of order.
+        # Keep the same tab open while its next expected ledger entry arrives.
+        from symbol_jobs import BASIC_RANGES
+        symbol = self.fixed_symbols[index]
+        for model in (1, 2, 3):
+            for timeframe in BASIC_RANGES:
+                deadline = monotonic() + JOB_DEADLINE
+                while not (row := await self.claim(symbol, model, timeframe)):
+                    if self.closed or monotonic() >= deadline:
+                        return
+                    await asyncio.sleep(2)
+                yield row
 
     async def channel(self, index):
         async with self.starting:
@@ -311,9 +349,10 @@ class QueueDrain:
 
     async def slot(self,index):
         from collection_metrics import queue_wait
-        while row := await self.claim():
+        async for row in self.rows_for_slot(index):
             queue_wait(row['id'],row)
-            metrics = {'job_id':str(row['id']), 'outcome':'publication_unconfirmed'}
+            metrics = {'job_id':str(row['id']), 'tab_index':index, 'symbol':row['symbol'],
+                       'outcome':'publication_unconfirmed'}
             token = _MAP_METRICS.set(metrics)
             started = monotonic()
             lane_broken = False
@@ -378,14 +417,15 @@ class QueueDrain:
 
 async def run_cycle_worker(store):
     width = tab_limit()
+    fixed_symbols = fixed_tab_symbols(width)
     while True:
         held = None
         try:
-            claimed = await asyncio.to_thread(first_claim,store)
+            claimed = await asyncio.to_thread(first_claim, store, fixed_symbols)
             if claimed:
                 held,row = claimed
                 with tempfile.TemporaryDirectory(prefix='coinglass-cycle-') as tmp:
-                    await QueueDrain(store,held,row,Path(tmp),width).run()
+                    await QueueDrain(store,held,row,Path(tmp),width,fixed_symbols).run()
         except asyncio.CancelledError:
             raise
         except Exception:

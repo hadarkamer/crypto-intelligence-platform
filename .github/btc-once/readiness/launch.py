@@ -62,10 +62,10 @@ try:
         db.execute(f"REVOKE SELECT ON LARGE OBJECT {int(proof['oid'])} FROM PUBLIC")
         if os.getenv('CG_READINESS_CASE')=='bad-binding':
             os.environ['COINGLASS_LOGIN_EMAIL']='wrong-synthetic-owner@example.test'
-    pin=json.loads((PACK/'run-pin.json').read_text())
-    pin['experiment_started_epoch']=time.time()
-    (PACK/'run-pin.json').write_text(json.dumps(pin))
     import qa_host
+    # This readiness check may inspect the real runtime and the empty ledger.
+    # Its local scoped token may not admit any browser/source collection job.
+    qa_host.ALLOWED = frozenset()
     os.umask(0o077)
     Path('/receipts/control.json').write_text(json.dumps({'host':'http://127.0.0.1:10000','key':qa_host.SECRET}))
     emit=qa_host.event

@@ -1,12 +1,12 @@
 {
   "collector": "81505afa9a235edaeac95ede7beca3850beaf1c6",
   "app": "fae6737cb39e10344c5d19f324d300ed2afd45d3",
-  "aud": "urn:decision-hub:coinglass:btc-once-20261127",
+  "aud": "urn:decision-hub:coinglass:btc-eth-ops-20261127",
   "repository": "hadarkamer/trade-plan-pad",
   "repo_id": "1347268981",
   "repository_owner": "hadarkamer",
-  "workflow_ref": "hadarkamer/trade-plan-pad/.github/workflows/test-v2-rls-behavior.yml@refs/heads/qa/coinglass-btc-once-20261127",
-  "ref": "refs/heads/qa/coinglass-btc-once-20261127",
-  "sha": "cf4f3641c4f556b9b624e1c289869efa90e00f20",
-  "experiment_started_epoch": 1795785262
+  "workflow_ref": "hadarkamer/trade-plan-pad/.github/workflows/test-v2-rls-behavior.yml@refs/heads/qa/coinglass-btc-eth-operational-20261127",
+  "ref": "refs/heads/qa/coinglass-btc-eth-operational-20261127",
+  "sha": "9b27455bf6717b6bc8f0ed198de56064092010f5",
+  "affinity_sha256": "b7a84e3bec03d6113d6f4922f214dcecb9c2a60f0aa2c2139eae1242aa11eea3"
 }

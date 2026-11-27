@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: cg-btc-once-20261127
+    name: cg-btc-eth-ops-20261127
     runtime: python
     repo: https://github.com/hadarkamer/crypto-intelligence-platform
-    branch: qa/coinglass-btc-once-20261127
+    branch: qa/coinglass-btc-eth-operational-20261127
     region: oregon
-    plan: 1c-2g
+    plan: 2c-4g
     numInstances: 1
     autoDeployTrigger: off
     healthCheckPath: /qa/ready

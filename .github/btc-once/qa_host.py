@@ -1,6 +1,6 @@
 """Disposable supervisor around the frozen collector; no product or source-reader changes.
 
-Only the pinned UI run may submit 12 unique BTC identities, each at attempt 1.
+Only the pinned UI run may submit the 24 BTC and ETH identities, each at attempt 1.
 The source database is opened read-only once to restore the accepted encrypted
 account snapshot. All job/session/evidence writes use local disposable Postgres.
 """
@@ -29,7 +29,8 @@ sys.path[:0] = [str(PRODUCT/'runtime'),str(PRODUCT),str(HERE)]
 from resource_sample import ResourceSample
 
 PIN = json.loads((HERE/'run-pin.json').read_text())
-ALLOWED = {('BTC',m,t) for m in (1,2,3) for t in ('12H','24H','48H','1W')}
+SYMBOLS = ('BTC','ETH')
+ALLOWED = {(s,m,t) for s in SYMBOLS for m in (1,2,3) for t in ('12H','24H','48H','1W')}
 PREVIOUS = 'aa3ab31f-828f-4465-95da-60a462e802a5'
 SECRET = secrets.token_urlsafe(40)
 ADMITTED = {}
@@ -37,7 +38,9 @@ EVENTS = []
 SOURCE_BLOCK = None
 MONITOR = ResourceSample()
 EPOCH_OFFSET = time.time()-time.monotonic()
-END = PIN['experiment_started_epoch'] + 28*60
+STARTED = float((HERE.parent/'build-start-epoch').read_text())
+END = STARTED + 26*60
+BUILD_RESOURCES = json.loads((HERE.parent/'build-resources.json').read_text())
 EXPORT_BYTES = 0
 RUNNER = None
 PG = None
@@ -46,13 +49,25 @@ BOUND_RUN = None
 SAMPLING_STOP = threading.Event()
 
 def sample_setup():
+    # Continue emitting bounded resource summaries if the UI client cannot export.
+    last_log = time.monotonic()
     while not SAMPLING_STOP.wait(.5):
         MONITOR.update(force=True)
+        if time.monotonic()-last_log>=25:
+            resource_log('serving')
+            last_log = time.monotonic()
+
+def resource_log(phase):
+    data = MONITOR.report()
+    data.pop('samples',None)
+    print('BTC_RESOURCE '+json.dumps(dict(phase=phase,epoch=time.time(),resources=data),
+          separators=(',',':')),flush=True)
 
 def save_resources(phase):
     ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
     data=dict(phase=phase,epoch=time.time(),resources=MONITOR.report(),events=EVENTS)
     (ROOT/'supervisor-resources.json').write_text(json.dumps(data,default=json_default))
+    resource_log(phase)
 
 def event(kind, **data):
     item = dict(kind=kind,epoch=time.time(),**data)
@@ -123,7 +138,7 @@ async def admission(request,handler):
         raw = await request.read()
         try:
             body = json.loads(raw)
-            identity = body.get('symbol','BTC'),int(match[1]),body['timeframe']
+            identity = body['symbol'],int(match[1]),body['timeframe']
             rid = str(UUID(body['request_id']))
             if identity not in ALLOWED or body.get('attempt',1)!=1:
                 raise ValueError()
@@ -142,7 +157,9 @@ async def admission(request,handler):
 
 async def ready(request):
     return web.json_response({'ready':True,'collector':PIN['collector'],'app':PIN['app'],
-        'deadline_epoch':END,'started_epoch':PIN['experiment_started_epoch']})
+        'collector_commit':os.getenv('RENDER_GIT_COMMIT'),
+        'affinity_sha256':PIN['affinity_sha256'],'workflow_sha':PIN['sha'],
+        'symbols':SYMBOLS,'tabs':2,'deadline_epoch':END,'started_epoch':STARTED})
 
 async def session(request):
     global BOUND_RUN
@@ -176,12 +193,13 @@ async def export(request):
     for row in jobs+evidence:
         image=row.pop('image_png',None)
         row['image_png_base64']=base64.b64encode(image).decode() if image else None
-    raw=json.dumps(dict(pin=PIN,jobs=jobs,evidence=evidence,events=EVENTS,resources=MONITOR.report(),database=database,
+    raw=json.dumps(dict(pin=PIN,jobs=jobs,evidence=evidence,events=EVENTS,resources=MONITOR.report(),
+        build_resources=BUILD_RESOURCES,collector_commit=os.getenv('RENDER_GIT_COMMIT'),database=database,
         outbound_body_bytes=EXPORT_BYTES,source_block=SOURCE_BLOCK,model_calls=0,
         metrics_log='\n'.join(line for line in (ROOT/'metrics.log').read_text().splitlines()
             if line.startswith(('COINGLASS_CAPACITY_BROWSER ','COINGLASS_CYCLE_MAP ','COINGLASS_METRICS ','BTC_EXPERIMENT ')))[-1500000:]),default=json_default,separators=(',',':')).encode()
     data=gzip.compress(raw,mtime=0)
-    if len(data)>6*1024*1024: raise web.HTTPRequestEntityTooLarge(max_size=6*1024*1024,actual_size=len(data))
+    if len(data)>24*1024*1024: raise web.HTTPRequestEntityTooLarge(max_size=24*1024*1024,actual_size=len(data))
     EXPORT_BYTES+=len(data)
     return web.Response(body=data,content_type='application/gzip')
 
@@ -190,19 +208,24 @@ async def observe_limits():
     while True:
         MONITOR.update(force=True)
         sample=MONITOR.samples[-1]
-        if sample[2] is not None and sample[2]>int(1.8*1024**3): SOURCE_BLOCK='memory_limit_approaching'
-        # Keep several MiB for exporting market evidence and control traffic.
-        if sample[4] is not None and MONITOR.samples[0][4] is not None and sample[4]-MONITOR.samples[0][4]>8_000_000:
+        if sample[2] is not None and sample[2]>int(3.65*1024**3): SOURCE_BLOCK='memory_limit_approaching'
+        # Reserve the bounded export and cleanup traffic after acquisition stops.
+        if sample[4] is not None and MONITOR.samples[0][4] is not None and sample[4]-MONITOR.samples[0][4]>15_000_000:
             SOURCE_BLOCK='outbound_budget_approaching'
         if time.time()>=END-60: SOURCE_BLOCK='time_limit_approaching'
-        jobs=rows()
-        blocked=next((r for r in jobs if r['error_code'] in ('source_login_required','source_rate_limited','auth_rate_limited')),None)
+        try:
+            jobs=await asyncio.to_thread(rows)
+        except Exception:
+            SOURCE_BLOCK='database_unavailable'
+            jobs=[]
+        blocked=next((r for r in jobs if r['error_code'] in ('source_login_required','source_rate_limited','auth_rate_limited','evidence_store_failed')),None)
         if blocked: SOURCE_BLOCK=blocked['error_code']
         if SOURCE_BLOCK:
             event('controlled_stop',reason=SOURCE_BLOCK)
             if RUNNER:
-                await RUNNER.cleanup()
-                RUNNER=None
+                # Stop the frozen worker lifecycle. Keep authenticated GETs open
+                # until teardown so the UI can publish rows already committed.
+                await RUNNER.app.cleanup()
             return
         await asyncio.sleep(.5)
 
@@ -214,8 +237,8 @@ async def main():
         loop.add_signal_handler(sig,shutdown.set)
     os.umask(0o077)
     if os.environ.get('RENDER_SERVICE_ID')=='srv-dakhacou01pc73f58aug': raise ValueError('production_service_rejected')
-    if not os.environ.get('RENDER_SERVICE_NAME','').startswith('cg-btc-once-20261127'): raise ValueError('wrong_service')
-    if os.environ.get('RENDER_GIT_BRANCH')!='qa/coinglass-btc-once-20261127': raise ValueError('wrong_branch')
+    if not os.environ.get('RENDER_SERVICE_NAME','').startswith('cg-btc-eth-ops-20261127'): raise ValueError('wrong_service')
+    if os.environ.get('RENDER_GIT_BRANCH')!='qa/coinglass-btc-eth-operational-20261127': raise ValueError('wrong_branch')
     if time.time()>=END-120: raise ValueError('insufficient_experiment_time')
     ROOT.mkdir(mode=0o700,exist_ok=True)
     (ROOT/'started').touch(exist_ok=False)
@@ -223,7 +246,7 @@ async def main():
         if os.environ.get(name): raise ValueError('forbidden_provider_secret')
     os.environ.update(COINGLASS_COLLECTOR_TOKEN=SECRET,COLLECTION_BRIDGE_ENABLED='true',
         COINGLASS_MODERN_UI_ENABLED='true',COINGLASS_SESSION_STORE_ENABLED='true',
-        COINGLASS_VERIFIED_SYMBOLS='BTC',COINGLASS_CYCLE_TABS='1')
+        COINGLASS_VERIFIED_SYMBOLS='BTC,ETH',COINGLASS_CYCLE_TABS='2',COINGLASS_CYCLE_FIXED_SYMBOLS='BTC,ETH')
     await asyncio.to_thread(restore_and_start_database)
     import app as product_app
     product=product_app.create_app()
@@ -237,14 +260,17 @@ async def main():
     async with client.get('http://127.0.0.1:10001/health') as response:
         health=await response.json()
         if (response.status!=200 or health.get('mode')!='collection'
-                or health.get('store_connectivity',{}).get('ready') is not True):
+                or health.get('store_connectivity',{}).get('ready') is not True
+                or health.get('worker_concurrency') != 2
+                or set(health.get('basic_profiles',{}).get('symbols',[])) != set(SYMBOLS)):
             await client.close()
             await RUNNER.cleanup()
             RUNNER=None
             raise ValueError('collector_not_active')
     # A successful read proves that startup applied the actual queue schema.
     rows()
-    event('collector_health_verified',mode=health['mode'])
+    event('collector_health_verified',mode=health['mode'],tabs=health['worker_concurrency'],
+          symbols=health['basic_profiles']['symbols'])
     async def proxy(request):
         if SOURCE_BLOCK and request.method=='POST':
             return web.json_response({'error':'experiment_closed'},status=409)
