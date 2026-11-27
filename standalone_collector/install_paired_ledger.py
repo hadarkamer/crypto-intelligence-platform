@@ -46,7 +46,7 @@ def install(runtime):
            '            row = c.execute("""UPDATE public.ai_collection_bridge_jobs SET status=\'running\',started_at=now()')
 
     change('            if action == "latest":\n                tf = request.query.get("timeframe")',
-           '            symbol = request.query.get("symbol", "BTC")\n'
+           '            symbol = getattr(request, "query", {}).get("symbol", "BTC")\n'
            '            if action == "latest":\n'
            '                if symbol != "BTC" or "fixed_cycle_id" in request.query:\n'
            '                    raise BridgeError("no_cached_result", "No saved observation for this scope", 404)\n'
