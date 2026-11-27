@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: decision-hub-coinglass-pilot-20261125
+    runtime: python
+    repo: https://github.com/hadarkamer/crypto-intelligence-platform
+    branch: qa/coinglass-tesseract-btc-20261127i
+    region: oregon
+    plan: 1c-2g
+    numInstances: 1
+    autoDeployTrigger: "off"
+    healthCheckPath: /health
+    buildCommand: >-
+      exec env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8
+      VIRTUAL_ENV="$VIRTUAL_ENV" LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+      PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH"
+      RENDER="$RENDER" IS_PULL_REQUEST="$IS_PULL_REQUEST"
+      RENDER_SERVICE_NAME="$RENDER_SERVICE_NAME" RENDER_GIT_BRANCH="$RENDER_GIT_BRANCH"
+      RENDER_GIT_COMMIT="$RENDER_GIT_COMMIT"
+      python -I -S -B standalone_collector/qa_single_native.py build
+    startCommand: python -I -B standalone_collector/qa_single_native.py serve
+    envVars:
+      - key: COINGLASS_MODERN_UI_ENABLED
+        value: "true"
+      - key: COINGLASS_SESSION_STORE_ENABLED
+        value: "true"
+      - key: COINGLASS_LOGIN_EMAIL
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: COINGLASS_LOGIN_EMAIL
+      - key: COINGLASS_SESSION_KEY
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: COINGLASS_SESSION_KEY
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: DATABASE_URL
