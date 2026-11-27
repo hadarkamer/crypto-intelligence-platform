@@ -188,18 +188,18 @@ def create_app():
     return application
 
 
-def deployment_check(*,check_metadata=True):
+def deployment_check():
     import unittest
     from configuration_check import main as check_configuration
     checked=unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromName('test_configuration_check'))
     if not checked.wasSuccessful():raise SystemExit(1)
-    check_configuration(check_metadata=check_metadata)
+    check_configuration(check_metadata='--probe' not in sys.argv)
     print('MODEL1_SOURCE_PROBE_SKIPPED explicit --source-probe required; no browser or inference started',flush=True)
 
 
 if __name__=='__main__':
     if '--probe' in sys.argv or '--check-config' in sys.argv:
-        deployment_check(check_metadata='--probe' not in sys.argv)
+        deployment_check()
     elif '--source-probe' in sys.argv:probe()
     else:
         if os.getenv('COINGLASS_ACCOUNT_DIAGNOSTIC_ON_START','').strip().lower()=='true':
