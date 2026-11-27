@@ -67,11 +67,11 @@
     },
     "modern_map_axis_ocr.py": {
       "path": "numeric_inputs/modern_map_axis_ocr.py",
-      "sha256": "b619aedac3fc660edfafee7f1a3e8d9135a69e3b06a9417a15468c09770503b4"
+      "sha256": "950dee300f7ebc48689e6a55c96ed9bcb903812fcdd13a1f263ad672e915ed33"
     },
     "modern_map_basic.py": {
       "path": "numeric_inputs/modern_map_basic.py",
-      "sha256": "15a0607a7af0704851ef8172ba2bc3c8ce29728a84f3bcac6dc420e37b902138"
+      "sha256": "e1dedcadc1773659d30122b475a3190700e847e7892535742b9ed00641eeb910"
     },
     "modern_map_basic_numbers.py": {
       "path": "numeric_inputs/modern_map_basic_numbers.py",

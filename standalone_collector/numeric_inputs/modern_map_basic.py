@@ -101,7 +101,7 @@ def read_epoch(stamp, update, period=None):
 
 
 
-def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False,period=None,opening=False):
+def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False,period=None,opening=False,pointer_position=None):
     """Observe a displayed time. At opening the supplied date is an anchor only."""
     phase='opening' if opening else 'closing'
     def verify(stamp):
@@ -123,6 +123,8 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
         stamp,marks=ui.read_paint(page,box,x,y,observe=emit,fresh_pointer=base_only,pointer_phase=phase)
         if base_only:
             verify(stamp)
+            if pointer_position is not None:
+                pointer_position['y'] = round(y)
             emit('stage',dict(name=phase+'_column_from_visible_crosshair',status='ok',
                               source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
         return stamp,marks
@@ -149,6 +151,8 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
             stamp=stamps.pop()
             verify(stamp)
             same_document()
+            if pointer_position is not None:
+                pointer_position['y'] = round(y)
             emit('stage',dict(name=phase+'_column_from_visible_tooltip',status='ok',
                               source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
             return stamp,[]
@@ -314,10 +318,12 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                 middle=(top+bottom)//2
                 prior,prior_marks=stage('read_prior_crosshair_time',lambda:ui.read_paint(
                     page,box,left+.72*(right-left),middle,observe=emit))
+                opening_pointer = {}
                 def read_opening_column():
                     if base_only:
                         return displayed_column(page,box,bounds,datetime.fromisoformat(side['source_time']),same_document,emit,
-                                                base_only=True,period=side.get('raw_column_period'),opening=True)
+                                                base_only=True,period=side.get('raw_column_period'),opening=True,
+                                                pointer_position=opening_pointer)
                     return ui.read_paint(page,box,right-1,middle,observe=emit)
                 current,initial_marks=stage('read_latest_crosshair_time',read_opening_column)
                 column=read_epoch(current,side['source_time'],side.get('raw_column_period'))
@@ -326,19 +332,20 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                         column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
                 marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,initial_marks))
                 ocr_cache={}
-                def read_axis(phase,frame,chart,plot,labels,reference):
+                def read_axis(phase,frame,chart,plot,labels,reference,pointer):
                     receipt={}
                     result=None
                     try:
                         result=axis_scale_live(frame,chart,plot,labels,reference=reference,observe=receipt.update,
-                                              timeout=ui.limited_timeout(10000)/1000,cache=ocr_cache)
+                                              timeout=ui.limited_timeout(10000)/1000,cache=ocr_cache,
+                                              pointer_y=pointer.get('y'))
                     finally:
                         emit('stage',dict(name='basic_'+phase+'_price_readout',status='observed' if result else 'failed',
                                           **receipt))
                     require(result is not None,receipt.get('condition','axis_unverified'))
                     return result,receipt.get('method','dom_canvas')
                 scale,source_method=stage('basic_verified_price_axis',lambda:read_axis(
-                    'opening',screen,box,bounds,marks,side.get('raw_last_price')))
+                    'opening',screen,box,bounds,marks,side.get('raw_last_price'),opening_pointer))
                 raw_ref,where=scale
                 regions,native_bins,bin_height=stage('basic_classify_latest_edge',lambda:right_edge_regions(
                     screen,bounds,side,scale,model))
@@ -377,8 +384,10 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                 require(clear,'closing_price_or_time_axis_obstructed')
                             else:
                                 require(closing_bounds==bounds,'closing_price_domain_changed')
+                            closing_pointer = {}
                             close_time,close_marks=record('recheck_latest_column',lambda:displayed_column(
-                                page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period')))
+                                page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period'),
+                                pointer_position=closing_pointer))
                             require(read_epoch(close_time,side['source_time'],side.get('raw_column_period'))==column,'closing_column_changed')
                             end_marks=axis_marks(page,closing_box,prior_marks if box==closing_box else [],close_marks)
                             # Collect a fresh overview after the closing image and cursor
@@ -386,7 +395,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                             after=record('recheck_market_update',lambda:overview(page))
                             record('basic_verify_closing_market',lambda:prove_observations(side,after,emit))
                             end_scale,_=record('basic_closing_price_axis',lambda:read_axis(
-                                'closing',final,closing_box,closing_bounds,end_marks,after.get('raw_last_price')))
+                                'closing',final,closing_box,closing_bounds,end_marks,after.get('raw_last_price'),closing_pointer))
                             if number(end_scale[0])[0]!=number(raw_ref)[0]:
                                 emit('stage',dict(name='basic_compare_reference',status='failed',
                                     expected={'reference':raw_ref},received={'reference':end_scale[0]}))
