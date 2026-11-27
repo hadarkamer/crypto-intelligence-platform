@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: cg-btc-once-20261127
+    runtime: python
+    repo: https://github.com/hadarkamer/crypto-intelligence-platform
+    branch: qa/coinglass-btc-once-20261127
+    region: oregon
+    plan: 1c-2g
+    numInstances: 1
+    autoDeployTrigger: off
+    healthCheckPath: /qa/ready
+    buildCommand: >-
+      exec env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8
+      VIRTUAL_ENV="$VIRTUAL_ENV" LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+      RENDER_SERVICE_NAME="$RENDER_SERVICE_NAME" RENDER_GIT_BRANCH="$RENDER_GIT_BRANCH"
+      python -I -B .github/btc-once/qa_boot.py build
+    startCommand: python -I -B .github/btc-once/qa_boot.py serve
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: COINGLASS_LOGIN_EMAIL
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: COINGLASS_LOGIN_EMAIL
+      - key: COINGLASS_SESSION_KEY
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: COINGLASS_SESSION_KEY
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: decision-hub-model1-collector
+          envVarKey: DATABASE_URL
