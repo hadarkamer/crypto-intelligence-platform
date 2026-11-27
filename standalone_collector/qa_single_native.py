@@ -28,7 +28,7 @@ def unpack():
             dst.write_bytes(z.read(tag));dst.chmod(0o600)
     return expected
 def main():
-    if len(sys.argv)!=2 or os.environ.get('RENDER_SERVICE_NAME')!='decision-hub-coinglass-ocr-i-20261127' or os.environ.get('RENDER_GIT_BRANCH')!='qa/coinglass-tesseract-i-isolated-20261127':
+    if len(sys.argv)!=2 or os.environ.get('RENDER_SERVICE_NAME')!='decision-hub-coinglass-ocr-i-20261127-mngs' or os.environ.get('RENDER_GIT_BRANCH')!='qa/coinglass-tesseract-i-isolated-20261127':
         raise SystemExit('wrong_source_or_service')
     if sys.argv[1]=='build':
         # The product modules come directly from the exact reviewed repository tree.
