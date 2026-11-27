@@ -229,8 +229,6 @@ def chart_groups(regions, levels, step, ref, total, anchor):
         exact=len(matches)==len(prices)
         known=sum((Decimal(str(r['amount'])) for r in matches),Decimal(0))
         center=(prices[0]+prices[-1])/2
-        if exact:
-            center=(Decimal(str(matches[0]['price']))+Decimal(str(matches[-1]['price'])))/2
         rows.append(dict(side=g['side'],colour=g['colour'],kind='verified_amount' if exact else 'visual_estimate',
                          coverage='verified' if exact else 'partial' if matches else 'visual',
                          price_low_estimate=_numeric(prices[0]),price_high_estimate=_numeric(prices[-1]),
@@ -382,7 +380,7 @@ def _same_json(first, second):
     return first==second
 
 
-def validate_basic_snapshot(snapshot):
+def validate_basic_snapshot(snapshot, *, restored=False):
     """Replay the same derivation; reject any changed counts, prices, nulls or coverage claims."""
     require(isinstance(snapshot,dict) and snapshot.get('schema')==SCHEMA)
     try:
@@ -400,8 +398,24 @@ def validate_basic_snapshot(snapshot):
                 chart_regions=None if r is None else [{k:g[k] for k in ('side','colour','prices')} for g in r],
                 native_bins_inspected=snapshot['coverage']['native_bins_inspected'],provenance=snapshot['provenance'],
                 enrichment=e['enrichment'],end_observation=e['closing'])
-        require(_same_json(base,snapshot),
-                'hover_evidence_mismatch')
+        if _same_json(base,snapshot):
+            return snapshot
+        # Previous checkpoints used the matched *numeric labels* to calculate
+        # distance on fully matched regions, whilst the UI shows the plotted
+        # endpoints. Only replay exactly that historical derivation. The
+        # original receipt stays immutable and the result uses the shown midpoint.
+        if restored:
+            reference=number(base['raw_last_price'])[0]
+            legacy_groups=[]
+            for group in base['chart_regions'] or []:
+                previous=group
+                if group['coverage']=='verified':
+                    labels=group['verified_prices']
+                    midpoint=(number(labels[0])[0]+number(labels[-1])[0])/2
+                    previous=dict(group,distance_pct=ratio(midpoint-reference,reference))
+                legacy_groups.append(previous)
+            if _same_json(dict(base,chart_regions=legacy_groups),snapshot):
+                return base
+        require(False,'hover_evidence_mismatch')
     except (KeyError,TypeError,ValueError,ArithmeticError):
         raise StageFailure('source_not_readable','hover_evidence_mismatch') from None
-    return snapshot

@@ -17,10 +17,13 @@ def axis_marks(page,box,prior,current):
     return [*dom,*sorted(painted(prior) & painted(current))]
 
 
-def axis_scale(image,box,bounds,marks):
+def axis_scale(image,box,bounds,marks,*,reference=None,audit=None):
+    def fail(reason):
+        if audit is not None:audit['condition']=reason
+        return None
     left,top,right,bottom=bounds
     axis_end=min(image.width,box[0]+box[2])
-    if axis_end-right<14:return None
+    if axis_end-right<14:return fail('axis_geometry_invalid')
     # The source renders one light, labelled last-price tag beside its dashed
     # horizontal reference. Require the clean (cursor-off) source pixels.
     def light(y):
@@ -28,27 +31,44 @@ def axis_scale(image,box,bounds,marks):
                    (image.getpixel((x,y)) for x in range(right+1,axis_end)))>(axis_end-right)*.35
     runs=[list(rows) for state,rows in groupby(range(top,bottom+1),key=light) if state]
     bands=[r for r in runs if 5<=len(r)<=min(45,(bottom-top)*.15)]
-    if len(bands)!=1:return None
+    if audit is not None:
+        audit['tag_bands']=[[band[0],band[-1]] for band in bands]
+    if len(bands)!=1:return fail('tag_missing_or_ambiguous')
     band=bands[0]
     center=(band[0]+band[-1])/2
     visible=[(raw,float(number(raw)[0]),y) for raw,x,y,*_ in marks if isinstance(raw,str)
              and re.fullmatch(PRICE,raw) and right<x<axis_end and top<=y<=bottom]
-    reference={v for raw,v,y in visible if band[0]-1<=y<=band[-1]+1}
-    if len(reference)!=1:return None
-    last=reference.pop()
-    raw_last=next(raw for raw,v,y in visible if v==last)
+    candidates={v:raw for raw,v,y in visible if band[0]-1<=y<=band[-1]+1}
+    if audit is not None:
+        audit.update(tag_y=center,reference_candidates=list(candidates.values()),
+                     ticks=[dict(text=raw,y=y) for raw,_,y in visible if not band[0]-1<=y<=band[-1]+1])
+    if len(candidates)>1:return fail('reference_conflict')
+    if reference is None and not candidates:return fail('reference_missing')
+    if reference is not None:
+        # The overview explicitly labels this field "Reference (last price)".
+        # Direct ticks plus the reference line can calibrate it without OCR.
+        from modern_map_cells import _agree
+        if candidates and not _agree(number(reference),number(next(iter(candidates.values())))):
+            return fail('reference_conflict')
+    raw_last=reference or next(iter(candidates.values()))
+    last=float(number(raw_last)[0])
+    if audit is not None:audit['reference']=raw_last
     # Repeated identical labels (canvas plus DOM) supply one coordinate.
     ticks={}
     for raw,v,y in visible:
         if v==last or band[0]-1<=y<=band[-1]+1:continue
-        if v in ticks and abs(ticks[v]-y)>2:return None
+        if v in ticks and abs(ticks[v]-y)>2:return fail('tick_position_conflict')
         ticks[v]=y
-    if len(ticks)<4:return None
+    if len(ticks)<4:return fail('ticks_insufficient')
     lo,hi=min(ticks),max(ticks)
-    if not lo<last<hi or ticks[lo]-ticks[hi]<(bottom-top)*.60:return None
+    if not lo<last<hi or ticks[lo]-ticks[hi]<(bottom-top)*.60:return fail('tick_span_insufficient')
     slope=(ticks[hi]-ticks[lo])/(hi-lo)
     def where(price):return ticks[lo]+(price-lo)*slope
-    if max(abs(where(p)-y) for p,y in ticks.items())>1.6 or abs(where(last)-center)>2.2:return None
+    tick_error=max(abs(where(p)-y) for p,y in ticks.items())
+    tag_error=abs(where(last)-center)
+    if audit is not None:
+        audit.update(tick_residual=tick_error,tag_residual=tag_error)
+    if tick_error>1.6 or tag_error>2.2:return fail('axis_position_conflict')
     # A dashed line must pass through the clean tag's centre. Contrast is
     # measured against its neighbouring rows rather than a hard-coded colour.
     def dashed(y):
@@ -57,7 +77,8 @@ def axis_scale(image,box,bounds,marks):
         transitions=sum(a!=b for a,b in zip(changes,changes[1:]))
         return len(changes)*.12<sum(changes)<len(changes)*.85 and transitions>len(changes)*.05
     if not any(dashed(y) for y in range(max(top+2,round(center)-2),min(bottom-1,round(center)+3))):
-        return None
+        return fail('reference_line_missing')
+    if audit is not None:audit['condition']='verified'
     return raw_last,where
 
 

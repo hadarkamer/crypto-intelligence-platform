@@ -107,6 +107,21 @@ def capture(symbol, model, timeframe, image_path, *, allow_login=True, session=N
         session = CaptureSession.from_environment()
     if session is None or not session.dedicated:
         raise StageFailure('session_input_invalid')
+    if base_only and (symbol,model,timeframe)==('BTC',1,'12H'):
+        from modern_map_axis_ocr import BINARY
+        # The build verifies the binary's version and the language model's
+        # digest. Catch an incomplete runtime before any new map navigation.
+        for asset,mode,cause in (
+                (BINARY,os.X_OK,'ocr_launcher_unavailable'),
+                (BINARY.parent/'bin/tesseract',os.X_OK,'ocr_binary_unavailable'),
+                (BINARY.parent/'tessdata/eng.traineddata',os.R_OK,'ocr_english_unavailable'),
+                (Path('/usr/bin/prlimit'),os.X_OK,'ocr_process_limiter_unavailable')):
+            if not asset.is_file() or not os.access(asset,mode):
+                if observe:
+                    observe('stage',dict(name='basic_ocr_readiness',status='failed',condition=cause))
+                error=StageFailure('source_capture_failed')
+                error.basic_reason=cause
+                raise error
     context = None
     # The private session IPC removes credentials before this point. The AI
     # client runs later in this process. Its key must not reach the driver
@@ -199,7 +214,7 @@ def _write_once(path, value):
         os.unlink(temp)
 
 
-def numeric_result(snapshot, job_id, png_bytes):
+def numeric_result(snapshot, job_id, png_bytes, *, restored=False):
     """Only a live, end-verified BASIC observation can become a ready job."""
     from uuid import UUID
     from modern_map_basic_numbers import validate_basic_snapshot
@@ -210,7 +225,7 @@ def numeric_result(snapshot, job_id, png_bytes):
     if not valid_id or len(png_bytes) > 4*1024*1024 or not png_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
         raise StageFailure('image_evidence_invalid')
     digest = hashlib.sha256(png_bytes).hexdigest()
-    snapshot = validate_basic_snapshot(snapshot)
+    snapshot = validate_basic_snapshot(snapshot,restored=restored)
     if snapshot.get('source_sha256') != digest:
         raise StageFailure('image_evidence_invalid')
     if (snapshot.get('provenance') != 'live' or snapshot.get('end_column_verified') is not True
@@ -254,7 +269,7 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only):
     source_path, enriched_path = root / SOURCE, root / UPGRADE
 
     def record_result(record, image):
-        result = numeric_result(record['snapshot'],run_id,image)
+        result = numeric_result(record['snapshot'],run_id,image,restored=True)
         if record.get('run_id') != run_id or record.get('image_sha256') != result['evidence']['sha256']:
             raise StageFailure('image_evidence_invalid')
         return result

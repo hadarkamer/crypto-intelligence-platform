@@ -13,7 +13,7 @@ import modern_map_reader as ui
 
 
 class BasicSourceReader(TestCase):
-    def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, native=False, box_case=None,
+    def replay(self, *, fail_hover=False, conflicting_hover=False, change=None, box_case=None,
                optional_change=None, ack=True, observed=None, base_only=False, shifted=False):
         clock=datetime.now(timezone.utc).replace(second=0,microsecond=0)
         stamp=clock.isoformat().replace('+00:00','Z')
@@ -86,11 +86,10 @@ class BasicSourceReader(TestCase):
             optional_paint=StageFailure('source_login_required') if optional_change=='auth' else (optional_time,[])
             paint=stub(ui,'read_paint',side_effect=[(prev,[]),(token,[]),(prev if change=='column' else token,[]),optional_paint])
             stub(basic,'axis_marks',return_value=[])
-            scales=[None,None] if native else [('100.00',where),('101.00' if change=='reference' else '100.00',where)]
-            if shifted and not native:scales[-1]=('100.00',lambda p:where(p)+delta[1])
+            scales=[('100.00',where),('101.00' if change=='reference' else '100.00',where)]
+            if shifted:scales[-1]=('100.00',lambda p:where(p)+delta[1])
             scales.append(scales[-1])
             stub(basic,'axis_scale_live',side_effect=scales)
-            measured=stub(basic,'from_native_box',return_value=(('100.00',where),'measure_domain'))
             later=dict(final, source_time=(clock+timedelta(minutes=1)).isoformat().replace('+00:00','Z')) if optional_change=='epoch' else final
             stub(basic,'overview',side_effect=[side,final,later])
             stub(basic,'after_read_failure')
@@ -130,7 +129,6 @@ class BasicSourceReader(TestCase):
             self.assertEqual(paint.call_count,4 if not base_only and box_case in ('leader','witness') else 3)
             self.assertEqual(tip.call_count,0 if base_only else 1)
             self.assertEqual(extra.call_count,0 if base_only else 2 if box_case in ('witness','wrong_witness') else 1)
-            self.assertEqual(measured.call_count,1 if native else 0)
             self.assertEqual(result['source_sha256'],sha256(output.getvalue()).hexdigest())
             self.assertEqual(doc.dispose.call_count,1)
             self.assertEqual(sum(k=='png' for k,_ in events),1)
@@ -159,9 +157,6 @@ class BasicSourceReader(TestCase):
                             for k,v in events))
         self.assertFalse(any(k=='stage' and v.get('name','').startswith('enrichment_recheck_') for k,v in events))
 
-    def test_domain_reference_preserves_targeted_enrichment_budget(self):
-        self.assertEqual(self.replay(native=True)['coverage']['sidebar_count'],3)
-
     def test_single_target_measure_enriches_after_incomplete_hover(self):
         for case in ('leader','witness'):
             with self.subTest(case=case):
@@ -189,7 +184,7 @@ class BasicSourceReader(TestCase):
         for changed in ('epoch','column'):
             with self.subTest(changed=changed):
                 events=[]
-                result=self.replay(native=True,box_case='leader',optional_change=changed,observed=events)
+                result=self.replay(box_case='leader',optional_change=changed,observed=events)
                 self.assertEqual(result,next(v for k,v in events if k=='verified_basic'))
                 self.assertEqual(result['enrichment']['additional_verified_count'],0)
                 self.assertEqual(result['source_time'],result['source_time_after'])
@@ -243,15 +238,14 @@ class BasicSourceReader(TestCase):
         self.assertTrue(any(v['name']=='basic_closing_geometry' for k,v in events if k=='stage'))
 
     def test_base_only_repositions_from_measured_same_chart_after_translation(self):
-        for native in (False,True):
-            events=[]
-            result=self.replay(base_only=True,shifted=True,native=native,observed=events)
-            evidence=next(v for k,v in events if k=='stage' and v['name']=='basic_closing_geometry')
-            self.assertTrue(evidence['geometry_changed'])
-            self.assertEqual(evidence['plot_rect'],[18,42,488,393])
-            current=next(v for k,v in events if k=='stage' and v['name']=='closing_column_from_visible_crosshair')
-            self.assertEqual(current['pointer_x'],487)
-            self.assertEqual(result['collection_tier'],'basic')
+        events=[]
+        result=self.replay(base_only=True,shifted=True,observed=events)
+        evidence=next(v for k,v in events if k=='stage' and v['name']=='basic_closing_geometry')
+        self.assertTrue(evidence['geometry_changed'])
+        self.assertEqual(evidence['plot_rect'],[18,42,488,393])
+        current=next(v for k,v in events if k=='stage' and v['name']=='closing_column_from_visible_crosshair')
+        self.assertEqual(current['pointer_x'],487)
+        self.assertEqual(result['collection_tier'],'basic')
 
     def test_base_only_blocked_time_axis_is_not_replaced_with_latest_estimate(self):
         events=[]
@@ -308,49 +302,3 @@ class BasicSourceReader(TestCase):
                 tip.return_value={'column_evidence':[{'dated_title':other,'period_seconds':300}]}
                 with self.subTest(other=other), self.assertRaises(StageFailure):
                     basic.displayed_column(*args,base_only=True,period='5m',opening=True)
-
-    def test_native_box_trace_preserves_tokens_and_rounding(self):
-        from decimal import Decimal
-        from modern_map_measure_panel import PanelMeasurement
-        side=dict(raw_total='950.8M',raw_above_total='546.7M',raw_below_total='404.1M',source_time='2026-11-26T18:41:00Z')
-        def displayed(total,ref='60,590'):
-            return PanelMeasurement((ref,total,None,Decimal('59000'),Decimal('62000')),('59,000','62,000'))
-        def trace(amount,chart,ref='60,590'):
-            records=[]
-            with patch.object(ui,'measure_box',return_value=displayed(amount,ref)) as measure:
-                try:
-                    answer=basic.from_native_box(Mock(),(2,50,1016,823),side,observe=lambda k,v:records.append(v),
-                                                 chart_axis=chart)
-                except StageFailure as error:
-                    answer=error
-                measure.assert_called_once()
-            return answer,records[0]
-        # The side tokens are retained G data; all native panel amounts in
-        # this fixture are synthetic, because G did not retain its panel.
-        independent=lambda price: ('60,590',lambda p:2*p)
-        answer,data=trace('950.7M',Mock(side_effect=AssertionError))
-        self.assertEqual(answer[1],'measure_domain')
-        self.assertEqual((data['absolute_delta'],data['rounding_tolerance'],data['totals_match']),
-                         ('100000.0','150000.0',True))
-        self.assertEqual(data['raw_price_low'],'59,000')
-        self.assertEqual(data['plot_rect'],[2,50,1016,823])
-        answer,data=trace('945.2M',independent)
-        self.assertEqual(answer[1],'native_reference_on_chart_axis')
-        self.assertEqual(answer[0][1](2),4)
-        self.assertEqual((data['raw_box_total'],data['raw_market_total'],data['raw_above_total'],data['raw_below_total']),
-                         ('945.2M','950.8M','546.7M','404.1M'))
-        self.assertEqual((data['absolute_delta'],data['rounding_tolerance'],data['totals_match']),
-                         ('5600000.0','150000.0',False))
-        answer,_=trace('945.2M',independent,'60,590.4')
-        self.assertEqual(answer[0][0],'60,590')
-        for candidate,ref,detail in [(independent,'60,590.6','measured_reference_conflicts_with_chart'),
-                                     (independent,'60,589','measured_reference_conflicts_with_chart'),
-                                     (None,'60,590','native_box_total_conflict_axis_unverified'),
-                                     (lambda _:None,'60,590','native_box_total_conflict_axis_unverified'),
-                                     (lambda _:('60,599',lambda p:p),'60,590','measured_reference_conflicts_with_chart'),
-                                     (independent,'63,000','measured_reference_outside_domain')]:
-            with self.subTest(detail=detail):
-                error,data=trace('945.2M',candidate,ref)
-                self.assertIsInstance(error,StageFailure)
-                self.assertEqual(error.basic_reason,detail)
-                self.assertEqual(data['raw_reference'],ref)

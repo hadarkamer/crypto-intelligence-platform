@@ -349,6 +349,19 @@ class SafetyAndDispatch(TestCase):
         pw.chromium.launch.assert_called_once_with(headless=True,chromium_sandbox=True,
                                                    args=['--disable-dev-shm-usage'])
 
+    def test_missing_ocr_blocks_new_base_scan_before_browser_open(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        trace=[]
+        with TemporaryDirectory() as temp, patch('modern_map_axis_ocr.BINARY',Path(temp)/'absent'), \
+                patch('playwright.sync_api.sync_playwright') as driver:
+            with self.assertRaises(StageFailure) as caught:
+                capture('BTC',1,'12H',None,session=SimpleNamespace(dedicated=True),base_only=True,
+                        observe=lambda kind,event:trace.append(event))
+        self.assertEqual(caught.exception.basic_reason,'ocr_launcher_unavailable')
+        self.assertEqual(trace[-1]['condition'],'ocr_launcher_unavailable')
+        driver.assert_not_called()
+
     def test_legacy_session_is_rejected_before_browser_launch(self):
         with patch('playwright.sync_api.sync_playwright') as driver:
             with self.assertRaises(StageFailure) as caught:

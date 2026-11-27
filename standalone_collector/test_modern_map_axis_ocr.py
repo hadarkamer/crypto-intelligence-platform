@@ -1,10 +1,14 @@
+"""Acceptance of the packaged reader on original Firefox market-only captures."""
+import errno
+import os
 from pathlib import Path
+import tempfile
 from unittest import TestCase
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
-from modern_map_axis_ocr import axis_scale_live
-
+import modern_map_axis_ocr as ocr
+from test_modern_map_axis import MARKS
 
 FIXTURES=Path(__file__).parent/'fixtures'
 BOX=(0,0,140,774)
@@ -12,56 +16,92 @@ PLOT=(0,0,65,773)
 
 
 class PrintedPriceTests(TestCase):
-    def test_real_filtered_charts_without_numeric_dom_or_runtime_ocr(self):
-        # Each crop contains the rightmost 66 plot pixels and the original price axis.
-        for stamp,shown,center in [('1343','60,861',373.5),('1500','60,677',397.5),('1608','60,652',381.0)]:
-            with self.subTest(stamp=stamp), Image.open(FIXTURES/f'btc_12h_{stamp}_axis_edge.png') as image:
-                raw,where=axis_scale_live(image,BOX,PLOT,[])
-                self.assertEqual(raw,shown)
-                self.assertLess(abs(where(float(shown.replace(',','')))-center),2.2)
-                self.assertLess(where(63000),where(61000))
+    def read(self,image,marks=(),**kwargs):
+        receipt={}
+        result=ocr.axis_scale_live(image,BOX,PLOT,marks,observe=receipt.update,**kwargs)
+        return result,receipt
 
-    def test_inconsistent_native_mark_missing_stripe_or_corrupted_tag_abstains(self):
+    def test_packaged_engine_reads_real_market_tags_and_ticks_in_one_pass(self):
+        for stamp,shown in [('1343','60,861'),('1500','60,677'),('1608','60,652'),('1841','60,588')]:
+            with self.subTest(stamp=stamp),Image.open(FIXTURES/f'btc_12h_{stamp}_axis_edge.png') as image:
+                scale,record=self.read(image)
+                self.assertIsNotNone(scale,record)
+                self.assertEqual((scale[0],record['reference'],record['ocr_calls'],record['exit_code']),
+                                 (shown,shown,1,0))
+                self.assertGreaterEqual(len(record['ticks']),11)
+
+    def test_direct_source_or_chart_marks_skip_ocr_and_conflicts_abstain(self):
+        with Image.open(FIXTURES/'btc_12h_1343_axis_edge.png') as im, patch.object(ocr,'_tsv') as engine:
+            self.assertEqual(self.read(im,MARKS)[0][0],'60,861')
+            self.assertEqual(self.read(im,MARKS[:-1],reference='60,861')[0][0],'60,861')
+            self.assertIsNone(self.read(im,MARKS,reference='60,862')[0])
+            self.assertIsNone(self.read(im,MARKS,reference='61,000')[0])
+            engine.assert_not_called()
+
+    def test_unreadable_reference_absent_ticks_or_reference_line_abstain(self):
         with Image.open(FIXTURES/'btc_12h_1500_axis_edge.png') as image:
-            self.assertIsNone(axis_scale_live(image,BOX,PLOT,[('59,000',110,397)]))
-            no_line=image.copy()
-            ImageDraw.Draw(no_line).rectangle((0,391,65,405),fill=(44,24,78))
-            self.assertIsNone(axis_scale_live(no_line,BOX,PLOT,[]))
-            damaged=image.copy()
-            ImageDraw.Draw(damaged).rectangle((73,391,79,402),fill=(240,240,240))
-            self.assertIsNone(axis_scale_live(damaged,BOX,PLOT,[]))
-            no_ticks=image.copy()
-            ImageDraw.Draw(no_ticks).rectangle((66,0,139,384),fill=(18,21,27))
-            self.assertIsNone(axis_scale_live(no_ticks,BOX,PLOT,[]))
+            for rect,fill in [((66,387,139,407),(237,237,237)),
+                              ((66,0,139,383),(20,22,26)),((0,390,65,405),(20,22,26))]:
+                altered=image.copy()
+                ImageDraw.Draw(altered).rectangle(rect,fill=fill)
+                result,trace=self.read(altered)
+                self.assertIsNone(result,trace)
+                self.assertLessEqual(trace['ocr_calls'],1)
 
-    def test_scoped_panel_reference_corroborated_by_price_axis_in_retained_1841_chart(self):
+    def test_resized_translated_axis_and_a_single_missing_digit(self):
         with Image.open(FIXTURES/'btc_12h_1841_axis_edge.png') as image:
-            self.assertIsNone(axis_scale_live(image,BOX,PLOT,[]))
-            for raw in ('60,588','60587.70'):
-                with self.subTest(raw=raw):
-                    displayed,where=axis_scale_live(image,BOX,PLOT,[],panel_reference=raw)
-                    self.assertEqual(displayed,'60,588')
-                    self.assertLess(abs(where(60588)-386.5),2.2)
-            for raw in ('60,488','60,988','60,888','-1','unknown'):
-                with self.subTest(raw=raw):
-                    self.assertIsNone(axis_scale_live(image,BOX,PLOT,[],panel_reference=raw))
+            enlarged=image.resize((175,968),Image.Resampling.LANCZOS)
+            frame=Image.new('RGB',(220,1000))
+            frame.paste(enlarged,(15,12))
+            trace={}
+            result=ocr.axis_scale_live(frame,(15,12,175,968),(15,12,97,979),[],observe=trace.update)
+            # Double resampling materially distorts the small printed tag. The
+            # OCR output must never be accepted unless it is the real quote.
+            if result is not None:
+                self.assertEqual(result[0],'60,588')
+            else:
+                self.assertNotEqual(trace['condition'],'verified')
+            moved=Image.new('RGB',(180,806))
+            moved.paste(image,(15,12))
+            result=ocr.axis_scale_live(moved,(15,12,140,774),(15,12,80,785),[])
+            self.assertEqual(result[0],'60,588')
+            # Remove a printed digit while leaving the tag, dashed line and the
+            # rest of the chart intact. Axis arithmetic must not fill the hole.
+            hidden=image.copy()
+            ImageDraw.Draw(hidden).rectangle((72,378,78,394),fill=(239,239,239))
+            self.assertIsNone(self.read(hidden)[0])
 
-    def test_panel_reference_requires_readable_tag_numerals_calibrated_ticks_and_line(self):
+    def test_cached_transcription_rechecks_current_price_line(self):
         with Image.open(FIXTURES/'btc_12h_1841_axis_edge.png') as image:
-            regions=[(75,377,137,395),(66,0,139,371),(0,377,65,397)]
-            for region in regions:
-                with self.subTest(region=region):
-                    altered=image.copy()
-                    ImageDraw.Draw(altered).rectangle(region,fill=(243,243,243) if region==regions[0] else (20,22,26))
-                    self.assertIsNone(axis_scale_live(altered,BOX,PLOT,[],panel_reference='60,588'))
-            self.assertIsNone(axis_scale_live(image,BOX,PLOT,[('61,010',101,386)],panel_reference='60,588'))
-        # A confidently read digit of an earlier source remains decisive even
-        # when two prices would be indistinguishable geometrically at this zoom.
-        with Image.open(FIXTURES/'btc_12h_1500_axis_edge.png') as image:
-            self.assertIsNone(axis_scale_live(image,BOX,PLOT,[],panel_reference='60,678'))
+            cache={}
+            first,receipt=self.read(image,cache=cache)
+            self.assertEqual((first[0],receipt['ocr_calls']),('60,588',1))
+            replay,again=self.read(image,cache=cache)
+            self.assertEqual((replay[0],again['ocr_calls'],again['ocr_cache_hit']),('60,588',0,True))
+            changed=image.copy()
+            ImageDraw.Draw(changed).rectangle((0,378,65,395),fill=(20,22,26))
+            failed,record=self.read(changed,cache=cache)
+            self.assertIsNone(failed)
+            self.assertEqual((record['ocr_calls'],record['condition']),(0,'reference_line_missing'))
 
-    def test_valid_native_scale_skips_pixel_character_reader(self):
-        from test_modern_map_axis import MARKS
-        with Image.open(FIXTURES/'btc_12h_1343_axis_edge.png') as image, patch('modern_map_axis_ocr._printed') as decode:
-            self.assertEqual(axis_scale_live(image,BOX,PLOT,MARKS)[0], '60,861')
-            decode.assert_not_called()
+    def test_ocr_process_is_killed_and_reaped_when_deadline_expires(self):
+        with tempfile.TemporaryDirectory() as work:
+            script=Path(work)/'stall'
+            pidfile=Path(work)/'pid'
+            script.write_text(f'#!/bin/sh\necho $$ > {pidfile}\nexec /bin/sleep 30\n')
+            script.chmod(0o700)
+            trace={}
+            with patch.object(ocr,'BINARY',script):
+                value,error=ocr._tsv(b'',.25,trace)
+            self.assertEqual((value,error,trace['ocr_calls']),(None,'ocr_timed_out',1))
+            self.assertEqual(trace['exit_code'],-9)
+            with self.assertRaises(OSError) as caught:
+                os.kill(int(pidfile.read_text()),0)
+            self.assertEqual(caught.exception.errno,errno.ESRCH)
+
+    def test_ocr_runtime_error_is_a_single_recorded_failure(self):
+        trace={}
+        with patch.object(ocr,'BINARY',Path('/missing/coinglass-ocr')):
+            value,error=ocr._tsv(b'',2,trace)
+        self.assertEqual((value,error,trace['ocr_calls']),(None,'ocr_process_failed',1))
+        self.assertNotEqual(trace['exit_code'],0)

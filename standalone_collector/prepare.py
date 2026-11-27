@@ -127,6 +127,8 @@ def prepare():
     install_session_bridge(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_session_capture','test_session_state',
         'test_session_runtime','-v'],cwd=HERE,check=True,timeout=90)
+    from prepare_ocr_runtime import install as install_ocr_runtime
+    install_ocr_runtime(RUNTIME/'ocr_runtime')
     from install_modern_map import install as install_modern_map
     install_modern_map(RUNTIME)
     from install_symbol_jobs import install as install_symbol_jobs

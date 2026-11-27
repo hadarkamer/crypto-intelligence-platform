@@ -63,6 +63,22 @@ class BasicNumbersTests(unittest.TestCase):
         self.assertEqual(snapshot['coverage']['full_map_amounts_verified'],False)
         self.assertTrue(snapshot['same_document'] and snapshot['end_reference_verified'] and snapshot['end_column_verified'])
 
+    def test_region_distance_uses_its_displayed_bounds_and_restores_only_exact_old_arithmetic(self):
+        market,args=live_inputs()
+        args['chart_regions'][0]['prices']=[90.25]
+        current=build_basic_snapshot(market,**args)
+        below=current['chart_regions'][0]
+        self.assertEqual((below['price_low_estimate'],below['price_high_estimate']), (90.25,90.25))
+        self.assertEqual(below['distance_pct'],-9.75)
+        self.assertEqual((below['verified_prices'],below['amount']),(['90'],10000000))
+        historical=deepcopy(current)
+        historical['chart_regions'][0]['distance_pct']=-10.0
+        with self.assertRaises(StageFailure):validate_basic_snapshot(historical)
+        self.assertEqual(validate_basic_snapshot(historical,restored=True),current)
+        self.assertEqual(historical['chart_regions'][0]['distance_pct'],-10)
+        historical['chart_regions'][0]['amount']=1
+        with self.assertRaises(StageFailure):validate_basic_snapshot(historical,restored=True)
+
     def test_cell_overlaps_reported_once_and_new_value_can_complete_one_cluster(self):
         market,args=live_inputs()
         geo=dict(source='hover',raw_price_step='5.00',source_time=STAMP,column_time=STAMP)

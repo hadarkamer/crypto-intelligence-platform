@@ -21,6 +21,41 @@ from test_modern_map_basic_numbers import live_sample
 from test_session_state import Cursor, IsolatedPg, PGLITE
 
 
+class PriceReadoutPrivacy(unittest.TestCase):
+    def test_partial_preserves_both_readouts_and_exact_comparison_without_page_content(self):
+        bad='excluded-private-fixture'
+        opening=dict(name='basic_opening_price_readout',method='tesseract',status='observed',reference='60,588',
+                raw_direct_reference=None,ocr_calls=1,timeout_ms=10000,elapsed_ms=230,ocr_elapsed_ms=221,
+                exit_code=0,plot_rect=[0,0,65,773],tag_bands=[[377,397]],tag_y=386.5,
+                reference_candidates=['60,588',bad],ticks=[{'text':'63,500','y':10.5,'private':bad}],
+                ocr_marks=[{'text':'63,500','x':90.25,'y':10.5},{'text':bad,'x':91,'y':123}],
+                direct_marks=[],tick_residual=.41,tag_residual=1.06,condition='verified',debug=bad)
+        closing=dict(opening,name='basic_closing_price_readout',reference='60,589')
+        changed=dict(name='basic_compare_reference',status='failed',expected={'reference':'60,588'},
+                     received={'reference':'60,589','other':bad})
+        rows=dict(name='basic_compare_market',status='failed',expected={'raw_sidebar_rows':[['61,500','4.5M','+1.51%']]},
+                  received={'raw_sidebar_rows':[['61,500','4.4M','+1.51%']]})
+        column=dict(name='opening_column_from_visible_crosshair',status='ok',source_timestamp='11/26 18:40',
+                    pointer_x=1015,pointer_y=866)
+        regions=[dict(side='above',colour='yellow',prices=[61234.98],extra=bad)]
+        evidence=dict(name='basic_start_observation',status='ok',raw_last_price='60,588',chart_groups=regions,debug=bad)
+        error=StageFailure('source_not_readable','hover_evidence_mismatch')
+        error.basic_reason='closing_reference_changed'
+        with TemporaryDirectory() as directory:
+            receipt=checkpoint.partial_record('test-job',{},[],[column,opening,evidence,closing,rows,changed],error,Path(directory)/'absent')
+        self.assertEqual(receipt['failure']['condition'],'closing_reference_changed')
+        self.assertEqual(receipt['basic_opening_price_readout']['ticks'],[{'text':'63,500','y':10.5}])
+        self.assertEqual(receipt['basic_closing_price_readout']['reference'],'60,589')
+        self.assertEqual(receipt['basic_opening_price_readout']['ocr_marks'],[{'text':'63,500','x':90.25,'y':10.5}])
+        self.assertEqual(receipt['basic_opening_price_readout']['tag_residual'],1.06)
+        self.assertEqual(receipt['basic_opening_price_readout']['reference_candidates'],['60,588'])
+        self.assertEqual(receipt['basic_compare_reference']['expected'],{'reference':'60,588'})
+        self.assertEqual(receipt['basic_compare_market']['received'],rows['received'])
+        self.assertEqual(receipt['basic_start_observation']['chart_groups'][0]['prices'],[61234.98])
+        self.assertEqual(receipt['opening_column_from_visible_crosshair']['source_timestamp'],'11/26 18:40')
+        self.assertNotIn(bad,json.dumps(receipt))
+
+
 class MeasureDetailPrivacy(unittest.TestCase):
     def test_numerical_refusals_retain_only_the_enumerated_reason(self):
         detail = dict(field='box',label_counts={'leader':2},reading_counts={'leader':0},
@@ -153,6 +188,22 @@ class MeasuredCheckpoint(unittest.TestCase):
         self.assertEqual(result['basic_snapshot'],self.snapshot)
         self.assertNotIn('usage',result)
         self.assertEqual(result['run_id'],self.job)
+
+    def test_restored_legacy_region_distance_is_normalized_without_rewriting_or_recapturing(self):
+        from modern_map_basic_numbers import build_basic_snapshot
+        from test_modern_map_basic_numbers import live_inputs
+        market,args=live_inputs()
+        args['chart_regions'][0]['prices']=[90.25]
+        args['source_sha256']=self.snapshot['source_sha256']
+        self.snapshot=build_basic_snapshot(market,**args)
+        original=asyncio.run(self.attempt())
+        record,image=checkpoint.CheckpointStore(self.store,self.job).read()
+        record['source']['snapshot']['chart_regions'][0]['distance_pct']=-10.0
+        self.store.execute("UPDATE public.ai_collection_bridge_evidence SET diagnostic=%s::jsonb WHERE job_id=%s",
+                           (json.dumps({checkpoint.KEY:record}),self.job))
+        self.assertEqual(asyncio.run(self.attempt()),original)
+        self.assertEqual(self.starts,1)
+        self.assertEqual(checkpoint.CheckpointStore(self.store,self.job).read(),(record,image))
 
     def test_partial_is_private_and_cannot_replace_full(self):
         def lost_map(symbol,model,tf,path,observe,base_only):

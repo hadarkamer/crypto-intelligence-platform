@@ -1,156 +1,131 @@
-"""Read only the price axis and last-price tag of the supported Firefox chart font."""
-from decimal import ROUND_HALF_UP
-from functools import lru_cache
+"""Read the printed price tag and ticks once, using the bundled English Tesseract."""
+import csv
+from hashlib import sha256
 from itertools import groupby
+from io import BytesIO, StringIO
+import os
+from pathlib import Path
 import re
+import signal
+import subprocess
+import time
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageOps
 
 from modern_map_axis import axis_scale
-from modern_map_evidence import PRICE, number
+from modern_map_evidence import PRICE
 
-# Row masks of printed digits, drawn from filtered market images on 24 and 26
-# November. The retained charts use the same small price font. There are no price
-# strings, positions or monetary values in the alphabet. Unknown masks abstain.
-_GLYPHS = {
-    '0': '5x9:70f09898989898f070 5x9:70f89898989898f870 5x9:70f8c8c8c8c8c8f870 6x9:7878cccccccccc7878',
-    '1': '3x9:60e0a0202020202020 3x9:60e0e0606060606060',
-    '2': '5x9:70f8c808183060e0f8 5x9:70580808103060e0f8',
-    '3': '5x9:70f88818381888f870',
-    '4': '6x9:1030306060e8fc7c0c',
-    '5': '5x9:f8c080f0d81898f8f0 5x9:f08080f0d01818f070',
-    '6': '5x9:206040f0d89898f070 5x9:206060c0f0d098f070 5x9:30206040f0d898f870',
-    '7': '5x9:f89890303020604040 5x9:f8d818181030302060',
-    '8': '5x9:70d898f0f09888d870 5x9:70d8c8d878d8c8d870',
-    '9': '5x9:70d8c8d87810303060',
-}
+BINARY = Path(__file__).resolve().parent / 'ocr_runtime' / 'tesseract'
+TIMEOUT = 10.0
 
 
-def _bits(mask):
-    bitmap = mask.resize((12,18), Image.Resampling.NEAREST).convert('1')
-    return int.from_bytes(bitmap.tobytes(),'big')
+def _tsv(png, timeout, audit):
+    # Only the OCR process is limited. Do not pass the collector's environment
+    # (database credentials, session keys, etc.) to the binary.
+    command = ['/usr/bin/prlimit', '--as=536870912', '--cpu=8:9', '--', str(BINARY),
+               'stdin','stdout','-l','eng','--oem','1','--psm','11',
+               '-c','tessedit_char_whitelist=0123456789,.','tsv']
+    start = time.monotonic()
+    audit.update(ocr_calls=1,timeout_ms=round(timeout*1000))
+    try:
+        with subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,start_new_session=True,
+                              env={'PATH':'/usr/bin:/bin','LANG':'C','OMP_THREAD_LIMIT':'1'}) as proc:
+            try:
+                output,_=proc.communicate(png,timeout=timeout)
+            finally:
+                if proc.poll() is None:
+                    try:os.killpg(proc.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    proc.wait()
+                audit['exit_code']=proc.returncode
+            if proc.returncode:
+                return None,'ocr_process_failed'
+            return output.decode('utf8'),''
+    except subprocess.TimeoutExpired:
+        return None,'ocr_timed_out'
+    except (OSError,UnicodeError):
+        return None,'ocr_runtime_unavailable'
+    finally:
+        audit['ocr_elapsed_ms']=round((time.monotonic()-start)*1000)
 
 
-@lru_cache(maxsize=1)
-def _alphabet():
-    out = {}
-    for digit, examples in _GLYPHS.items():
-        masks = []
-        for example in examples.split():
-            shape, pixels = example.split(':')
-            size = tuple(map(int,shape.split('x')))
-            masks.append(_bits(Image.frombytes('1',size,bytes.fromhex(pixels))))
-        out[digit] = masks
-    return out
+def _market_marks(marks,bounds,end):
+    _,top,right,bottom=bounds
+    return [(raw,x,y) for raw,x,y,*_ in marks if isinstance(raw,str) and len(raw)<=40
+            and re.fullmatch(PRICE,raw) and right<x<end and top<=y<=bottom]
 
 
-def _runs(flags):
-    for state, items in groupby(enumerate(flags),key=lambda pair:pair[1]):
-        if state:
-            indices = [i for i,_ in items]
-            yield indices[0],indices[-1]+1
+def _ocr_marks(strip,timeout,audit):
+    bright=strip.point(lambda v:255 if v>178 else 0)
+    flags=(bright.crop((0,y,strip.width,y+1)).histogram()[255]>strip.width*.35 for y in range(strip.height))
+    normal=ImageOps.invert(strip)
+    for state,rows in groupby(enumerate(flags),key=lambda item:item[1]):
+        if not state:continue
+        ys=[y for y,_ in rows]
+        a,b=ys[0],ys[-1]+1
+        if 5<=b-a<=min(45,strip.height*.15):
+            x0,_,x1,_=bright.crop((0,a,strip.width,b)).getbbox()
+            normal.paste(strip.crop((x0,a,x1,b)),(x0,a))
+
+    bordered=ImageOps.expand(normal,border=4,fill=255)
+    enlarged=bordered.resize((bordered.width*4,bordered.height*4),Image.Resampling.LANCZOS)
+    with BytesIO() as buf:
+        enlarged.save(buf,format='PNG')
+        text,error=_tsv(buf.getvalue(),timeout,audit)
+    if error:
+        return [],error
+    labels=[]
+    for word in csv.DictReader(StringIO(text),delimiter='\t',quoting=csv.QUOTE_NONE):
+        if word['level']!='5' or not re.fullmatch(PRICE,word['text']) or len(word['text'])>40:continue
+        y=(int(word['top'])+int(word['height'])/2)/4-4
+        x=(int(word['left'])+int(word['width'])/2)/4-4
+        if 0<=x<strip.width and 0<=y<strip.height:
+            labels.append((word['text'],x,y))
+    return labels,''
 
 
-def _printed(mask, *, allow_unknown=False):
-    pieces=[]
-    for left,right in _runs(mask.crop((x,0,x+1,mask.height)).getbbox() is not None for x in range(mask.width)):
-        col=mask.crop((left,0,right,mask.height))
-        bounds=col.getbbox()
-        pieces.append((col.crop(bounds),bounds[1],bounds[3]))
-    if not 5 <= len(pieces) <= 12:
-        return None
-    baseline=max((bottom for g,_,bottom in pieces if g.height>=7), default=0)
-    text=''
-    for glyph,top,bottom in pieces:
-        if glyph.height<=4 and glyph.width<=2 and bottom>baseline and top>=baseline-3:
-            text+=','
-            continue
-        # The current chart font has nine-pixel numerals. Do not force text
-        # in a different font, zoom, style or layout through the decoder.
-        if glyph.height!=9 or not 2<=glyph.width<=7 or abs(bottom-baseline)>1:
-            return None
-        probe=_bits(glyph)
-        ranked=sorted((min((probe ^ ref).bit_count() for ref in refs),digit)
-                      for digit,refs in _alphabet().items())
-        if ranked[0][0]>8 or ranked[1][0]-ranked[0][0]<7:
-            if not allow_unknown:
-                return None
-            text+='?'
-        else:
-            text+=ranked[0][1]
-    if allow_unknown and '?' in text:
-        valid=re.fullmatch(r'[1-9?][0-9?]{0,2}(?:,[0-9?]{3})+',text)
-        return text if valid and any(d.isdigit() for d in text) else None
-    return text if re.fullmatch(r'[1-9]\d{0,2}(?:,\d{3})+',text) else None
-
-
-def same_printed_price(left,right):
-    # Exact at equal precision. A finer quote must round to the coarser label.
-    coarse,fine=sorted((number(left),number(right)),key=lambda item:item[1],reverse=True)
-    unit=(2*coarse[1]).normalize()
-    return fine[0].quantize(unit,rounding=ROUND_HALF_UP)==coarse[0]
-
-
-def axis_scale_live(image,box,bounds,marks,*,panel_reference=None):
-    """Prefer DOM/Canvas marks and use the clean price pixels only when needed."""
-    if panel_reference is not None and (not isinstance(panel_reference,str)
-            or len(panel_reference)>40 or not re.fullmatch(PRICE,panel_reference)):
-        return None
-    left,top,right,bottom=bounds
+def axis_scale_live(image,box,bounds,marks,*,reference=None,observe=None,timeout=TIMEOUT,cache=None):
+    """Keep all direct labels. One OCR pass can complete a partial price axis."""
+    start=time.monotonic()
+    l,t,r,b=bounds
     end=min(image.width,box[0]+box[2])
-    if not (0<=left<right<end<=image.width and 0<=top<bottom<image.height and end-right>=14):
-        return None
-    if image.mode!='RGB':
-        image=image.convert('RGB')
-    if marks:
-        scale=axis_scale(image,box,bounds,marks)
-        if scale is not None:
-            if panel_reference is not None and not same_printed_price(panel_reference,scale[0]):
-                return None
-            return scale
-    if end-right>150:
-        return None
-    # Work only on the axis to the right of the verified plot. The source's
-    # light tag is distinct from its light-on-dark ordinary price ticks.
-    strip=image.crop((right+1,top,end,bottom+1)).convert('L')
-    bright=strip.point(lambda p:255 if p>178 else 0)
-    light_rows=[bright.crop((0,y,strip.width,y+1)).histogram()[255]>strip.width*.35 for y in range(strip.height)]
-    bands=[(a,b) for a,b in _runs(light_rows) if 5<=b-a<=min(45,strip.height*.15)]
-    if len(bands)!=1:
-        return None
-    y0,y1=bands[0]
-    visible=bright.crop((0,y0,strip.width,y1)).getbbox()
-    x0,x1=visible[0]+3,visible[2]-3
-    if x0>=x1 or y1-y0<10:
-        return None
-    tag=strip.crop((x0,y0+3,x1,y1-3)).point(lambda p:255 if p<120 else 0)
-    reference=_printed(tag,allow_unknown=panel_reference is not None)
-    if not reference:
-        return None
-    if panel_reference is not None:
-        # Measure's scoped Reference (last price) supplies the number. Require
-        # the tag's punctuation and all readable digits to agree at its printed
-        # precision. Unknown digits alone never determine a price. The grid and
-        # dashed-line evidence are still verified by axis_scale below.
-        panel_value,_=number(panel_reference)
-        displayed=format(panel_value.to_integral_value(rounding=ROUND_HALF_UP),',f')
-        if len(displayed)!=len(reference) or any(
-                glyph!='?' and glyph!=expected for glyph,expected in zip(reference,displayed)):
+    audit=dict(method='dom_canvas',ocr_calls=0,plot_rect=list(bounds),
+               raw_direct_reference=reference,condition='axis_geometry_invalid')
+    def report(labels):
+        return [dict(text=text,x=x,y=y) for text,x,y in labels]
+    try:
+        if not (0<=l<r<end and end-r>=14 and 0<=t<b<image.height):
             return None
-        if '?' in reference:
-            reference=displayed
-    mid_x=(right+1+end)/2
-    decoded=[(reference,mid_x,top+(y0+y1-1)/2)]
-    ink=strip.point(lambda p:255 if p>66 else 0)
-    ImageDraw.Draw(ink).rectangle((0,y0-3,strip.width,y1+3), fill=0)
-    for a,b in _runs(ink.crop((0,y,ink.width,y+1)).getbbox() is not None for y in range(ink.height)):
-        if not 8<=b-a<=14:
-            continue
-        raw=_printed(ink.crop((0,a,ink.width,b)))
-        if raw:
-            # Tick centres use the printed digit baseline, excluding the comma's tail.
-            decoded.append((raw,mid_x,top+a+4.5))
-    # The original verifier requires ≥4 linear ticks spanning ≥60% of the
-    # plot, the independently printed tag at its predicted y, and a dashed
-    # plot line there. Any contradictory retained DOM mark remains decisive.
-    return axis_scale(image,box,bounds,[*marks,*decoded])
+        direct=_market_marks(marks,bounds,end)
+        audit['direct_marks']=report(direct)
+        scale=axis_scale(image,box,bounds,direct,reference=reference,audit=audit)
+        if scale is not None or audit['condition'] not in ('reference_missing','ticks_insufficient','tick_span_insufficient'):
+            return scale
+        if end-r>150 or b-t>4096:
+            audit['condition']='axis_crop_outside_budget'
+            return None
+        audit['method']='tesseract'
+        strip=image.crop((r+1,t,end,b+1)).convert('L')
+        key=(strip.size,sha256(strip.tobytes()).digest()) if cache is not None else None
+        if cache is not None and key in cache:
+            local=cache[key]
+            audit['ocr_cache_hit']=True
+        else:
+            local,error=_ocr_marks(strip,min(TIMEOUT,timeout),audit)
+            if error:
+                audit['condition']=error
+                return None
+        optical=[(text,r+1+x,t+y) for text,x,y in local]
+        audit['ocr_marks']=report(optical)
+        scale=axis_scale(image,box,bounds,[*direct,*optical],reference=reference,audit=audit)
+        # Memoize transcription only. Every observation rechecks all direct
+        # marks, tag position, calibrated ticks and the current plotted line.
+        if scale is not None and cache is not None and key not in cache:
+            cache.clear()
+            cache[key]=local
+        return scale
+    finally:
+        if observe:
+            audit['elapsed_ms']=round(1000*(time.monotonic()-start))
+            observe(audit)

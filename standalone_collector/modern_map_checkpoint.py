@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -31,6 +32,72 @@ EXPIRE_IMAGES = """UPDATE public.ai_collection_bridge_evidence AS e SET image_pn
         (SELECT 1 FROM public.ai_collection_bridge_jobs j WHERE j.id=e.job_id AND j.status='ready'))"""
 
 
+def _numeric_price_receipt(step):
+    """Allow only printed axis numbers and chart geometry, never arbitrary OCR text."""
+    from modern_map_evidence import PRICE
+    def price(value):
+        return isinstance(value,str) and len(value)<=40 and value.isascii() and re.fullmatch(PRICE,value)
+    def coordinate(value):
+        return type(value) in (float,int) and -32768<=value<=32768
+    receipt={'status':step['status']}
+    for key in ('reference','raw_direct_reference','opening_reference','closing_reference'):
+        if key in step and (step[key] is None or price(step[key])):
+            receipt[key]=step[key]
+    for key in ('ticks','direct_marks','ocr_marks'):
+        if isinstance(step.get(key),list):
+            receipt[key]=[{axis:m[axis] for axis in ('text','x','y') if axis in m}
+                          for m in step[key][:1600] if isinstance(m,dict) and price(m.get('text'))
+                          and coordinate(m.get('y')) and ('x' not in m or coordinate(m['x']))]
+    if isinstance(step.get('reference_candidates'),list):
+        receipt['reference_candidates']=[value for value in step['reference_candidates'][:1600] if price(value)]
+    if type(step.get('ocr_cache_hit')) is bool:
+        receipt['ocr_cache_hit']=step['ocr_cache_hit']
+    if step.get('method') in ('dom_canvas','tesseract'):
+        receipt['method']=step['method']
+    for key in ('tag_y','tick_residual','tag_residual'):
+        if key in step and (step[key] is None or coordinate(step[key])):
+            receipt[key]=step[key]
+    if isinstance(step.get('tag_bands'),list):
+        receipt['tag_bands']=[list(v) for v in step['tag_bands'][:1600] if isinstance(v,(tuple,list))
+                              and len(v)==2 and all(coordinate(n) for n in v)]
+    rect=step.get('plot_rect')
+    if isinstance(rect,(list,tuple)) and len(rect)==4 and all(coordinate(v) for v in rect):
+        receipt['plot_rect']=list(rect)
+    for key in ('ocr_calls','elapsed_ms','ocr_elapsed_ms','timeout_ms','exit_code'):
+        value=step.get(key)
+        if (type(value) in (int,float) and -255<=value<=3600000) or (key=='exit_code' and key in step and value is None):
+            receipt[key]=value
+    if step.get('condition') in ('verified','axis_geometry_invalid','tag_missing_or_ambiguous','reference_conflict',
+            'reference_missing','tick_position_conflict','ticks_insufficient','tick_span_insufficient',
+            'axis_position_conflict','axis_crop_outside_budget','reference_line_missing','ocr_process_failed','ocr_timed_out','ocr_runtime_unavailable'):
+        receipt['condition']=step['condition']
+    return receipt
+
+
+def _comparison_operand(operand):
+    """Preserve the operands of a failed epoch comparison, limited to typed market fields."""
+    from modern_map_overview import _FIELDS
+    keys={*_FIELDS,'source_time','column_time','reference','sidebar_levels','raw_sidebar_rows','unreadable_sidebar_containers',
+          'duplicate_sidebar_levels','ambiguous_fields','raw_price','raw_value','raw_distance_pct','display_values',
+          'chart_regions','chart_groups','sidebar_rows','native_bins_inspected','side','colour','prices'}
+    token=re.compile(r'(?:\$?\s*[+−-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:[KMBT%]|s|m|h|min|minutes?)?'
+                     r'|\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z)')
+    def project(value,depth=0):
+        if depth>5:
+            return None
+        if isinstance(value,dict):
+            return {k:project(v,depth+1) for k,v in value.items() if k in keys}
+        if isinstance(value,list):
+            return [project(item,depth+1) for item in value[:1600]]
+        if type(value) in (int,float) and math.isfinite(value):
+            return value
+        if isinstance(value,str) and len(value)<=64 and (token.fullmatch(value)
+                or value in {*keys,'above','below','green','yellow','blue','sidebar_shape'}):
+            return value
+        return None
+    return project(operand)
+
+
 def _observation_receipts(stages):
     receipts = {}
     iso_utc = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z'
@@ -40,7 +107,19 @@ def _observation_receipts(stages):
                     **{'post_failure_raw_'+k:amount for k in ('total','above_total','below_total')}}
     for step in stages:
         name, status = step.get('name'), step.get('status')
-        if name == 'post_failure_market_observation' and status in ('observed','unavailable','stale_or_unverified_time'):
+        if name in ('basic_opening_price_readout','basic_closing_price_readout') and status in ('observed','failed'):
+            receipts[name]=_numeric_price_receipt(step)
+        elif name in ('basic_start_observation','basic_end_observation') and status=='ok':
+            receipts[name]=_comparison_operand(step)
+        elif name in ('basic_compare_reference','basic_compare_column','basic_compare_regions','basic_compare_market') and status=='failed':
+            receipts[name]={k:_comparison_operand(step.get(k)) for k in ('expected','received')}
+        elif name in ('opening_column_from_visible_crosshair','closing_column_from_visible_crosshair',
+                      'opening_column_from_visible_tooltip','closing_column_from_visible_tooltip') and status=='ok':
+            value=step.get('source_timestamp')
+            if isinstance(value,str) and re.fullmatch(r'\d{1,2}/\d{1,2} \d{1,2}:\d{2}',value):
+                receipts[name]={'source_timestamp':value, **{k:step[k] for k in ('pointer_x','pointer_y')
+                                if type(step.get(k)) is int and 0<=step[k]<32768}}
+        elif name == 'post_failure_market_observation' and status in ('observed','unavailable','stale_or_unverified_time'):
             receipts[name] = {'status':status, **{k:step[k] for k,pattern in clock_fields.items() if k in step
                 and (step[k] is None or isinstance(step[k],str) and len(step[k])<=40 and re.fullmatch(pattern,step[k]))}}
         elif name == 'basic_native_domain_readout' and status == 'observed':
@@ -107,9 +186,12 @@ def partial_record(job, overview, hovers, stages, error, image_path):
     safe = re.compile(r'[a-zA-Z0-9_]{1,100}\Z')
     failed = [row for row in stages if row.get('status')=='failed']
     last = failed[-1] if failed else {}
-    condition = next((token for token in (getattr(error,'reason',None),last.get('condition'),getattr(error,'code',None),
+    condition = next((token for token in (getattr(error,'basic_reason',None),last.get('condition'),getattr(error,'reason',None),getattr(error,'code',None),
                                          type(error).__name__) if isinstance(token,str) and safe.fullmatch(token)), 'reader_failed')
-    failure = {k:last[k] for k in ('name','expected','received','missing','elapsed_ms') if k in last}
+    failure = {k:last[k] for k in ('name','missing','elapsed_ms') if k in last}
+    for key in ('expected','received'):
+        if key in last:
+            failure[key]=_comparison_operand(last[key])
     failure['condition'] = condition
     detail = _measure_detail(last.get('details'))
     if detail is not None:
@@ -188,8 +270,9 @@ class CheckpointStore:
                 digest = hashlib.sha256(image).hexdigest()
                 _identity(source,self.job,digest)
                 from modern_map_task import numeric_result, same_basic_with_enrichment
-                numeric_result(source['snapshot'],self.job,image)
-                if previous and previous.get('source') == source:
+                restored=previous is not None and previous.get('source')==source
+                numeric_result(source['snapshot'],self.job,image,restored=restored)
+                if restored:
                     return
                 if action == b'U':
                     if not previous or not same_basic_with_enrichment(previous['source']['snapshot'],source['snapshot']):

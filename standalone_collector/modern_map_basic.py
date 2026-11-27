@@ -15,7 +15,7 @@ from playwright.sync_api import Error as BrowserError
 import modern_map_reader as ui
 from model1_execution import StageFailure
 from modern_map_axis import axis_marks
-from modern_map_axis_ocr import axis_scale_live, same_printed_price
+from modern_map_axis_ocr import axis_scale_live
 from modern_map_cells import _agree, merge_cells
 from modern_map_basic_numbers import market_amounts, period_seconds
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
@@ -43,12 +43,16 @@ def identity(page, symbol, model, timeframe):
             and ui.full_intensity(page),'colour_or_intensity_changed')
 
 
-def prove_observations(before, after):
+def prove_observations(before, after, emit=None):
     # Compare dates and numerical source fields, including the entire visible
     # rail. Unlike a number-only total, this also detects changed row content.
     for key in (*_FIELDS,'source_time','sidebar_levels','raw_sidebar_rows','unreadable_sidebar_containers',
                 'ambiguous_fields','duplicate_sidebar_levels'):
-        require(before.get(key)==after.get(key),'source_epoch_or_values_changed')
+        if before.get(key)!=after.get(key):
+            if emit:
+                emit('stage',dict(name='basic_compare_market',status='failed',
+                    expected={key:before.get(key)},received={key:after.get(key)}))
+            require(False,'source_epoch_or_values_changed')
     ui.core_observation(after)
 
 
@@ -80,38 +84,6 @@ def edge_open(surface,bounds,box,*,include_time=False):
     return True
 
 
-def from_native_box(page, bounds, side, *, observe=None, chart_axis=None):
-    """Read the published Right-edge panel without equating a visible box to market-wide coverage."""
-    _,top,_,bottom=bounds
-    result=ui.measure_box(page,bounds,top+.2,bottom-.2,require_leader=False)
-    raw_ref,raw_box,_,low,high=result
-    box_value,box_error=number(raw_box,True)
-    above,above_error=number(side['raw_above_total'],True)
-    below,below_error=number(side['raw_below_total'],True)
-    delta=abs(box_value-above-below)
-    tolerance=box_error+above_error+below_error
-    raw_low,raw_high=result.raw_bounds
-    if observe:
-        observe('stage',dict(name='basic_native_domain_readout',status='observed',source_time=side['source_time'],
-            count_mode='Right edge',plot_rect=list(bounds),raw_box_total=raw_box,raw_market_total=side['raw_total'],
-            raw_above_total=side['raw_above_total'],raw_below_total=side['raw_below_total'],raw_reference=raw_ref,
-            raw_price_low=raw_low,raw_price_high=raw_high,absolute_delta=format(delta,'f'),
-            rounding_tolerance=format(tolerance,'f'),totals_match=delta<=tolerance))
-    ref=number(raw_ref)[0]
-    require(low<ref<high,'measured_reference_outside_domain')
-    if delta>tolerance:
-        # These endpoints alone cannot establish full market coverage. A
-        # complete calibration from printed chart ticks is independent of
-        # both Box total and Box bounds. Only its own coordinate mapping is used.
-        scale=chart_axis(raw_ref) if chart_axis is not None else None
-        require(scale is not None,'native_box_total_conflict_axis_unverified')
-        require(same_printed_price(scale[0],raw_ref),'measured_reference_conflicts_with_chart')
-        return scale,'native_reference_on_chart_axis'
-    def where(price):
-        return bottom-.2-(price-float(low))*(bottom-top-.4)/float(high-low)
-    return (raw_ref,where),'measure_domain'
-
-
 def source_screen(page, box, padded_size, guard):
     x,y,w,h=box
     data=ui.protected_clip(page,{'x':x,'y':y,'width':w,'height':h},guard)
@@ -133,9 +105,16 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
     def verify(stamp):
         actual=read_epoch(stamp,iso(column))
         if opening:
-            require(0<=(column-actual).total_seconds()<=period_seconds(period),'latest_column_not_within_period')
+            valid=0<=(column-actual).total_seconds()<=period_seconds(period)
+            condition='latest_column_not_within_period'
         else:
-            require(actual==column,'closing_column_changed')
+            valid=actual==column
+            condition='closing_column_changed'
+        if not valid:
+            emit('stage',dict(name='basic_compare_column',status='failed',
+                expected={'source_time' if opening else 'column_time':iso(column),'raw_column_period':period},
+                received={'column_time':iso(actual)}))
+            require(False,condition)
     _,top,right,bottom=bounds
     x,y=right-1,(top+bottom)//2
     try:
@@ -344,27 +323,28 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                 require(0<(column-previous).total_seconds()<=12*3600 and
                         column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
                 marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,initial_marks))
-                scale=stage('basic_verified_price_axis',lambda:axis_scale_live(screen,box,bounds,marks))
-                source_method='chart_axis'
-                if scale is None:
-                    def independent_axis(panel_ref):
-                        same_document()
-                        require(ui.chart_box(page)==box,'chart_geometry_changed')
-                        return axis_scale_live(screen,box,bounds,marks,panel_reference=panel_ref)
-                    with ui.map_access_budget(ui.limited_timeout(4000)/1000):
-                        scale,source_method=stage('basic_native_price_domain',lambda:from_native_box(
-                            page,bounds,side,observe=emit,chart_axis=independent_axis if base_only else None))
-                    ui.select_choice(page,'Pan')
+                ocr_cache={}
+                def read_axis(phase,frame,chart,plot,labels,reference):
+                    receipt={}
+                    result=None
+                    try:
+                        result=axis_scale_live(frame,chart,plot,labels,reference=reference,observe=receipt.update,
+                                              timeout=ui.limited_timeout(10000)/1000,cache=ocr_cache)
+                    finally:
+                        emit('stage',dict(name='basic_'+phase+'_price_readout',status='observed' if result else 'failed',
+                                          **receipt))
+                    require(result is not None,receipt.get('condition','axis_unverified'))
+                    return result,receipt.get('method','dom_canvas')
+                scale,source_method=stage('basic_verified_price_axis',lambda:read_axis(
+                    'opening',screen,box,bounds,marks,side.get('raw_last_price')))
                 raw_ref,where=scale
-                if side['raw_last_price']:
-                    require(number(raw_ref)[0]==number(side['raw_last_price'])[0],'reference_price_conflict')
                 regions,native_bins,bin_height=stage('basic_classify_latest_edge',lambda:right_edge_regions(
                     screen,bounds,side,scale,model))
                 start=dict(source_time=side['source_time'],column_time=iso(column),raw_last_price=raw_ref,
                            raw_total=side['raw_total'],raw_above_total=side['raw_above_total'],
                            raw_below_total=side['raw_below_total'],sidebar_rows=len(side['sidebar_levels']),
                            chart_regions=len(regions),native_bins_inspected=native_bins)
-                emit('stage',dict(name='basic_start_observation',status='ok',reference_method=source_method,**start))
+                emit('stage',dict(name='basic_start_observation',status='ok',reference_method=source_method,chart_groups=regions,**start))
 
                 def closing_arguments(prefix=''):
                     def record(name,fn):
@@ -399,24 +379,38 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                 page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period')))
                             require(read_epoch(close_time,side['source_time'])==column,'closing_column_changed')
                             end_marks=axis_marks(page,closing_box,prior_marks if box==closing_box else [],close_marks)
-                            end_scale=record('basic_closing_price_axis',lambda:axis_scale_live(final,closing_box,closing_bounds,end_marks))
-                            if end_scale is None:
-                                # Reuse the independently proven opening mapping only
-                                # if the complete right-axis band is byte-identical.
-                                l,t,r,b=closing_bounds
-                                dx,dy=l-left,t-top
-                                require((right+dx,bottom+dy)==(r,b),'closing_price_domain_changed')
-                                with screen.crop((right+1,top,box[0]+box[2],bottom+1)) as a, final.crop(
-                                        (r+1,t,closing_box[0]+closing_box[2],b+1)) as end_axis:
-                                    require(a.size[0]>=14 and a.size==end_axis.size and a.tobytes()==end_axis.tobytes(),
-                                            'closing_axis_unverified')
-                                end_scale=(raw_ref,lambda p:where(p)+dy)
-                            require(number(end_scale[0])[0]==number(raw_ref)[0],'closing_reference_changed')
-                            final_regions,final_bins,_=right_edge_regions(final,closing_bounds,side,end_scale,model)
-                            require(final_regions==regions and final_bins==native_bins,'closing_significant_regions_changed')
+                            # Collect a fresh overview after the closing image and cursor
+                            # observation. Its explicitly labeled price can supply the tag.
+                            after=record('recheck_market_update',lambda:overview(page))
+                            record('basic_verify_closing_market',lambda:prove_observations(side,after,emit))
+                            end_scale,_=record('basic_closing_price_axis',lambda:read_axis(
+                                'closing',final,closing_box,closing_bounds,end_marks,after.get('raw_last_price')))
+                            if number(end_scale[0])[0]!=number(raw_ref)[0]:
+                                emit('stage',dict(name='basic_compare_reference',status='failed',
+                                    expected={'reference':raw_ref},received={'reference':end_scale[0]}))
+                                require(False,'closing_reference_changed')
+                            # Only the last plotted column determines significant regions.
+                            # Equal samples on the same translated scale avoid a second
+                            # classification; repainting is accepted if semantic groups agree.
+                            l,t,r,b=closing_bounds
+                            step=float(number(side['raw_price_step'])[0])
+                            ref=float(number(raw_ref)[0])
+                            dy=t-top
+                            same_grid=(b-t==bottom-top and where(ref)+dy==end_scale[1](ref)
+                                       and where(ref+step)+dy==end_scale[1](ref+step))
+                            def edge_bytes(image,x,y1,y2):
+                                with image.crop((x-1,y1,x,y2+1)) as stripe:
+                                    return stripe.tobytes()
+                            if same_grid and edge_bytes(screen,right,top,bottom)==edge_bytes(final,r,t,b):
+                                emit('stage',dict(name='basic_closing_regions',status='reused'))
+                            else:
+                                final_regions,final_bins,_=right_edge_regions(final,closing_bounds,side,end_scale,model)
+                                if final_regions!=regions or final_bins!=native_bins:
+                                    emit('stage',dict(name='basic_compare_regions',status='failed',
+                                        expected=dict(chart_regions=regions,native_bins_inspected=native_bins),
+                                        received=dict(chart_regions=final_regions,native_bins_inspected=final_bins)))
+                                    require(False,'closing_significant_regions_changed')
                             require(ui.chart_box(page)==closing_box,'closing_geometry_changed_at_pointer')
-                    after=record('recheck_market_update',lambda:overview(page))
-                    record('basic_verify_closing_market',lambda:prove_observations(side,after))
                     record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
                     same_document()
                     end=dict(start,source_time=after['source_time'],column_time=iso(read_epoch(close_time,after['source_time'])),
