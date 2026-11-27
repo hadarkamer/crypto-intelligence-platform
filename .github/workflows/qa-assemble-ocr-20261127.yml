@@ -1,0 +1,44 @@
+name: Assemble pinned CoinGlass OCR release
+on:
+  push:
+    branches: [qa/coinglass-ocr-archive-20261127]
+    paths: ['.github/workflows/qa-assemble-ocr-20261127.yml', '.github/qa-ocr-chunks-20261127/**']
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['.github/workflows/qa-assemble-ocr-20261127.yml']
+permissions: {}
+jobs:
+  package:
+    if: github.repository == 'hadarkamer/crypto-intelligence-platform' && (github.ref == 'refs/heads/qa/coinglass-ocr-archive-20261127' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/coinglass-ocr-archive-20261127'))
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/qa-ocr-chunks-20261127
+      - name: Verify immutable archive and store Git blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          pieces=sorted(Path('.github/qa-ocr-chunks-20261127').glob('*.part'))
+          assert [p.name for p in pieces]==[f'{n:03d}.part' for n in range(65)]
+          payload=b''.join(p.read_bytes() for p in pieces)
+          assert len(payload)==14231500
+          digest=hashlib.sha256(payload).hexdigest()
+          assert digest=='519c5c84f19de3f6b49d45bb50389b9aee1aeb1b5282fd3bf5de71303ec95352'
+          expected=hashlib.sha1(b'blob '+str(len(payload)).encode()+b'\x00'+payload).hexdigest()
+          assert expected=='4ecb140cf80a9fefe3fed3460db38aea2dc4e788'
+          data=json.dumps({'encoding':'base64','content':base64.b64encode(payload).decode()}).encode()
+          headers={'Authorization':'Bearer '+os.environ.pop('GH_TOKEN'),'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'}
+          url='https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/blobs'
+          with urllib.request.urlopen(urllib.request.Request(url,headers=headers,data=data,method='POST'),timeout=70) as response:
+              actual=json.load(response)['sha']
+          assert actual==expected
+          print('Verified Git blob',actual,'SHA-256',digest,'bytes',len(payload))
+          PY
