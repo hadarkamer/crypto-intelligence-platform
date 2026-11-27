@@ -152,7 +152,7 @@ def create_app():
     async def health(request):
         from prominent_levels import SELECTION_POLICY, CONTRACT
         from store_diagnostics import store_readiness
-        if request.path == '/health' and request.query.get('fixed_cycle') == 'btc-eth':
+        if request is not None and request.path == '/health' and request.query.get('fixed_cycle') == 'btc-eth':
             import scoped_http
             ready = await asyncio.to_thread(store_readiness, store)
             return await scoped_http.capabilities(request, active, ready['ready'])
