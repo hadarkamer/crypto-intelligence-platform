@@ -1,108 +1,73 @@
-name: Check standalone heatmap collector
-
+name: Verify packaged BTC numeric reader in isolated Debian 12 runtime
 on:
   pull_request:
-    branches:
-      - app/model1-standalone-20260915
-    paths:
-      - standalone_collector/**
-      - collection_bridge.py
-      - collection_model1_task.py
-      - market_vision/coinglass_heatmap_capture.py
-      - market_vision/openai_heatmap_scanner.py
-      - .github/workflows/standalone-heatmap-check.yml
-  push:
-    branches:
-      - app/model1-standalone-20260915
-    paths:
-      - standalone_collector/**
-      - collection_bridge.py
-      - collection_model1_task.py
-      - market_vision/coinglass_heatmap_capture.py
-      - market_vision/openai_heatmap_scanner.py
-      - .github/workflows/standalone-heatmap-check.yml
-  workflow_dispatch:
-    inputs:
-      hover_source_check:
-        description: Run one source-only pass of all nine maps (no AI or app writes)
-        type: boolean
-        default: false
-
+    types: [opened]
+    branches: [fix/coinglass-btc-tesseract-20261127]
 permissions:
   contents: read
-
 jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    env:
-      OPENAI_API_KEY: ""
-      DATABASE_URL: ""
-      COINGLASS_STORAGE_STATE_JSON: ""
-      COINGLASS_COOKIE_HEADER: ""
-      COLLECTION_BRIDGE_ENABLED: "false"
-      PYTHONUTF8: "1"
+  packaged-offline:
+    if: github.event.pull_request.draft && github.head_ref == 'qa/coinglass-tesseract-bookworm-i-20261127' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install collector test dependencies
-        run: >-
-          python -m pip install
-          'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3'
-          'playwright==1.55.0' 'Pillow==12.3.0' 'pycryptodome==3.21.0'
-      - name: Install synthetic DOM test browser
-        run: python -m playwright install --with-deps chromium
-      - name: Provide local database and Chromium for managed-session fixtures
-        shell: bash
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Confirm product identity
+        env:
+          PRODUCT_SHA: e2b91677a016a7fe5dcc721d41b7ebd288b250f8
         run: |
           set -euo pipefail
-          npm install --silent --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coinglass-test" @electric-sql/pglite@0.5.13
-          echo "PGLITE_MODULE=$RUNNER_TEMP/coinglass-test/node_modules/@electric-sql/pglite" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/coinglass-test/bin"
-          python - <<'PYTEST'
-          from pathlib import Path
-          import os
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as playwright:
-              target = Path(playwright.chromium.executable_path)
-              assert target.is_file()
-              (Path(os.environ["RUNNER_TEMP"]) / "coinglass-test/bin/chromium").symlink_to(target)
-          PYTEST
-          echo "$RUNNER_TEMP/coinglass-test/bin" >> "$GITHUB_PATH"
-          pg_config --bindir >> "$GITHUB_PATH"
-      - name: Prepare actual runtime and run collector contracts
-        env:
-          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
+          test "$(git rev-parse HEAD^)" = "$PRODUCT_SHA"
+          git diff --exit-code HEAD^ HEAD -- . ':!.github' || exit 1
+      - name: Prepare matching Python runtime with ordinary collector wheels
         run: |
-          /opt/google/chrome/chrome --version
-          python standalone_collector/prepare.py
-      - name: Check the dedicated account flow against synthetic pages and a private test database
-        working-directory: standalone_collector
-        env:
-          COINGLASS_QA_USE_SYSTEM_CHROME: "1"
+          set -euo pipefail
+          docker build --platform=linux/amd64 -t decision-hub-ocr-test - <<'CONTAINER'
+          FROM python:3.12-slim-bookworm
+          RUN python -m pip install --no-cache-dir Pillow==12.3.0 playwright==1.55.0 requests==2.32.5 pycryptodome==3.21.0 'psycopg[binary]==3.2.3'
+          CONTAINER
+      - name: Test the actual package, source crop and failure behavior offline
         run: |
-          export COINGLASS_TEST_POSTGRES_BIN="$(pg_config --bindir)"
-          python -m unittest discover -v -p 'test_dedicated*.py'
-      - name: Exercise protected-map fixture and restart the browser against saved local state
-        working-directory: standalone_collector
-        run: python -m unittest test_session_browser_restart test_collection_metrics -v
-      - name: Verify read-only startup and source configuration checks
-        working-directory: standalone_collector
-        run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v
-      - name: Check whitespace
-        run: git diff --check
-      - name: Explicit source-only hover acceptance
-        # Source access is deliberate; PR checks and reruns never start scans.
-        if: >-
-          github.run_attempt == 1 &&
-          github.event_name == 'workflow_dispatch' && inputs.hover_source_check
-        run: python standalone_collector/hover_source_check.py --output hover-source-evidence
-      - name: Retain source check evidence
-        if: always() && hashFiles('hover-source-evidence/summary.json') != ''
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reader-out"
+          docker run --rm -i --user "$(id -u):$(id -g)" --platform=linux/amd64 --network=none --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=64 --memory=2g --cpus=1 \
+            -v "$GITHUB_WORKSPACE/standalone_collector:/source:ro" -v "$RUNNER_TEMP/reader-out:/out" -w /tmp decision-hub-ocr-test /bin/sh -es <<'OFFLINE'
+          . /etc/os-release
+          [ "$ID" = debian ] && [ "$VERSION_ID" = 12 ]
+          [ "$(uname -m)" = x86_64 ]
+          test -x /usr/bin/prlimit
+          if command -v tesseract; then exit 1; fi
+          mkdir /tmp/reader
+          cp -R /source/. /tmp/reader/
+          cd /tmp/reader
+          python prepare_ocr_runtime.py
+          ./ocr_runtime/tesseract --version
+          ./ocr_runtime/tesseract --list-langs
+          python -m unittest -v test_modern_map_axis_ocr test_modern_map_basic_reader test_modern_map_basic_numbers
+          python - <<'PY'
+          import json,platform,hashlib,pathlib
+          from PIL import Image
+          from modern_map_axis_ocr import axis_scale_live
+          source=pathlib.Path('fixtures/btc_12h_1841_axis_edge.png')
+          observation={}
+          with Image.open(source) as image:
+              calibrated=axis_scale_live(image,(0,0,140,774),(0,0,65,773),[],observe=observation.update)
+          assert calibrated and calibrated[0]=='60,588' and observation['ocr_calls']==1
+          assert len(observation['ticks'])==11
+          rows=observation['ticks']
+          evidence={'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'reference':calibrated[0],'ticks':rows,'ocr_calls':observation['ocr_calls'],'arch':platform.machine(),'os':platform.freedesktop_os_release()['PRETTY_NAME'],'python':platform.python_version(),'english':'eng','network':'none','tesseract':'5.5.0'}
+          pathlib.Path('/out/debian12-offline.json').write_text(json.dumps(evidence,indent=2))
+          print(json.dumps(evidence))
+          PY
+          OFFLINE
+      - name: Retain offline readiness receipt
         uses: actions/upload-artifact@v4
         with:
-          name: hover-source-evidence
-          path: hover-source-evidence
-          retention-days: 7
+          name: debian12-btc-ocr-readiness
+          path: ${{ runner.temp }}/reader-out/debian12-offline.json
+          if-no-files-found: error
+          retention-days: 14
