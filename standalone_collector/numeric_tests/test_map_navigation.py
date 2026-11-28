@@ -83,7 +83,7 @@ class NavigationTests(TestCase):
         with ExitStack() as stack:
             mocks = dict(wait_for=wait, choice_target=Mock(return_value=True), prefer_dark=Mock(),
                 select_choice=select, choice=choice, visible=lambda values:values,
-                symbol_control=Mock(return_value=True), option_control=range_control, details=side,
+                symbol_control=Mock(return_value=True), option_control=range_control, _settling_details=side,
                 rail_anchor=lambda p:50*p.rail_model, _rendered_chart=lambda p,g:bytes([10*p.plot_model])*2304,
                 select_range=select_range)
             for name, fn in mocks.items():

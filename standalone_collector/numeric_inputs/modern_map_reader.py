@@ -304,23 +304,62 @@ def select_option(page, name, value):
     wait_for(page,selected)
 
 
+_OVERVIEW_TITLES = ('Open liquidation levels (total)', 'Longs (below price)',
+                    'Shorts (above price)', 'Price step / column period')
+_UPDATED_TEXT = re.compile(r'^Updated\s+\d{2}:\d{2}$', re.I)
+
+# Extract each metric from its own nearest card/row.
+_CARD_TEXT = """el => {
+  const title = el.innerText.trim();
+  for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+    const text = p.innerText.trim();
+    if (text !== title && /[0-9]/.test(text.slice(title.length))) return text;
+  }
+  return '';
+}"""
+
+
 def details(page):
-    # Restrict account-independent observations to chart controls and the two
-    # market sidebars. Collect each metric within its own nearest card/row.
-    def field(title):
-        el = label(page,title)
-        return el.evaluate("""el => {
-          const title=el.innerText.trim();
-          for(let p=el.parentElement;p && p!==document.body;p=p.parentElement){
-            const text=p.innerText.trim();
-            if(text!==title && /[0-9]/.test(text.slice(title.length))) return text;
-          }
-          return '';
-        }""")
-    fields = [field(k) for k in ('Open liquidation levels (total)','Longs (below price)',
-                                'Shorts (above price)','Price step / column period')]
-    updated = one(page.get_by_text(re.compile(r'^Updated\s+\d{2}:\d{2}$',re.I))).inner_text()
-    return observation('\n'.join(fields + [updated]),datetime.now(timezone.utc))
+    fields = [label(page, title).evaluate(_CARD_TEXT) for title in _OVERVIEW_TITLES]
+    updated = one(page.get_by_text(_UPDATED_TEXT)).inner_text()
+    return observation('\n'.join(fields + [updated]), datetime.now(timezone.utc))
+
+
+_STABLE_OVERVIEW = """(elements, titles) => {
+  if (elements.length !== titles.length + 1 || elements.includes(document.documentElement)) return null;
+  const cardText = """ + _CARD_TEXT + """;
+  const updatedText = /""" + _UPDATED_TEXT.pattern + """/i;
+  const cards = new Map();
+  let updated = null;
+  for (const element of elements) {
+    const text = element.innerText;
+    const title = text.trim();
+    if (titles.includes(title)) {
+      if (cards.has(title)) return null;
+      cards.set(title, cardText(element));
+    } else {
+      if (updated !== null || !updatedText.test(title)) return null;
+      updated = text;
+    }
+  }
+  if (cards.size !== titles.length || updated === null) return null;
+  return [...titles.map(title => cards.get(title)), updated];
+}"""
+
+
+def _settling_details(page):
+    # Resolve the existing exact text and visibility selectors in one browser snapshot.
+    limited_timeout(3000)
+    fields = page.get_by_text(_UPDATED_TEXT)
+    for title in _OVERVIEW_TITLES:
+        fields = fields.or_(page.get_by_text(title, exact=True))
+    # visible() scans at most 60 matches per selector. For larger combined sets,
+    # include the document root in this same snapshot and use the original bounded reads.
+    overflow = page.locator('html').filter(has=fields.nth(60))
+    values = fields.filter(visible=True).or_(overflow).evaluate_all(_STABLE_OVERVIEW, _OVERVIEW_TITLES)
+    if values is None:
+        return details(page)
+    return observation('\n'.join(values), datetime.now(timezone.utc))
 
 
 def prefer_dark(page):
@@ -418,7 +457,7 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None, observe=Non
         if requested and guard:
             guard()
         check(visible(page.get_by_text('Market overview',exact=True)))
-        side = details(page)
+        side = _settling_details(page)
         level = rail_anchor(page)
         plot = _rendered_chart(page, guard if requested else lambda:check_route((url,)))
         trace.update(plot_populated=plot is not None, source_time=side['source_time'])

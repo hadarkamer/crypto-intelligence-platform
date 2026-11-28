@@ -107,7 +107,7 @@
     },
     "modern_map_reader.py": {
       "path": "numeric_inputs/modern_map_reader.py",
-      "sha256": "26d1278ff2cc852b8ae72c33c5d8411cf28e2bc3ff51a0775e800be3099b70fa"
+      "sha256": "2e38ecca31d9a5f83f6b1cbfb8902dca94e035b3af4180988fbec00026215857"
     },
     "modern_map_surface.py": {
       "path": "numeric_inputs/modern_map_surface.py",
