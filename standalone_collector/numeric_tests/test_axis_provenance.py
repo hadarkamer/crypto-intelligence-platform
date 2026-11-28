@@ -87,18 +87,14 @@ class PriceAxisProvenanceTests(TestCase):
         args = (Mock(), self.box, self.bounds, source, Mock(), Mock())
         kw = dict(base_only=True, period='5m', opening=True)
         position = {}
-        with patch.object(basic.ui, 'read_paint', return_value=(stamp, [])) as paint:
-            basic.displayed_column(*args, pointer_position=position, **kw)
-        self.assertEqual(position['y'], paint.call_args.args[3])
-        self.assertEqual(position['y'], 95)
-        with patch.object(basic.ui, 'read_paint', side_effect=basic.StageFailure('source_not_readable')), \
-             patch.object(basic.ui, 'chart_box', return_value=self.box), patch.object(basic, 'read_tooltip') as tooltip:
-            tooltip.return_value = {'column_evidence': [{'dated_title': stamp, 'period_seconds': 300}]}
-            basic.displayed_column(*args, pointer_position=position, **kw)
-            self.assertEqual(position['y'], tooltip.call_args.args[5])
-            self.assertEqual(position['y'], 66)
-            position.clear()
-            tooltip.return_value = {'column_evidence': [{'dated_title': stamp, 'period_seconds': 600}]}
+        sample={'pointer_y':95}
+        prior={'marks':[]}
+        current={'stamp':stamp,'marks':[]}
+        with patch.object(basic,'read_cursor_pair',return_value=(prior,current,sample)):
+            basic.displayed_column(*args,pointer_position=position,timeframe='12H',**kw)
+        self.assertEqual(position['y'],sample['pointer_y'])
+        position.clear()
+        with patch.object(basic,'read_cursor_pair',side_effect=basic.StageFailure('source_not_readable')):
             with self.assertRaises(basic.StageFailure):
-                basic.displayed_column(*args, pointer_position=position, **kw)
-            self.assertEqual(position, {})
+                basic.displayed_column(*args,pointer_position=position,timeframe='12H',**kw)
+        self.assertEqual(position,{})

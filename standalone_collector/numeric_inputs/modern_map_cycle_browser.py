@@ -147,6 +147,7 @@ class SharedAccount:
         from functools import partial
         self.allowed()
         reader = partial(read_selected_map, base_only=True, observe=observe)
+        open_target = partial(open_verified_map, observe=observe)
         # Checkpoint the restored account on a protected target in the same
         # tab. No extra navigation or unsolicited second authentication.
         async def select():
@@ -156,12 +157,12 @@ class SharedAccount:
                     self.allowed()
                     if not self.checkpointed:
                         with self.observing(page):
-                            selection = await run_reader(_checked_action, open_verified_map, page, target)
+                            selection = await run_reader(_checked_action, open_target, page, target)
                             report_selection(selection)
                             await run_reader(self.account.checkpoint, self.context)
                         self.checkpointed = True
                         return
-            selection = await run_reader(_checked_action, open_verified_map, page, target)
+            selection = await run_reader(_checked_action, open_target, page, target)
             report_selection(selection)
 
         def report_selection(result):

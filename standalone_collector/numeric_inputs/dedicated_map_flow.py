@@ -1,5 +1,6 @@
 """Coordinate official-form access separately from map measurement and analysis."""
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic
 
 from dedicated_login_form import official_login_url, submit_official_login, visible_login_blocker
@@ -34,7 +35,15 @@ PROTECTED_PROBE = MapTarget('BTC', 1, '12H')
 def guard_surface(page, target):
     """Never treat a redirect, missing control, or generic HTTP failure as a sign-in request."""
     login_page = official_login_url(page.url)
-    if not login_page and page.url != map_url(target.symbol):
+    if not login_page and page.url != map_url(target.symbol, target.model):
+        # A real provider block can arrive while the same coin still shows its
+        # previous model. That map never proves access or a need to sign in.
+        if any(page.url == map_url(target.symbol, m) for m in (1, 2, 3)):
+            signal = visible_login_blocker(page)
+            if signal == 'login_rate_limited':
+                raise StageFailure('source_rate_limited')
+            if FORM_REASONS.get(signal) in HARD_BLOCKERS:
+                raise StageFailure(FORM_REASONS[signal])
         raise StageFailure('source_navigation_changed')
     blocker = visible_login_blocker(page)
     if login_page and blocker == 'login_form_visible':
@@ -72,23 +81,40 @@ def _checked_action(action, page, target, *args):
 
     try:
         return action(page, target.symbol, target.model, target.timeframe, *args, guard=guard)
-    except StageFailure as error:
-        if error.code in ('source_login_required', 'source_not_readable'):
-            guard()
-            if error.code == 'source_login_required':
-                raise StageFailure('source_not_readable') from None
-        raise
-    except Exception as error:
-        # Only an explicit gate may trigger the form. An unreachable site can
-        # leave the page at about:blank even when the requested URL is right.
-        if page.url not in ('about:blank', 'chrome-error://chromewebdata/'):
-            guard()
+    except Exception as original:
         from playwright.sync_api import Error, TimeoutError
-        if isinstance(error, TimeoutError):
-            raise StageFailure('source_timeout') from None
-        if isinstance(error, Error):
-            raise StageFailure('source_capture_failed') from None
-        raise
+        error = original
+        if isinstance(original, TimeoutError):
+            error = StageFailure('source_timeout')
+        elif isinstance(original, Error):
+            error = StageFailure('source_capture_failed')
+        if isinstance(original, StageFailure) and original.code not in ('source_login_required', 'source_not_readable'):
+            raise
+        if page.url not in ('about:blank', 'chrome-error://chromewebdata/'):
+            try:
+                guard()
+            except Exception as secondary:
+                if getattr(secondary, 'code', None) in HARD_BLOCKERS | {'source_rate_limited', 'source_login_required'}:
+                    # A positively identified shared block must still control the account.
+                    secondary.first_failure_code = getattr(error, 'code', 'source_capture_failed')
+                    raise
+                secondary_code = getattr(secondary, 'code', 'guard_unavailable')
+                if getattr(error, 'code', None) == 'source_login_required':
+                    # A second observation that cannot confirm the form must never
+                    # authorize a credential submission, including after a redirect.
+                    blocked = StageFailure('source_not_readable')
+                    blocked.first_failure_code = 'source_login_required'
+                    blocked.secondary_guard_code = secondary_code
+                    raise blocked from secondary
+                error.secondary_guard_code = secondary_code
+                raise error from secondary
+        if isinstance(error, StageFailure) and error.code == 'source_login_required':
+            # The guard could not corroborate the form: never start a login.
+            error = StageFailure('source_not_readable')
+            error.first_failure_code = 'source_login_required'
+        if error is original:
+            raise
+        raise error from original
 
 
 def _map_action(session, action, page, target, *args):
@@ -138,7 +164,7 @@ def _authenticate(session, context, page):
             # Even if the submit response was lost, observe the map before
             # deciding anything. A public 24H chart cannot verify an account.
             try:
-                _map_action(session, open_verified_map, page, PROTECTED_PROBE)
+                _map_action(session, partial(open_verified_map, reset_to_entry=True), page, PROTECTED_PROBE)
             except Exception as error:
                 code = getattr(error, 'code', None)
                 reason = code if code in HARD_BLOCKERS else 'auth_unconfirmed'

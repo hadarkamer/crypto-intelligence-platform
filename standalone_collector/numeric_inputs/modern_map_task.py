@@ -198,7 +198,7 @@ def _write_once(path, value):
         os.unlink(temp)
 
 
-def numeric_result(snapshot, job_id, png_bytes, *, restored=False):
+def numeric_result(snapshot, job_id, png_bytes, *, restored=False, require_fresh_evidence=False):
     """Only a live, end-verified BASIC observation can become a ready job."""
     from uuid import UUID
     from modern_map_basic_numbers import validate_basic_snapshot
@@ -209,7 +209,7 @@ def numeric_result(snapshot, job_id, png_bytes, *, restored=False):
     if not valid_id or len(png_bytes) > 4*1024*1024 or not png_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
         raise StageFailure('image_evidence_invalid')
     digest = hashlib.sha256(png_bytes).hexdigest()
-    snapshot = validate_basic_snapshot(snapshot,restored=restored)
+    snapshot = validate_basic_snapshot(snapshot,restored=restored,require_fresh_evidence=require_fresh_evidence)
     if snapshot.get('source_sha256') != digest:
         raise StageFailure('image_evidence_invalid')
     if (snapshot.get('provenance') != 'live' or snapshot.get('end_column_verified') is not True
@@ -266,7 +266,7 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'
 
     def persist(snapshot,path,action, *, basic=None):
         check_target(snapshot)
-        result = numeric_result(snapshot,run_id,image_path.read_bytes())
+        result = numeric_result(snapshot,run_id,image_path.read_bytes(),require_fresh_evidence=base_only)
         if basic is not None and not same_basic_with_enrichment(basic,snapshot):
             raise StageFailure('source_not_readable','basic_observation_changed')
         if base_only and (snapshot['collection_tier']!='basic' or snapshot['enrichment']['observations']!=0):
@@ -308,9 +308,13 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'
         except Exception as error:
             if result is None:
                 if not source_path.exists() and (overview or hovers or stages):
-                    partial = partial_record(run_id,overview,hovers,stages,error,image_path,identity=target)
-                    _write_once(root/'measured-partial.json',partial)
-                    acknowledge(b'P')
+                    try:
+                        partial = partial_record(run_id,overview,hovers,stages,error,image_path,identity=target)
+                        _write_once(root/'measured-partial.json', partial)
+                        acknowledge(b'P')
+                    except Exception as storage_error:
+                        storage_error.first_failure_code = getattr(error, 'first_failure_code', getattr(error, 'code', 'source_capture_failed'))
+                        raise
                 raise
             # Only a read failure after the independently closed first observation can
             # fall back immediately. Auth/storage/transport errors keep their own status.

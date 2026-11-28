@@ -43,6 +43,7 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
                 raise ValueError('invalid_cycle_map')
             root = directory / job
             reading = False
+            failure_stage = None
             def source_event(event):
                 if not trace_source:
                     return
@@ -57,7 +58,9 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
             def capture(s, m, t, image, *, observe, base_only):
                 assert base_only
                 def market_event(kind, data):
-                    nonlocal reading
+                    nonlocal reading, failure_stage
+                    if kind == 'stage' and data.get('status') == 'failed':
+                        failure_stage = data.get('name')
                     if kind == 'range_selection':
                         from modern_map_basic_numbers import range_matches
                         import re
@@ -102,6 +105,25 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
                     source_event('read_error')
                 error = ('source_timeout' if isinstance(failure, TimeoutError) else
                          getattr(failure, 'code', 'source_capture_failed'))
+                if trace_source:
+                    try:
+                        from model1_execution import CODES
+                        from modern_map_reader import _route_observed
+                        from modern_map_basic_numbers import coin_map_url
+                        first = getattr(failure, 'first_failure_code', error)
+                        secondary = getattr(failure, 'secondary_guard_code', None)
+                        details = dict(job_id=job, symbol=symbol, model=model, timeframe=timeframe, tab_index=index,
+                            page_number=page_number, phase='before_tab_cleanup', first_code=first if first in CODES else 'source_capture_failed',
+                            terminal_code=error if error in CODES else 'source_capture_failed',
+                            expected_url=coin_map_url(symbol, model), observed_url=_route_observed(page.raw.url) if page is not None else None)
+                        import re
+                        if isinstance(failure_stage, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,64}', failure_stage):
+                            details['last_failed_stage'] = failure_stage
+                        if secondary in CODES:
+                            details['secondary_guard_code'] = secondary
+                        print('COINGLASS_CYCLE_FAILURE '+json.dumps(details,separators=(',',':')),flush=True)
+                    except Exception:
+                        pass  # Supplemental diagnostics must not mask the original failure or block tab cleanup.
                 if page is not None:
                     try:
                         async with asyncio.timeout(4):

@@ -16,7 +16,7 @@ from modern_map_evidence import (PRICE, box_member, check, equivalent, iso, meas
                                  verified_member, verify_covered_maximum)
 from model1_execution import StageFailure
 
-from modern_map_basic_numbers import BASIC_RANGES, HORIZON_SECONDS, RANGE_PATTERNS, basic_target, period_seconds, range_matches
+from modern_map_basic_numbers import BASIC_RANGES, HORIZON_SECONDS, RANGE_PATTERNS, basic_target, coin_map_url as map_url, period_seconds, range_matches, valid_range_selection
 
 # Canonical labels from the previous UI are kept for existing callers. The
 # reader selects an actual visible unit-bearing option on the active coin.
@@ -44,12 +44,6 @@ def limited_timeout(milliseconds):
     if remaining <= 0:
         raise StageFailure('source_timeout')
     return min(remaining, milliseconds)
-
-
-def map_url(symbol):
-    if not isinstance(symbol,str) or not re.fullmatch('[A-Z0-9]{1,20}',symbol):
-        raise ValueError('Invalid configured symbol')
-    return f'https://www.coinglass.com/LiquidationHeatMap/{symbol}?mode=coin'
 
 
 def visible(items):
@@ -142,16 +136,16 @@ def option_control(page, name):
 
 
 def _range_value(element):
-    value = element.get_attribute('data-value') or element.get_attribute('value')
-    return value if isinstance(value,str) and re.fullmatch(r'[a-zA-Z0-9 ._-]{1,32}',value) else None
+    return element.get_attribute('data-value') or element.get_attribute('value')
 
 
 def selected_range(page, timeframe):
     control = option_control(page, 'Range')
     try:
         shown = control.inner_text().strip()
-        check(range_matches(timeframe, shown))
-        return {'label': shown, 'value': _range_value(control)}
+        selection = {'label': shown, 'value': _range_value(control)}
+        check(valid_range_selection(timeframe, selection))
+        return selection
     finally:
         control.dispose()
 
@@ -162,7 +156,9 @@ def select_range(page, timeframe):
     try:
         shown = control.inner_text().strip()
         if range_matches(timeframe, shown):
-            return {'label': shown, 'value': _range_value(control)}
+            selection = {'label': shown, 'value': _range_value(control)}
+            check(valid_range_selection(timeframe, selection))
+            return selection
         control.click(timeout=limited_timeout(2500))
     finally:
         control.dispose()
@@ -204,7 +200,9 @@ def select_range(page, timeframe):
     item.click(timeout=limited_timeout(2500))
     selected = wait_for(page,lambda:selected_range(page,timeframe),requested=False)
     check(value is None or selected['value'] is None or value==selected['value'])
-    return dict(selected, value=selected['value'] or value)
+    selection = dict(selected, value=selected['value'] or value)
+    check(valid_range_selection(timeframe, selection))
+    return selection
 
 
 def select_option(page, name, value):
@@ -263,74 +261,205 @@ def prefer_dark(page):
 from collection_metrics import phase
 
 
+def _route_observed(url):
+    # Never attach an arbitrary redirect or account URL to market evidence.
+    from modern_map_basic_numbers import BASIC_SYMBOLS
+    for coin in BASIC_SYMBOLS:
+        for model in (1, 2, 3):
+            if url == map_url(coin, model):
+                return url
+    return None
+
+
+def _rendered_chart(page, guard):
+    """Inspect the drawn heatmap, excluding controls, axes and the lower-left advertisement."""
+    x, y, width, height = chart_box(page)
+    check(x >= 0 and y >= 0)
+    region = dict(x=x + width * 2 // 5, y=y + height // 8,
+                  width=width // 2, height=height * 5 // 8)
+    with Image.open(BytesIO(protected_clip(page, region, guard))) as shot:
+        with shot.convert('RGB') as pixels:
+            # Use the same palette evidence as the original protected-map proof.
+            populated = False
+            for fraction in (.64, .82, .98):
+                sample = round((pixels.width - 1) * fraction)
+                colours = {tuple(c // 20 for c in rgb) for y in range(0, pixels.height, 2)
+                           if max(rgb := pixels.getpixel((sample, y))) - min(rgb) > 55}
+                if len(colours) >= 5:
+                    populated = True
+                    break
+            if not populated:
+                return None
+            with pixels.resize((32, 24), Image.Resampling.BOX) as grid:
+                return grid.tobytes()
+
+
+def _plot_distance(a, b):
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
 @phase('map_access')
-def open_verified_map(page, symbol, model, timeframe, *, guard=None):
+def open_verified_map(page, symbol, model, timeframe, *, guard=None, observe=None, reset_to_entry=False):
     if type(model) is not int or model not in (1,2,3) or timeframe not in BASIC_RANGES:
         raise ValueError('Invalid requested heatmap identity')
-    url = map_url(symbol)
-    response = page.goto(url,wait_until='domcontentloaded',timeout=limited_timeout(40000))
-    if guard:
-        if response and response.status == 429 and page.url == url:
-            from dedicated_login_form import retry_after_seconds
-            error = StageFailure('source_rate_limited')
-            error.retry_after_seconds = retry_after_seconds(response.header_value('retry-after'))
-            raise error
-        if response and response.status == 404 and page.url == url:
-            # Model and range have not been selected on this symbol document.
-            error = StageFailure('source_navigation_changed')
-            error.basic_reason = 'map_document_http_404'
-            raise error
-        if response and response.status >= 500:
-            raise StageFailure('source_capture_failed')
-        # Controls can initially show a different, gated horizon. Handle
-        # redirects now. Apply the access gate after switching to the request.
+    wanted = map_url(symbol, model)
+    current_model = next((m for m in (1, 2, 3) if page.url == map_url(symbol, m)), None)
+    first_document = (reset_to_entry or page.url == 'about:blank' or
+                      current_model is None and _route_observed(page.url) is not None)
+    if first_document:
+        current_model = 1
+    entry = map_url(symbol, current_model or 1)
+    trace = dict(expected_url=wanted, expected_model=model, expected_symbol=symbol, expected_range=timeframe)
+    def check_route(allowed):
+        url = page.url
+        trace['observed_url'] = _route_observed(url)
+        if url not in allowed:
+            if guard:
+                guard()  # Preserve an explicit official account gate or provider block.
+            raise StageFailure('source_navigation_changed')
+
+    def sample(current_model, expected_range, *, requested):
+        url = map_url(symbol, current_model)
+        check_route((entry, wanted))
         if page.url != url:
-            guard()
-    page.set_default_timeout(limited_timeout(1000 if _DEADLINE.get() is not None else 3000))
-    wait_for(page,lambda: choice_target(page, f'Model {model}'),timeout=25,requested=False)
-    prefer_dark(page)
-    select_choice(page,f'Model {model}',requested=False)
-    select_choice(page,'Coin',requested=False)
-    range_selection = select_range(page, timeframe)
-    def ready():
-        check(page.url == url)
-        check(not visible(page.get_by_text(re.compile(r'^Loading(?:…|\.\.\.)$'))))
-        check(choice(page,f'Model {model}') and choice(page,'Coin'))
-        # The public name and the visible symbol must both agree with the URL.
+            return None
+        active = current_model if choice(page, f'Model {current_model}') else next(
+            (m for m in (1, 2, 3) if m != current_model and choice(page, f'Model {m}')), None)
+        trace['selected_model'] = active
+        trace['mode_coin'] = bool(choice(page, 'Coin'))
+        trace['loading'] = bool(visible(page.get_by_text(re.compile(r'^Loading(?:…|\.\.\.)?$', re.I))))
+        if active != current_model or not trace['mode_coin'] or trace['loading']:
+            return None
         check(visible(page.get_by_text(re.compile('^'+re.escape(symbol)+r' Liquidation Heatmap$',re.I))))
         symbol_control(page,symbol)
-        check(range_matches(timeframe, option_control(page,'Range').inner_text().strip()))
+        trace['observed_symbol'] = symbol
+        control = option_control(page, 'Range')
+        try:
+            text = control.inner_text().strip()
+        finally:
+            control.dispose()
+        selected = next((k for k in BASIC_RANGES if range_matches(k, text)), None)
+        trace['observed_range'] = selected
+        if expected_range and selected != expected_range:
+            return None
+        if requested and guard:
+            guard()
         check(visible(page.get_by_text('Market overview',exact=True)))
-        return details(page)
-    result = wait_for(page,ready,timeout=24)
-    result['range_selection'] = range_selection
-    # A public shell can retain sidebars while the protected chart is still
-    # loading. Require real chart geometry, source level labels and multiple
-    # coloured liquidation rows before reporting authentication success.
-    def plotted():
-        rail_anchor(page)
-        x,y,w,h=chart_box(page)
-        check(x>=0 and y>=0)
-        shot=protected_clip(page, {'x':x,'y':y,'width':w,'height':h}, guard)
-        with Image.open(BytesIO(shot)) as chart:
-            with chart.convert('RGB') as pixels:
-                for fraction in (.72, .81, .90):
-                    x_sample = round(w * fraction)
-                    palette = set()
-                    # Only five distinct coloured rows are needed for the access proof.
-                    for y_sample in range(h // 8, h * 7 // 8, 2):
-                        rgb = pixels.getpixel((x_sample, y_sample))
-                        if max(rgb) - min(rgb) > 55:
-                            palette.add(tuple(channel // 20 for channel in rgb))
-                            if len(palette) >= 5:
-                                return True
-                return False
-    wait_for(page,plotted,timeout=10)
-    if guard:guard()
-    if timeframe=='12H':
-        from session_capture import note_protected_map_ready
-        note_protected_map_ready(page)
-    return result
+        side = details(page)
+        level = rail_anchor(page)
+        plot = _rendered_chart(page, guard if requested else lambda:check_route((url,)))
+        trace.update(plot_populated=plot is not None, source_time=side['source_time'])
+        if not plot or page.url != url:
+            return None
+        values = (side['raw_price_step'], side['raw_above_total'], side['raw_below_total'], level)
+        return (selected, side, values, plot)
+
+    def settled(current_model, expected_range, previous=None, *, changed_model=False, requested=False):
+        last = None
+        def read():
+            nonlocal last
+            # An intervening incomplete sample invalidates earlier stability.
+            prior, last = last, None
+            frame = sample(current_model, expected_range, requested=requested)
+            if frame is None:
+                return None
+            if previous is not None:
+                if changed_model and frame[2] == previous[2]:
+                    return None
+                if _plot_distance(previous[3], frame[3]) < 4:
+                    return None
+            last = frame
+            if (prior is not None and prior[:3] == frame[:3]
+                    and _plot_distance(prior[3], frame[3]) <= 1):
+                return frame
+            return None
+        return wait_for(page, read, timeout=24, requested=requested)
+
+    try:
+        trace['phase'] = 'entry_navigation'
+        if current_model is None:
+            # Untrusted predecessors are never inspected or clicked to reach the map.
+            if guard: guard()
+            raise StageFailure('source_navigation_changed')
+        response = None
+        if first_document:
+            response = page.goto(entry,wait_until='domcontentloaded',timeout=limited_timeout(40000))
+        if response and page.url == entry:
+            if response.status == 429:
+                from dedicated_login_form import retry_after_seconds
+                error = StageFailure('source_rate_limited')
+                error.retry_after_seconds = retry_after_seconds(response.header_value('retry-after'))
+                raise error
+            if response.status == 404:
+                error = StageFailure('source_navigation_changed')
+                error.basic_reason = 'map_document_http_404'
+                raise error
+            if response.status >= 500:
+                raise StageFailure('source_capture_failed')
+        check_route((entry,))
+        page.set_default_timeout(limited_timeout(1000 if _DEADLINE.get() is not None else 3000))
+        wait_for(page,lambda: choice_target(page, f'Model {model}'),timeout=25,requested=False)
+        prefer_dark(page)
+        select_choice(page, 'Coin', requested=False)
+        before_range = None
+        before_model = None
+        switching_model = model != current_model
+        if switching_model:
+            trace['phase'] = 'entry_model_plot'
+            if not visible(page.get_by_text(GATE)):
+                before_model = settled(current_model, None)
+            trace['phase'] = 'model_selection'
+            select_choice(page, f'Model {model}', requested=False)
+            def arrived():
+                check_route((entry, wanted))
+                return page.url == wanted
+            wait_for(page, arrived, timeout=8, requested=False)
+            trace['phase'] = 'model_plot_settling'
+            if not visible(page.get_by_text(GATE)):
+                before_range = settled(model, None, before_model, changed_model=True)
+        else:
+            select_choice(page, f'Model {model}', requested=False)
+        trace['phase'] = 'range_selection'
+        control = option_control(page, 'Range')
+        try:
+            already_selected = range_matches(timeframe, control.inner_text().strip())
+        finally:
+            control.dispose()
+        if not already_selected and before_range is None:
+            # On a gated default range allow selection of the requested control;
+            # no account action is taken until that exact target is visible.
+            if not visible(page.get_by_text(GATE)):
+                before_range = settled(model, None)
+        check_route((wanted,))
+        selection = select_range(page, timeframe)
+        trace['phase'] = 'requested_plot_settling'
+        if already_selected and before_range and before_range[0] == timeframe:
+            # This model's complete stable chart is already for the requested range.
+            if guard: guard()
+            result = before_range[1]
+        else:
+            previous = before_range if not already_selected else None
+            unresolved_model_change = switching_model and before_range is None
+            if unresolved_model_change:
+                previous = before_model
+            result = settled(model, timeframe, previous, changed_model=unresolved_model_change, requested=True)[1]
+        check_route((wanted,))
+        if guard: guard()
+        if timeframe == '12H':
+            from session_capture import note_protected_map_ready
+            note_protected_map_ready(page)
+        return dict(result, range_selection=selection)
+    except Exception as error:
+        if observe:
+            try:
+                trace['observed_url'] = _route_observed(page.url)
+                reason = getattr(error, 'basic_reason', None) or getattr(error, 'reason', None) or getattr(error, 'code', None)
+                observe('stage', dict(name='map_navigation', status='failed',
+                                      condition=reason or 'source_capture_failed', navigation=trace))
+            except Exception:
+                # Failure to gather supplemental market evidence must preserve the initial exception.
+                pass
+        raise
 
 
 def chart_box(page):
@@ -398,7 +527,15 @@ PAINT = """box => {
           const text=this.measureText(String(txt));
           const centre=new DOMPoint(x,y+(text.actualBoundingBoxDescent-text.actualBoundingBoxAscent)/2)
               .matrixTransform(this.getTransform());
-          labels.push([String(txt),px,py,this.textBaseline,r.y+centre.y*r.height/c.height]);
+          const record=[String(txt),px,py,this.textBaseline,r.y+centre.y*r.height/c.height];
+          if(box[4]===true && String(txt).includes('/')) {
+            const tr=this.getTransform();
+            record.push([this.fillStyle,this.font,this.textAlign].map(v=>typeof v==='string'?v:'').join('|'),
+              {font:this.font,align:this.textAlign,baseline:this.textBaseline,direction:this.direction,
+               colour:typeof this.fillStyle==='string'?this.fillStyle:null,
+               sx:tr.a*r.width/c.width,sy:tr.d*r.height/c.height,rotated:!!(tr.b||tr.c)});
+          }
+          labels.push(record);
         }
         if(labels.length>6000)labels.splice(0,3000);
       }
@@ -695,7 +832,7 @@ def read_strict_selected_map(page,symbol,model,timeframe,output,*,guard=None,obs
                 from modern_map_overview import after_read_failure
                 def still_present():
                     limited_timeout(1000)
-                    if page.is_closed() or page.url!=map_url(symbol) or not document.evaluate('d=>d===document'):
+                    if page.is_closed() or page.url!=map_url(symbol,model) or not document.evaluate('d=>d===document'):
                         raise StageFailure('source_navigation_changed')
                     if guard:guard()
                 after_read_failure(page,still_present,emit)
@@ -917,7 +1054,7 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         else:
             after=details(page)
         def identity():
-            check(before==after and raw_time==raw_after and page.url==map_url(symbol))
+            check(before==after and raw_time==raw_after and page.url==map_url(symbol,model))
             check(choice(page,f'Model {model}') and choice(page,'Coin'))
             check(range_matches(timeframe, option_control(page,'Range').inner_text().strip()))
             if supplemental is not None:
@@ -932,7 +1069,7 @@ def _measure_selected_map(page,symbol,model,timeframe,output,before,box,guard,su
         screen.close()
     captured = datetime.now(timezone.utc)
     check(-120 <= (captured-update).total_seconds() <= 1200)
-    return dict(schema='coinglass.right-edge-measure.v1',source_url=map_url(symbol),symbol=symbol,
+    return dict(schema='coinglass.right-edge-measure.v1',source_url=page.url,symbol=symbol,
                 heatmap_model=model,timeframe=timeframe,mode='Coin',lens='Heat',palette='Viridis',
                 theme='dark',intensity=[0,100],count='Right edge',**before,
                 source_time_after=after['source_time'], column_time=iso(column),column_time_after=iso(column),

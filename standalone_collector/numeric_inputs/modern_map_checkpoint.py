@@ -108,7 +108,33 @@ def _observation_receipts(stages):
                     **{'post_failure_raw_'+k:amount for k in ('total','above_total','below_total')}}
     for step in stages:
         name, status = step.get('name'), step.get('status')
-        if name in ('basic_opening_price_readout','basic_closing_price_readout') and status in ('observed','failed'):
+        if name == 'map_navigation' and status == 'failed':
+            from modern_map_basic_numbers import BASIC_SYMBOLS, BASIC_RANGES, coin_map_url
+            nav = step.get('navigation')
+            if not isinstance(nav, dict): continue
+            routes = {coin_map_url(s, m) for s in BASIC_SYMBOLS for m in (1, 2, 3)}
+            safe = {}
+            for key in ('expected_url', 'observed_url'):
+                if isinstance(nav.get(key), str) and nav[key] in routes:
+                    safe[key] = nav[key]
+            for key in ('expected_symbol', 'observed_symbol'):
+                if nav.get(key) in BASIC_SYMBOLS:
+                    safe[key] = nav[key]
+            for key in ('expected_model', 'selected_model'):
+                if type(nav.get(key)) is int and nav[key] in (1, 2, 3):
+                    safe[key] = nav[key]
+            for key in ('expected_range', 'observed_range'):
+                if nav.get(key) in BASIC_RANGES:
+                    safe[key] = nav[key]
+            for key in ('mode_coin', 'loading', 'plot_populated'):
+                if type(nav.get(key)) is bool: safe[key] = nav[key]
+            if nav.get('phase') in ('entry_navigation', 'entry_model_plot', 'model_selection',
+                                      'model_plot_settling', 'range_selection', 'requested_plot_settling'):
+                safe['phase'] = nav['phase']
+            if isinstance(nav.get('source_time'), str) and re.fullmatch(iso_utc, nav['source_time']):
+                safe['source_time'] = nav['source_time']
+            receipts[name] = safe
+        elif name in ('basic_opening_price_readout','basic_closing_price_readout') and status in ('observed','failed'):
             receipts[name]=_numeric_price_receipt(step)
         elif name in ('basic_start_observation','basic_end_observation') and status=='ok':
             receipts[name]=_comparison_operand(step)
@@ -153,6 +179,16 @@ def _observation_receipts(stages):
                     receipt[key] = [rect for rect in step[key] if isinstance(rect,list) and len(rect)==4
                                     and all(type(n) is int for n in rect) and rect[0]<rect[2] and rect[1]<rect[3]]
             receipts[name] = receipt
+        elif name in ('opening_prior_cursor_probe','opening_latest_cursor_probe',
+                      'closing_prior_cursor_probe','closing_latest_cursor_probe') and status in ('observed','failed'):
+            receipt={'status':status}
+            for key,limit in (('tooltip_count',10000),('axis_time_count',10000),('displayed_lag_seconds',604800)):
+                val=step.get(key)
+                if type(val) is int and 0<=val<=limit:receipt[key]=val
+            value=step.get('displayed_time')
+            if isinstance(value,str) and re.fullmatch(r'(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01]) (?:[01]?\d|2[0-3]):[0-5]\d',value):
+                receipt['displayed_time']=value
+            receipts[name]=receipt
     return receipts
 
 
@@ -195,6 +231,11 @@ def partial_record(job, overview, hovers, stages, error, image_path, *, identity
         if key in last:
             failure[key]=_comparison_operand(last[key])
     failure['condition'] = condition
+    from model1_execution import CODES
+    for attr in ('first_failure_code', 'secondary_guard_code'):
+        code = getattr(error, attr, None)
+        if code in CODES:
+            failure[attr] = code
     detail = _measure_detail(last.get('details'))
     if detail is not None:
         failure['details'] = detail
@@ -231,7 +272,7 @@ def _identity(source, job, digest, identity):
     snap = source['snapshot']
     if (source.get('run_id') != job or source.get('image_sha256') != digest
             or _dimensions(snap) != (symbol, model, tf) or snap.get('mode') != 'Coin'
-            or snap.get('source_url') != basic_source_url(symbol)):
+            or snap.get('source_url') != basic_source_url(symbol, model)):
         raise ValueError('measured_record_identity')
 
 
@@ -255,7 +296,7 @@ class CheckpointStore:
     def commit(self, action, root):
         """Acknowledge verified source or partial evidence only after the database commit."""
         with self.job_store.connect() as connection:
-            job = connection.execute("""SELECT id FROM public.ai_collection_bridge_jobs WHERE id=%s
+            job = connection.execute("""SELECT id, fixed_cycle_id FROM public.ai_collection_bridge_jobs WHERE id=%s
                 AND status='running' AND symbol=%s AND heatmap_model=%s AND timeframe=%s
                 AND (%s::timestamptz IS NULL OR started_at=%s)
                 FOR UPDATE""",(self.job,*self.identity,self.started_at,self.started_at)).fetchone()
@@ -292,7 +333,8 @@ class CheckpointStore:
                 _identity(source,self.job,digest,self.identity)
                 from modern_map_task import numeric_result, same_basic_with_enrichment
                 restored=previous is not None and previous.get('source')==source
-                numeric_result(source['snapshot'],self.job,image,restored=restored)
+                numeric_result(source['snapshot'],self.job,image,restored=restored,
+                               require_fresh_evidence=not restored and job.get('fixed_cycle_id') is not None)
                 if restored:
                     return
                 if action == b'U':

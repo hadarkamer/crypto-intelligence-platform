@@ -339,7 +339,8 @@ def valid_result(result, image, jid, timeframe, model, symbol, modern):
         return (symbol == 'BTC' and result.get('source_url') == source_url(model)
                 and isinstance(snapshot, dict) and snapshot.get('version') == 'displayed-hover.v1'
                 and 'measure_snapshot' not in result)
-    url = f'https://www.coinglass.com/LiquidationHeatMap/{symbol}?mode=coin'
+    from modern_map_basic_numbers import coin_map_url
+    url = coin_map_url(symbol, model)
     measure = result.get('measure_snapshot')
     expected = {'schema': MEASURE_SCHEMA, 'symbol': symbol, 'heatmap_model': model,
                 'timeframe': timeframe, 'source_url': url, 'captured_at': result.get('captured_at'),

@@ -23,14 +23,40 @@ def basic_target(symbol, model, timeframe):
     return symbol in BASIC_SYMBOLS and type(model) is int and model in BASIC_MODELS and timeframe in BASIC_RANGES
 
 
-def basic_source_url(symbol):
+def coin_map_url(symbol, model=1):
+    if not isinstance(symbol, str) or not re.fullmatch('[A-Z0-9]{1,20}', symbol):
+        raise ValueError('Invalid configured symbol')
+    if type(model) is not int or model not in BASIC_MODELS:
+        raise ValueError('Invalid heatmap model')
+    url = f'https://www.coinglass.com/LiquidationHeatMap/{symbol}?mode=coin'
+    return url if model == 1 else url + f'&model={model}'
+
+
+def basic_source_url(symbol, model=1):
     if symbol not in BASIC_SYMBOLS:
         raise ValueError('Unsupported basic Coin symbol')
-    return f'https://www.coinglass.com/LiquidationHeatMap/{symbol}?mode=coin'
+    return coin_map_url(symbol, model)
 
 
 def range_matches(timeframe, label):
     return timeframe in BASIC_RANGES and isinstance(label, str) and bool(RANGE_PATTERNS[timeframe].fullmatch(label.strip()))
+
+
+def valid_range_selection(timeframe, selection):
+    if not isinstance(selection, dict) or set(selection) != {'label', 'value'}:
+        return False
+    if not range_matches(timeframe, selection['label']):
+        return False
+    value = selection['value']
+    if value is None:
+        return True  # The official trigger can omit its internal value.
+    if not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z0-9 ._-]{1,32}', value):
+        return False
+    # Some providers use opaque option IDs. An explicit duration must agree
+    # with the selected label and the target using the same unit vocabulary.
+    if re.fullmatch(r'\d+\s*(?:h|hours?|d|days?|w|weeks?)', value.strip(), re.I):
+        return range_matches(timeframe, value)
+    return True
 
 
 # Retained receipts and offline BTC examples import this historic URL.
@@ -271,9 +297,9 @@ def chart_groups(regions, levels, step, ref, total, anchor):
 def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, source_time_after,
                          column_time, column_time_after, raw_last_price, source_sha256, captured_at,
                          chart_regions=None, provenance='live', native_bins_inspected=None,
-                         enrichment=(), end_observation=None, raw_last_price_after=None):
+                         enrichment=(), end_observation=None, raw_last_price_after=None, cursor_proof=None, require_fresh_evidence=False):
     """Build from visible market observations and explicit live or retained closing evidence."""
-    require(basic_target(symbol, model, timeframe) and source_url == basic_source_url(symbol))
+    require(basic_target(symbol, model, timeframe) and source_url == basic_source_url(symbol, model))
     require(provenance in ('live','retained_reconstruction'))
     require(isinstance(source_sha256,str) and re.fullmatch(r'[0-9a-f]{64}',source_sha256))
     source_time=overview.get('source_time')
@@ -369,11 +395,18 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
                           'same_document','settings_verified','same_market_labels','sidebar_rows','chart_regions','native_bins_inspected')})
     if 'range_control' in end_observation:
         selection = end_observation['range_control']
-        require(isinstance(selection,dict) and set(selection)=={'label','value'} and
-                range_matches(timeframe,selection['label']) and (selection['value'] is None or
-                isinstance(selection['value'],str) and re.fullmatch(r'[a-zA-Z0-9 ._-]{1,32}', selection['value'])),
-                'hover_snapshot_changed')
+        if not valid_range_selection(timeframe, selection):
+            reject_observation('closing_range_control_mismatch', 'hover_snapshot_changed')
         source_rows['range_control'] = dict(selection)
+    elif require_fresh_evidence or cursor_proof is not None:
+        reject_observation('closing_range_control_missing', 'hover_snapshot_changed')
+    if require_fresh_evidence and cursor_proof is None:
+        reject_observation('cursor_proof_missing', 'hover_snapshot_changed')
+    cursor={}
+    if cursor_proof is not None:
+        from modern_map_cursor import validate_receipt
+        validate_receipt(cursor_proof,overview.get('raw_column_period'),timeframe,column_time)
+        cursor['cursor_proof']=cursor_proof
     strongest={}
     for side in ('above','below'):
         members=[row for row in levels if row['side']==side]
@@ -392,7 +425,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
                 difference_percentage_points=ratio(nums['raw_above_total'][0]-nums['raw_below_total'][0],total),
                 strongest_observed_prices=strongest,levels=levels,chart_regions=regions,coverage=coverage,
                 source_evidence=dict(sidebar_rows=sidebar,sidebar_reference=overview.get('raw_last_price'),enrichment=extra,
-                                     closing=source_rows,display_values=fields),
+                                     closing=source_rows,display_values=fields,**cursor),
                 printed_precision=dict(source_time='minute',column_time='minute',amounts='original_tokens',
                                        captured_at='end_observation' if provenance=='retained_reconstruction' else 'capture_clock'))
 
@@ -413,7 +446,7 @@ def _same_json(first, second):
     return first==second
 
 
-def validate_basic_snapshot(snapshot, *, restored=False):
+def validate_basic_snapshot(snapshot, *, restored=False, require_fresh_evidence=False):
     """Replay the same derivation; reject any changed counts, prices, nulls or coverage claims."""
     require(isinstance(snapshot,dict) and snapshot.get('schema')==SCHEMA)
     try:
@@ -428,6 +461,7 @@ def validate_basic_snapshot(snapshot, *, restored=False):
                 source_time_after=snapshot['source_time_after'],column_time=snapshot['column_time'],
                 column_time_after=snapshot['column_time_after'],raw_last_price=snapshot['raw_last_price'],
                 raw_last_price_after=snapshot['raw_last_price_after'],source_sha256=snapshot['source_sha256'],
+                cursor_proof=e.get('cursor_proof'),require_fresh_evidence=require_fresh_evidence,
                 chart_regions=None if r is None else [{k:g[k] for k in ('side','colour','prices')} for g in r],
                 native_bins_inspected=snapshot['coverage']['native_bins_inspected'],provenance=snapshot['provenance'],
                 enrichment=e['enrichment'],end_observation=e['closing'])

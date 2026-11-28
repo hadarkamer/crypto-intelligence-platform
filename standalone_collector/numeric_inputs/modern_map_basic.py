@@ -16,6 +16,7 @@ import modern_map_reader as ui
 from model1_execution import StageFailure
 from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
+from modern_map_cursor import read_cursor_pair
 from modern_map_cells import _agree, merge_cells
 from modern_map_basic_numbers import HORIZON_SECONDS, basic_target, market_amounts, period_seconds
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
@@ -33,7 +34,7 @@ def require(test, reason):
 
 def identity(page, symbol, model, timeframe):
     ui.gate(page)
-    require(page.url==ui.map_url(symbol) and ui.choice(page,f'Model {model}') and ui.choice(page,'Coin'),
+    require(page.url==ui.map_url(symbol,model) and ui.choice(page,f'Model {model}') and ui.choice(page,'Coin'),
             'map_identity_changed')
     ui.symbol_control(page,symbol)
     selection=ui.selected_range(page,timeframe)
@@ -101,63 +102,34 @@ def read_epoch(stamp, update, period=None):
 
 
 
-def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False,period=None,opening=False,pointer_position=None):
-    """Observe a displayed time. At opening the supplied date is an anchor only."""
-    phase='opening' if opening else 'closing'
-    def verify(stamp):
-        actual=read_epoch(stamp,iso(column),period)
-        if opening:
-            valid=0<=(column-actual).total_seconds()<=period_seconds(period)
-            condition='latest_column_not_within_period'
-        else:
-            valid=actual==column
-            condition='closing_column_changed'
-        if not valid:
-            emit('stage',dict(name='basic_compare_column',status='failed',
-                expected={'source_time' if opening else 'column_time':iso(column),'raw_column_period':period},
-                received={'column_time':iso(actual)}))
-            require(False,condition)
+def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False,period=None,opening=False,
+                     pointer_position=None,timeframe=None,source_update=None):
+    if base_only:
+        same_document()
+        phase='opening' if opening else 'closing'
+        def probe(role,status,receipt):
+            emit('stage',dict(name=phase+'_'+role+'_cursor_probe',status=status,**receipt))
+        prior,current,sample=read_cursor_pair(page,box,bounds,source_update or column,timeframe,period,
+                                               expected_column=None if opening else column,observe=probe)
+        same_document()
+        if pointer_position is not None:
+            pointer_position.update(y=sample['pointer_y'],prior_marks=prior['marks'],sample=sample)
+        emit('stage',dict(name=('opening' if opening else 'closing')+'_cursor_columns',status='ok',**sample))
+        return current['stamp'],current['marks']
+
+    # Enriched readers preserve their existing independent last-column check.
     _,top,right,bottom=bounds
     x,y=right-1,(top+bottom)//2
     try:
-        stamp,marks=ui.read_paint(page,box,x,y,observe=emit,fresh_pointer=base_only,pointer_phase=phase)
-        if base_only:
-            verify(stamp)
-            if pointer_position is not None:
-                pointer_position['y'] = round(y)
-            emit('stage',dict(name=phase+'_column_from_visible_crosshair',status='ok',
-                              source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
-        return stamp,marks
+        return ui.read_paint(page,box,x,y,observe=emit)
     except StageFailure as error:
         if error.code!='source_not_readable' or error.reason is not None:
             raise
     same_document()
-    if base_only:
-        # A different height on the same verified last column can expose the
-        # tooltip when its middle intersects the reference line or a price tag.
-        y=round(top+(bottom-top)*.35)
-        require(ui.chart_box(page)==box,'closing_geometry_changed_at_pointer')
     try:
         event=read_tooltip(page,box,bounds,column,x,y,ui.PAINT,
-                           deadline=time.monotonic()+ui.limited_timeout(1000)/1000,clock_only=base_only)
-        if base_only:
-            event=dict(event,expected='dated_last_column_header_at_pointer',x=round(x),y=round(y))
+                           deadline=time.monotonic()+ui.limited_timeout(1000)/1000)
         emit('hover',event)
-        if base_only:
-            evidence=event.get('column_evidence',[])
-            stamps={item['dated_title'] for item in evidence}
-            require(len(stamps)==1,phase+'_column_display_unavailable')
-            require(all(item['period_seconds']==period_seconds(period) for item in evidence),phase+'_column_period_changed')
-            stamp=stamps.pop()
-            verify(stamp)
-            same_document()
-            if pointer_position is not None:
-                pointer_position['y'] = round(y)
-            emit('stage',dict(name=phase+'_column_from_visible_tooltip',status='ok',
-                              source_timestamp=stamp,pointer_x=round(x),pointer_y=round(y)))
-            return stamp,[]
-        # price_labels() already checked this *newly displayed* table has one
-        # full-datetime title, regular times ending at column, and a price axis.
         stamps={m[0] for m in event.get('marks',()) if re.fullmatch(r'\d{1,2}/\d{1,2} \d{1,2}:\d{2}',m[0])}
         require(event.get('price_label_source') in ('dom','canvas') and bool(event.get('raw_price_labels')) and
                 len(stamps)==1,'closing_column_display_unavailable')
@@ -168,6 +140,7 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
         return stamp,[]
     finally:
         page.mouse.move(max(0,box[0]-2),max(0,box[1]-2))
+
 
 def enrich_latest(page,box,bounds,side,column,scale,regions,height,deadline,stage,emit):
     """Try one tooltip and one missing bin; use a known-value control only for a leaderless box."""
@@ -316,20 +289,22 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                 require(edge_open(surface,bounds,box,include_time=base_only),'latest_price_edge_obstructed')
                 left,top,right,bottom=bounds
                 middle=(top+bottom)//2
-                prior,prior_marks=stage('read_prior_crosshair_time',lambda:ui.read_paint(
-                    page,box,left+.72*(right-left),middle,observe=emit))
                 opening_pointer = {}
-                def read_opening_column():
-                    if base_only:
-                        return displayed_column(page,box,bounds,datetime.fromisoformat(side['source_time']),same_document,emit,
-                                                base_only=True,period=side.get('raw_column_period'),opening=True,
-                                                pointer_position=opening_pointer)
-                    return ui.read_paint(page,box,right-1,middle,observe=emit)
-                current,initial_marks=stage('read_latest_crosshair_time',read_opening_column)
+                if base_only:
+                    current,initial_marks=stage('read_latest_crosshair_time',lambda:displayed_column(
+                        page,box,bounds,datetime.fromisoformat(side['source_time']),same_document,emit,
+                        base_only=True,period=side['raw_column_period'],opening=True,timeframe=timeframe,
+                        pointer_position=opening_pointer))
+                    prior_marks=opening_pointer['prior_marks']
+                else:
+                    prior,prior_marks=stage('read_prior_crosshair_time',lambda:ui.read_paint(
+                        page,box,left+.72*(right-left),middle,observe=emit))
+                    current,initial_marks=stage('read_latest_crosshair_time',lambda:ui.read_paint(page,box,right-1,middle,observe=emit))
                 column=read_epoch(current,side['source_time'],side.get('raw_column_period'))
-                previous=source_clock(prior,column,column=True,max_lag=HORIZON_SECONDS[timeframe])
-                require(0<(column-previous).total_seconds()<=HORIZON_SECONDS[timeframe] and
-                        column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
+                if not base_only:
+                    previous=source_clock(prior,column,column=True,max_lag=HORIZON_SECONDS[timeframe])
+                    require(0<(column-previous).total_seconds()<=HORIZON_SECONDS[timeframe] and
+                            column<=datetime.fromisoformat(side['source_time']),'latest_column_not_established')
                 marks=stage('read_numeric_price_axis',lambda:axis_marks(page,box,prior_marks,initial_marks))
                 ocr_cache={}
                 def read_axis(phase,frame,chart,plot,labels,reference,pointer):
@@ -387,9 +362,9 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                             closing_pointer = {}
                             close_time,close_marks=record('recheck_latest_column',lambda:displayed_column(
                                 page,closing_box,closing_bounds,column,same_document,emit,base_only=base_only,period=side.get('raw_column_period'),
-                                pointer_position=closing_pointer))
+                                pointer_position=closing_pointer,timeframe=timeframe,source_update=datetime.fromisoformat(side['source_time'])))
                             require(read_epoch(close_time,side['source_time'],side.get('raw_column_period'))==column,'closing_column_changed')
-                            end_marks=axis_marks(page,closing_box,prior_marks if box==closing_box else [],close_marks)
+                            end_marks=axis_marks(page,closing_box,closing_pointer.get('prior_marks',prior_marks if box==closing_box else []),close_marks)
                             # Collect a fresh overview after the closing image and cursor
                             # observation. Its explicitly labeled price can supply the tag.
                             after=record('recheck_market_update',lambda:overview(page))
@@ -429,13 +404,15 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                              raw_last_price=end_scale[0],same_document=True,settings_verified=True,same_market_labels=True,
                              symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin',range_control=end_range)
                     emit('stage',dict(name=prefix+'basic_end_observation',status='ok',**end))
-                    return dict(symbol=symbol,model=model,timeframe=timeframe,source_url=ui.map_url(symbol),
+                    return dict(symbol=symbol,model=model,timeframe=timeframe,source_url=page.url,
                               source_time_after=after['source_time'],column_time=iso(column),column_time_after=end['column_time'],
+                              cursor_proof=(dict(schema='coinglass.cursor.v1',opening=opening_pointer['sample'],
+                                                 closing=closing_pointer['sample']) if base_only else None),
                               raw_last_price=raw_ref,source_sha256=digest,chart_regions=regions,provenance='live',
                               native_bins_inspected=native_bins,captured_at=iso(datetime.now(timezone.utc)),end_observation={**after,**end})
 
                 basic_args=closing_arguments()
-                base=stage('build_basic_result',lambda:build_basic_snapshot(side,**basic_args))
+                base=stage('build_basic_result',lambda:build_basic_snapshot(side,**basic_args,require_fresh_evidence=base_only))
                 if emit('verified_basic',base) is False:
                     raise StageFailure('state_store_failed')
                 if base_only:
