@@ -40,7 +40,7 @@ class MarketPage:
 
 
 class NavigationTests(TestCase):
-    def simulate(self, page, target, *, stuck=None, observe=None, reset=False):
+    def simulate(self, page, target, *, stuck=None, observe=None, reset=False, verify_selected_only=False):
         def wait(page, read, *args, **kw):
             for _ in range(8):
                 try:
@@ -89,7 +89,7 @@ class NavigationTests(TestCase):
             for name, fn in mocks.items():
                 stack.enter_context(patch.object(reader, name, fn))
             return reader.open_verified_map(page, 'BTC', target, '48H',
-                        guard=lambda:None, observe=observe, reset_to_entry=reset)
+                        guard=lambda:None, observe=observe, reset_to_entry=reset, verify_selected_only=verify_selected_only)
 
     def test_one_document_selects_models_and_returns_with_changed_side_and_plot(self):
         page=MarketPage()
@@ -99,6 +99,20 @@ class NavigationTests(TestCase):
             self.assertEqual(page.url,reader.map_url('BTC',m))
         self.assertEqual(page.navigations, [reader.map_url('BTC')])
         self.assertEqual(page.switches,[(1,2),(2,1),(1,3),(3,1)])
+
+    def test_reobservation_waits_for_ready_frames_without_operating_selectors_or_navigating(self):
+        page=MarketPage(reader.map_url('BTC',1))
+        page.loading=True
+        page.frames=[(1,1,1,True),(1,2,2,False)]
+        result=self.simulate(page,1,verify_selected_only=True)
+        self.assertEqual(result['raw_price_step'],'22')
+        self.assertEqual(page.navigations,[])
+        self.assertEqual(page.switches,[])
+        page.range='12H'
+        with self.assertRaises(StageFailure):
+            self.simulate(page,1,verify_selected_only=True)
+        self.assertEqual(page.range,'12H')
+        self.assertEqual(page.navigations,[])
 
     def test_stale_chart_rail_or_selector_keeps_target_unreadable(self):
         for stuck in ('chart','sidebar','selector'):

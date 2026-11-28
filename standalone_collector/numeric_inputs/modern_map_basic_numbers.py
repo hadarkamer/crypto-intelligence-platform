@@ -141,6 +141,16 @@ def verified_number(raw, amount=False, *, positive=False):
     return value
 
 
+def verify_maximum(maximum, raw_largest_price, levels):
+    if maximum is not None:
+        maxval,maxerr=maximum
+        require(all(number(row['raw_value'],True)[0]-number(row['raw_value'],True)[1]<=maxval+maxerr for row in levels),'hover_evidence_mismatch')
+        if raw_largest_price is not None:
+            named=number(raw_largest_price)[0]
+            require(all(_agree(number(row['raw_value'],True),maximum) for row in levels
+                        if number(row['raw_price'])[0]==named),'hover_evidence_mismatch')
+
+
 def ratio(value, total):
     return _rounded(100*value/total)
 
@@ -386,14 +396,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
         values=[number(row['raw_value'],True) for row in levels if row['side']==side]
         maxval,delta=nums['raw_'+side+'_total']
         require(sum(v[0]-v[1] for v in values)<=maxval+delta, 'hover_evidence_mismatch')
-    maximum=nums['raw_largest_value']
-    if maximum is not None:
-        maxval,maxerr=maximum
-        require(all(number(row['raw_value'],True)[0]-number(row['raw_value'],True)[1]<=maxval+maxerr for row in levels),'hover_evidence_mismatch')
-        if raw['raw_largest_price'] is not None:
-            named=number(raw['raw_largest_price'])[0]
-            require(all(_agree(number(row['raw_value'],True),maximum) for row in levels
-                        if number(row['raw_price'])[0]==named),'hover_evidence_mismatch')
+    verify_maximum(nums['raw_largest_value'], raw['raw_largest_price'], levels)
     regions=chart_groups(chart_regions,levels,step[0],ref[0],total,number(sidebar[0]['raw_price'])[0])
     if native_bins_inspected is not None:
         require(type(native_bins_inspected) is int and 0<native_bins_inspected<=1601)

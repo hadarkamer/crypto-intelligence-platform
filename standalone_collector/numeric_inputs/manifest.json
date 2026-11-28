@@ -65,17 +65,21 @@
       "path": "numeric_inputs/modern_map_axis.py",
       "sha256": "8872486a1a48bad16804602b2d246bd05d14d330eda0a43461c3880db1d6a2fb"
     },
+    "modern_map_axis_motion.py": {
+      "path": "numeric_inputs/modern_map_axis_motion.py",
+      "sha256": "97a0286ecf6905790b701d5c10d8a80a2bd0fc2b7cb34d146a994effc9997516"
+    },
     "modern_map_axis_ocr.py": {
       "path": "numeric_inputs/modern_map_axis_ocr.py",
       "sha256": "4488a5502f0293163c25d4207f1081c9c701785f46e2504ccc6c352ff45f1d35"
     },
     "modern_map_basic.py": {
       "path": "numeric_inputs/modern_map_basic.py",
-      "sha256": "498174504ebe0900e7f294b22cbbc03a44010f18811b0678be3d41710d800e5f"
+      "sha256": "6e1a0f6721786da5c40a2f8d84807001a18fa93a1e069d3e119c8ae04d9b0689"
     },
     "modern_map_basic_numbers.py": {
       "path": "numeric_inputs/modern_map_basic_numbers.py",
-      "sha256": "01e0a269d459faf37b8d8df9cb6a83ed9d8d4fe287d4d0a389d4da8a0627c6d4"
+      "sha256": "b7fcb9db20348003130d03021c5db4f8f97d5011280c6f5c8b93086f19d48433"
     },
     "modern_map_cells.py": {
       "path": "numeric_inputs/modern_map_cells.py",
@@ -83,11 +87,11 @@
     },
     "modern_map_checkpoint.py": {
       "path": "numeric_inputs/modern_map_checkpoint.py",
-      "sha256": "8f1e0a98f4cbbbb09249e7fe15b26fdc849cc38d1801e246b2c465f2f0bc5f01"
+      "sha256": "5202d4aae2c39cd3c6cae26d05870905842843d3c1edf7996beab129f73aaa53"
     },
     "modern_map_cursor.py": {
       "path": "numeric_inputs/modern_map_cursor.py",
-      "sha256": "f9c80b4dff67ca51cca03d961bec0122547227ae956ab151d5766e65de639cf6"
+      "sha256": "7350b978d20c9f341ee3adc7205dd7bce4630e49c43af6188654e6a510bef70a"
     },
     "modern_map_cycle_browser.py": {
       "path": "numeric_inputs/modern_map_cycle_browser.py",
@@ -107,7 +111,7 @@
     },
     "modern_map_reader.py": {
       "path": "numeric_inputs/modern_map_reader.py",
-      "sha256": "2e38ecca31d9a5f83f6b1cbfb8902dca94e035b3af4180988fbec00026215857"
+      "sha256": "816a3a938398fc1a269d9f7616aaad552282c6dcbeebdc3ffd00e27609cdaf6b"
     },
     "modern_map_surface.py": {
       "path": "numeric_inputs/modern_map_surface.py",
@@ -115,7 +119,7 @@
     },
     "modern_map_task.py": {
       "path": "numeric_inputs/modern_map_task.py",
-      "sha256": "e067e2d191cd5b6b87dd4fd50ca644d126377ad9dc076056cc11e75cb9fd488f"
+      "sha256": "446fa9e7f60e6d1a3543bf0d61903e3bb5fcbad13572a303826d6194fe6ac4f6"
     },
     "modern_map_tooltip.py": {
       "path": "numeric_inputs/modern_map_tooltip.py",

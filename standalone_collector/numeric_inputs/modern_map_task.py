@@ -249,7 +249,7 @@ def same_basic_with_enrichment(basic, enriched):
 
 
 def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'12H'),capture_fn=None):
-    from modern_map_checkpoint import SOURCE, UPGRADE, partial_record
+    from modern_map_checkpoint import SOURCE, UPGRADE, partial_record, retain_motion_evidence, _observation_receipts
     image_path = root / 'image.png'
     source_path, enriched_path = root / SOURCE, root / UPGRADE
 
@@ -272,6 +272,10 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'
         if base_only and (snapshot['collection_tier']!='basic' or snapshot['enrichment']['observations']!=0):
             raise StageFailure('source_not_readable','unexpected_enrichment_in_base_only')
         record = dict(run_id=run_id,snapshot=snapshot,image_sha256=result['evidence']['sha256'])
+        extra = [s for s in stages if s.get('name') in
+                 ('basic_opening_axis_motion','basic_closing_axis_motion','basic_reobserve')]
+        if extra:
+            record['observation_diagnostics'] = _observation_receipts(extra)
         if path.exists():
             if json.loads(path.read_text()) != record:
                 raise StageFailure('image_evidence_invalid')
@@ -288,11 +292,25 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'
         acknowledge(action)
     else:
         overview, hovers, stages = {}, [], []
+        motion_frames = {}
         result = None
         def observe(kind, data):
             nonlocal result
             if kind == 'overview':
                 overview.update(data)
+            elif kind == 'observation_restart':
+                if result is not None or source_path.exists():
+                    raise StageFailure('state_store_failed')
+                overview.clear()
+                hovers.clear()
+                motion_frames.clear()
+                stages[:] = [dict(data, name='basic_reobserve', status='discarded')]
+            elif kind == 'motion_frame':
+                state = data.get('state')
+                if state in ('y1', 'y2', 'off'):
+                    if state == 'y1':
+                        motion_frames.clear()
+                    motion_frames[state] = data
             elif kind == 'stage':
                 stages.append(data)
             elif kind == 'hover':
@@ -309,7 +327,10 @@ def _process_basic_btc(root, run_id, acknowledge, *, base_only,target=('BTC',1,'
             if result is None:
                 if not source_path.exists() and (overview or hovers or stages):
                     try:
+                        evidence = retain_motion_evidence(image_path, motion_frames)
                         partial = partial_record(run_id,overview,hovers,stages,error,image_path,identity=target)
+                        if evidence:
+                            partial['price_motion_evidence'] = evidence
                         _write_once(root/'measured-partial.json', partial)
                         acknowledge(b'P')
                     except Exception as storage_error:

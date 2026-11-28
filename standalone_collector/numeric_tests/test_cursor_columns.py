@@ -140,6 +140,28 @@ class CursorTests(TestCase):
         with self.assertRaises(StageFailure):
             validate_receipt({'schema':'coinglass.cursor.v1','opening':s,'closing':bad},'30m','1W',s['latest_time'])
 
+    def test_forward_rollover_requires_new_source_clock_and_agreeing_control_cell(self):
+        from datetime import timedelta
+        from unittest.mock import Mock
+        old = datetime(2026,11,27,21,30,tzinfo=timezone.utc)
+        clock = Mock(return_value=old+timedelta(minutes=31))
+        self.pair()  # Establish an on-screen prior/latest observation.
+        def closing():
+            return read_cursor_pair(self.page,(20,40,640,380),(31,58,610,375),self.anchor,'1W','30m',
+                                    expected_column=old,refresh_anchor=clock)
+        self.assertEqual(closing()[2]['latest_time'],'2026-11-27T21:30:00Z')
+        clock.assert_not_called()
+        self.page.evaluate("()=>Object.assign(cfg,{prior:'11/25 22:00',latest:'11/27 22:00'})")
+        with self.assertRaises(StageFailure) as advanced:
+            closing()
+        self.assertEqual(advanced.exception.verified_change['closing_column_time'],'2026-11-27T22:00:00Z')
+        clock.assert_called_once()
+        self.page.evaluate("()=>Object.assign(cfg,{prior:'11/25 21:30'})")
+        with self.assertRaises(StageFailure) as mismatch:
+            closing()
+        self.assertEqual(mismatch.exception.basic_reason,'cursor_column_distance_disagrees')
+        self.assertFalse(hasattr(mismatch.exception,'verified_change'))
+
     def test_caption_and_conflicting_bottom_date(self):
         self.assertEqual(caption_time('1 d 19 h before the latest · 30 min per column',1800),154800)
         self.assertIsNone(caption_time('zero before the latest · 30 min per column',1800))

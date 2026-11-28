@@ -214,7 +214,7 @@ def decode(frame, x, period, latest):
     return stamp,lag,nearby
 
 
-def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_column=None, observe=None):
+def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_column=None, observe=None, refresh_anchor=None):
     """Establish two source-selected cells in one document. Leave the pointer off."""
     seconds=period_seconds(period)
     left,top,right,bottom=bounds
@@ -302,12 +302,26 @@ def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_c
         if ({m[0] for m in prior['proof']-current['all_axis']}!={prior['stamp']} or
                 {m[0] for m in current['proof']-prior['all_axis']}!={current['stamp']}):
             _fail('stationary_cursor_time')
+        if expected_column is not None and refresh_anchor is not None:
+            # Only a different visible minute needs a new clock. Never turn an
+            # unproved tooltip, neighbouring cell or malformed date into a rollover.
+            components = tuple(map(int, re.findall(r'\d+', current['stamp'])))
+            expected = (expected_column.month, expected_column.day, expected_column.hour, expected_column.minute)
+            if components != expected:
+                anchor = refresh_anchor()
         column=source_clock(current['stamp'],anchor,column=True,max_lag=seconds)
         previous=source_clock(prior['stamp'],column,column=True,max_lag=HORIZON_SECONDS[timeframe])
-        if expected_column is not None and column!=expected_column:
-            _fail('closing_column_changed')
         if column>anchor or column-previous!=timedelta(seconds=prior['lag']):
             _fail('cursor_column_distance_disagrees')
+        if expected_column is not None and column!=expected_column:
+            if (refresh_anchor is not None and column>expected_column and
+                    (column-expected_column).total_seconds()%seconds == 0):
+                error = StageFailure('source_not_readable','hover_evidence_mismatch')
+                error.basic_reason = 'closing_column_changed'
+                error.verified_change = dict(condition=error.basic_reason, opening_column_time=iso(expected_column),
+                                             closing_column_time=iso(column), closing_source_time=iso(anchor))
+                raise error
+            _fail('closing_column_changed')
         sample = dict(period_seconds=seconds,prior_time=iso(previous),latest_time=iso(column),
                       prior_lag_seconds=prior['lag'],prior_x=prior_x,latest_x=right,pointer_y=y,
                       prior_axis_sources=sorted({m[3] for m in prior['proof']-current['all_axis']}),

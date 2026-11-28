@@ -60,6 +60,10 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
                 assert base_only
                 def market_event(kind, data):
                     nonlocal reading, failure_stage, same_document_after_failure
+                    if kind == 'observation_restart':
+                        failure_stage = None
+                        same_document_after_failure = False
+                        source_event('source_reobservation')
                     if kind == 'stage' and data.get('status') == 'failed':
                         failure_stage = data.get('name')
                         same_document_after_failure = False

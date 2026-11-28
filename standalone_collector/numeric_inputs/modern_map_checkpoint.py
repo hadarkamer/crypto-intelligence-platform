@@ -156,8 +156,40 @@ def _observation_receipts(stages):
             if isinstance(nav.get('source_time'), str) and re.fullmatch(iso_utc, nav['source_time']):
                 safe['source_time'] = nav['source_time']
             receipts[name] = safe
+        elif name == 'basic_reobserve' and status == 'discarded':
+            conditions = {'closing_column_changed','source_epoch_or_values_changed',
+                          'closing_reference_changed','closing_significant_regions_changed'}
+            if step.get('condition') in conditions:
+                receipt = {'condition':step['condition']}
+                for key in ('opening_source_time','closing_source_time','opening_column_time','closing_column_time','column_time'):
+                    if isinstance(step.get(key),str) and re.fullmatch(iso_utc,step[key]):
+                        receipt[key] = step[key]
+                digest = step.get('discarded_image_sha256')
+                if isinstance(digest,str) and re.fullmatch(r'[a-f0-9]{64}',digest):
+                    receipt['discarded_image_sha256'] = digest
+                from modern_map_overview import _FIELDS
+                if step.get('field') in (*_FIELDS,'source_time','sidebar_levels','raw_sidebar_rows','duplicate_sidebar_levels'):
+                    receipt['field'] = step['field']
+                receipts[name] = receipt
         elif name in ('basic_opening_price_readout','basic_closing_price_readout') and status in ('observed','failed'):
             receipts[name]=_numeric_price_receipt(step)
+        elif name in ('basic_opening_axis_motion','basic_closing_axis_motion') and status in ('ok','failed'):
+            from modern_map_evidence import PRICE
+            motion = {'status':status}
+            for key in ('initial_condition', 'condition'):
+                if isinstance(step.get(key), str) and re.fullmatch('[a-z][a-z0-9_]{0,64}', step[key]):
+                    motion[key] = step[key]
+            if isinstance(step.get('column_time'), str) and re.fullmatch(iso_utc,step['column_time']):
+                motion['column_time'] = step['column_time']
+            for key in ('captures','ocr_calls','ocr_elapsed_ms','elapsed_ms'):
+                if type(step.get(key)) in (int,float) and 0 <= step[key] <= 3600000:
+                    motion[key] = step[key]
+            for key in ('reference','cursor_values'):
+                values = [step.get(key)] if key == 'reference' else step.get(key)
+                if (isinstance(values,list) and len(values) == (1 if key=='reference' else 2)
+                        and all(isinstance(v,str) and len(v)<=40 and v.isascii() and re.fullmatch(PRICE,v) for v in values)):
+                    motion[key] = values[0] if key == 'reference' else values
+            receipts[name] = motion
         elif name in ('basic_start_observation','basic_end_observation') and status=='ok':
             receipts[name]=_comparison_operand(step)
         elif name in ('basic_compare_reference','basic_compare_column','basic_compare_regions','basic_compare_market') and status=='failed':
@@ -212,6 +244,89 @@ def _observation_receipts(stages):
                 receipt['displayed_time']=value
             receipts[name]=receipt
     return receipts
+
+
+def retain_motion_evidence(image_path, frames):
+    """Keep protected crops with a rejected observation, under the existing image limit.
+
+    The opening screenshot stays at its original coordinates. Diagnostic panels are
+    below it, in pointer order. Full numerical checkpoints never use this image.
+    """
+    from io import BytesIO
+    from PIL import Image
+    from modern_map_evidence import PRICE
+
+    if not frames or not image_path.is_file():
+        return None
+    prepared = []
+    try:
+        for state in ('y1', 'y2', 'off'):
+            frame = frames.get(state)
+            if frame is None:
+                continue
+            raw, rect, point = frame['png'], frame['clip_css'], frame['pointer_css']
+            phase, stamp = frame['phase'], frame['column_time']
+            if (not isinstance(raw, bytes) or len(raw) > 192 * 1024
+                    or phase not in ('opening', 'closing') or not isinstance(stamp, str)
+                    or not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)', stamp)
+                    or not isinstance(rect, (tuple, list)) or len(rect) != 4
+                    or not all(type(v) is int and 0 <= v <= 8192 for v in rect)
+                    or not isinstance(point, (tuple, list)) or len(point) != 2
+                    or not all(type(v) in (float, int) and 0 <= v <= 8192 for v in point)):
+                return None
+            if prepared and (phase, stamp, list(rect)) != (prepared[0][1]['phase'],
+                    prepared[0][1]['column_time'], prepared[0][1]['clip_css']):
+                return None
+            with Image.open(BytesIO(raw)) as panel:
+                if (panel.format != 'PNG' or panel.size != tuple(rect[2:])
+                        or panel.width * panel.height > 1_500_000):
+                    return None
+                pixels = panel.convert('RGB')
+            marks = []
+            for mark in frame.get('marks', [])[:100]:
+                if (isinstance(mark, dict) and isinstance(mark.get('text'), str)
+                        and len(mark['text']) <= 40 and mark['text'].isascii() and re.fullmatch(PRICE, mark['text'])
+                        and all(type(mark.get(k)) in (int, float) and 0 <= mark[k] <= 8192 for k in ('x','y'))):
+                    marks.append({k:mark[k] for k in ('text','x','y')})
+            prepared.append((pixels, dict(state=state, phase=phase, column_time=stamp,
+                clip_css=list(rect), pointer_css=list(point), marks=marks,
+                rgb_sha256=hashlib.sha256(pixels.tobytes()).hexdigest())))
+        if not prepared:
+            return None
+        original = image_path.read_bytes()
+        with Image.open(BytesIO(original)) as chart:
+            width = max(chart.width, sum(p.width for p, _ in prepared))
+            height = chart.height + max(p.height for p, _ in prepared)
+            if chart.format != 'PNG' or width * height > 8_000_000:
+                return None
+            with Image.new('RGB', (width, height), (10, 13, 18)) as sheet:
+                sheet.paste(chart, (0, 0))
+                left = 0
+                for pixels, item in prepared:
+                    sheet.paste(pixels, (left, chart.height))
+                    item['panel_xywh'] = [left, chart.height, pixels.width, pixels.height]
+                    left += pixels.width
+                with BytesIO() as output:
+                    sheet.save(output, format='PNG', compress_level=1)
+                    if output.tell() > MAX_IMAGE:
+                        return None
+                    # Finish encoding before replacing the original private evidence.
+                    with tempfile.NamedTemporaryFile(dir=image_path.parent, delete=False) as tmp:
+                        temp_path = Path(tmp.name)
+                        try:
+                            tmp.write(output.getbuffer())
+                            tmp.close()
+                            temp_path.replace(image_path)
+                        finally:
+                            temp_path.unlink(missing_ok=True)
+            return dict(original_png_sha256=hashlib.sha256(original).hexdigest(),
+                        original_xywh=[0, 0, chart.width, chart.height], frames=[m for _, m in prepared])
+    except (OSError, ValueError, TypeError, KeyError, Image.DecompressionBombError):
+        # Supplemental frames must not hide the original failure or prevent its receipt.
+        return None
+    finally:
+        for pixels, _ in prepared:
+            pixels.close()
 
 
 def _measure_detail(detail):

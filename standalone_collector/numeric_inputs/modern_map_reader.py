@@ -411,7 +411,7 @@ def _plot_distance(a, b):
 
 
 @phase('map_access')
-def open_verified_map(page, symbol, model, timeframe, *, guard=None, observe=None, reset_to_entry=False):
+def open_verified_map(page, symbol, model, timeframe, *, guard=None, observe=None, reset_to_entry=False, verify_selected_only=False):
     if type(model) is not int or model not in (1,2,3) or timeframe not in BASIC_RANGES:
         raise ValueError('Invalid requested heatmap identity')
     wanted = map_url(symbol, model)
@@ -488,6 +488,12 @@ def open_verified_map(page, symbol, model, timeframe, *, guard=None, observe=Non
         return wait_for(page, read, timeout=24, requested=requested)
 
     try:
+        if verify_selected_only:
+            # Re-observing a changing market must never switch models/ranges,
+            # navigate, or act on account UI. Reuse the original settling proof.
+            trace['phase'] = 'requested_plot_settling'
+            check_route((wanted,))
+            return settled(model,timeframe,requested=True)[1]
         trace['phase'] = 'entry_navigation'
         if current_model is None:
             # Untrusted predecessors are never inspected or clicked to reach the map.

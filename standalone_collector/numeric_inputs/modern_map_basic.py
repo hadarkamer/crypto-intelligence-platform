@@ -14,12 +14,13 @@ from playwright.sync_api import Error as BrowserError
 
 import modern_map_reader as ui
 from model1_execution import StageFailure
+import modern_map_axis_motion as motion
 from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
 from modern_map_cursor import read_cursor_pair
 from modern_map_cells import _agree, merge_cells
 from modern_map_basic_numbers import (HORIZON_SECONDS, REALIZED_24H, basic_target, closing_realized_update,
-                                      market_amounts, period_seconds)
+                                      fact_rows, market_amounts, period_seconds, verified_number, verify_maximum)
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
 from modern_map_overview import _FIELDS, after_read_failure, overview
 from modern_map_surface import prepare_surface
@@ -47,21 +48,64 @@ def identity(page, symbol, model, timeframe):
     return selection
 
 
+def changed_observation(condition, **witness):
+    error = StageFailure('source_not_readable', 'hover_evidence_mismatch')
+    error.basic_reason = condition
+    error.verified_change = dict(condition=condition, **witness)
+    raise error
+
+
+def _without_missing_maximum(before, after):
+    """Only publish the optional maximum/price if both observations report it."""
+    fields = ('raw_largest_value', 'raw_largest_price')
+    omit = {k for k in fields if before.get(k) != after.get(k) and
+            (before.get(k) is None or after.get(k) is None)}
+    if not omit:
+        return before, after
+    if 'raw_largest_value' in omit:
+        omit.add('raw_largest_price')
+    copies = []
+    for facts in (before, after):
+        # Losing an optional field cannot make an originally contradictory maximum valid.
+        if facts.get('raw_largest_price') is not None:
+            verified_number(facts['raw_largest_price'], positive=True)
+        verify_maximum(market_amounts(facts)['raw_largest_value'], facts.get('raw_largest_price'), fact_rows(facts))
+        values = {**facts, **dict.fromkeys(omit)}
+        values['display_values'] = {k:v for k,v in facts.get('display_values', {}).items() if k not in omit}
+        copies.append(values)
+    return tuple(copies)
+
+
 def prove_observations(before, after, emit=None, *, base_only=False):
-    # Compare dates and numerical source fields, including the entire visible
-    # rail. Unlike a number-only total, this also detects changed row content.
+    # A refresh requires a positive, still valid source observation. Missing or
+    # contradictory source fields are failures, not evidence that the market moved.
+    if base_only:
+        before, after = _without_missing_maximum(before, after)
     for key in (*_FIELDS,'source_time','sidebar_levels','raw_sidebar_rows','unreadable_sidebar_containers',
                 'ambiguous_fields','duplicate_sidebar_levels'):
         if before.get(key)!=after.get(key):
-            if base_only and key in REALIZED_24H:
+            if base_only and (key in REALIZED_24H or key == 'raw_last_price'):
                 continue
             if emit:
                 emit('stage',dict(name='basic_compare_market',status='failed',
                     expected={key:before.get(key)},received={key:after.get(key)}))
+            if (base_only and key not in ('unreadable_sidebar_containers', 'ambiguous_fields')
+                    and before.get(key) is not None and after.get(key) is not None
+                    and not after.get('ambiguous_fields') and not after.get('unreadable_sidebar_containers')):
+                ui.core_observation(after)
+                market_amounts(after)
+                fact_rows(after)
+                if key in ('raw_updated_at', 'source_time'):
+                    # Clocks which moved backwards are not newer source observations.
+                    if not before.get('source_time') or after['source_time'] <= before['source_time']:
+                        require(False,'source_epoch_or_values_changed')
+                changed_observation('source_epoch_or_values_changed', field=key,
+                                    opening_source_time=before['source_time'], closing_source_time=after['source_time'])
             require(False,'source_epoch_or_values_changed')
     ui.core_observation(after)
     if base_only:
         closing_realized_update(before, after)
+    return before, after
 
 
 def right_edge_regions(image, bounds, side, scale, model):
@@ -114,8 +158,15 @@ def displayed_column(page,box,bounds,column,same_document,emit,*,base_only=False
         phase='opening' if opening else 'closing'
         def probe(role,status,receipt):
             emit('stage',dict(name=phase+'_'+role+'_cursor_probe',status=status,**receipt))
+        def refreshed_anchor():
+            same_document()
+            source = overview(page)
+            require(source.get('source_time') and 'source_time' not in source.get('ambiguous_fields', []),
+                    'source_clock_unconfirmed')
+            return datetime.fromisoformat(source['source_time'])
         prior,current,sample=read_cursor_pair(page,box,bounds,source_update or column,timeframe,period,
-                                               expected_column=None if opening else column,observe=probe)
+                                               expected_column=None if opening else column,observe=probe,
+                                               refresh_anchor=None if opening else refreshed_anchor)
         same_document()
         if pointer_position is not None:
             pointer_position.update(y=sample['pointer_y'],prior_marks=prior['marks'],sample=sample)
@@ -244,6 +295,32 @@ def enrich_latest(page,box,bounds,side,column,scale,regions,height,deadline,stag
 
 @ui.phase('map_read')
 def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,base_only=False):
+    motion_budget = set()
+    def capture_once(restarted):
+        return _capture_basic_observation(page, symbol, model, timeframe, output, guard=guard, observe=observe,
+                                          base_only=base_only, restarted=restarted, motion_budget=motion_budget)
+    try:
+        return capture_once(None)
+    except StageFailure as error:
+        change = getattr(error, 'verified_change', None)
+        if (not base_only or not change or error.code != 'source_not_readable' or
+                getattr(error,'secondary_guard_code',None)):
+            raise
+        # Retain the first cause without retaining a Python traceback with full chart images.
+        witness = dict(change)
+    ui.limited_timeout(1)
+    if observe:
+        observe('observation_restart', witness)
+    if isinstance(output, BytesIO):
+        output.seek(0)
+        output.truncate()
+    else:
+        Path(output).unlink(missing_ok=True)
+    return capture_once(witness)
+
+
+def _capture_basic_observation(page, symbol, model, timeframe, output, *, guard, observe, base_only,
+                               restarted, motion_budget):
     from modern_map_basic_numbers import build_basic_snapshot
     require(basic_target(symbol,model,timeframe),'wrong_basic_target')
     def emit(kind,value):
@@ -265,13 +342,16 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
         ui.clear_cookie_notice(page)
     if guard:guard()
     ui.clear_cookie_notice(page,model=model)
+    if restarted:
+        stage('reobserve_settled_chart',lambda:ui.open_verified_map(
+            page,symbol,model,timeframe,guard=guard,observe=observe,verify_selected_only=True))
     ui.display_ready(page)
     doc=page.evaluate_handle('()=>document')
     def same_document():
         require(not page.is_closed() and doc.evaluate('d=>d===document'),'source_document_changed')
         protected()
     try:
-        start_range=stage('basic_identity_start',lambda:identity(page,symbol,model,timeframe))
+        start_range=stage('basic_reobserve_identity' if restarted else 'basic_identity_start',lambda:identity(page,symbol,model,timeframe))
         side=stage('read_market_overview',lambda:overview(page))
         emit('overview',side)
         def validate_market():
@@ -306,6 +386,11 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                         page,box,left+.72*(right-left),middle,observe=emit))
                     current,initial_marks=stage('read_latest_crosshair_time',lambda:ui.read_paint(page,box,right-1,middle,observe=emit))
                 column=read_epoch(current,side['source_time'],side.get('raw_column_period'))
+                if restarted:
+                    floors = ((column, restarted.get('closing_column_time') or restarted.get('column_time')),
+                              (datetime.fromisoformat(side['source_time']), restarted.get('closing_source_time')))
+                    require(all(floor is None or observed >= datetime.fromisoformat(floor) for observed,floor in floors),
+                            'new_observation_predates_confirmed_change')
                 if not base_only:
                     previous=source_clock(prior,column,column=True,max_lag=HORIZON_SECONDS[timeframe])
                     require(0<(column-previous).total_seconds()<=HORIZON_SECONDS[timeframe] and
@@ -319,6 +404,16 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                         result=axis_scale_live(frame,chart,plot,labels,reference=reference,observe=receipt.update,
                                               timeout=ui.limited_timeout(10000)/1000,cache=ocr_cache,
                                               pointer_y=pointer.get('y'))
+                        if result is None and base_only and pointer.get('sample') and phase not in motion_budget:
+                            mark=motion.ambiguous_mark(receipt)
+                            if mark is not None:
+                                motion_budget.add(phase)
+                                same_document()
+                                identity(page,symbol,model,timeframe)
+                                result=motion.resolve(page,frame,chart,plot,labels,reference,pointer['sample'],
+                                                      ocr_cache,receipt,mark,phase,same_document,emit)
+                                same_document()
+                                identity(page,symbol,model,timeframe)
                     finally:
                         emit('stage',dict(name='basic_'+phase+'_price_readout',status='observed' if result else 'failed',
                                           **receipt))
@@ -373,12 +468,14 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                             # Collect a fresh overview after the closing image and cursor
                             # observation. Its explicitly labeled price can supply the tag.
                             after=record('recheck_market_update',lambda:overview(page))
-                            record('basic_verify_closing_market',lambda:prove_observations(side,after,emit,base_only=base_only))
+                            verified_side,after=record('basic_verify_closing_market',lambda:prove_observations(side,after,emit,base_only=base_only))
                             end_scale,_=record('basic_closing_price_axis',lambda:read_axis(
                                 'closing',final,closing_box,closing_bounds,end_marks,after.get('raw_last_price'),closing_pointer))
                             if number(end_scale[0])[0]!=number(raw_ref)[0]:
                                 emit('stage',dict(name='basic_compare_reference',status='failed',
                                     expected={'reference':raw_ref},received={'reference':end_scale[0]}))
+                                if base_only:
+                                    changed_observation('closing_reference_changed', column_time=iso(column))
                                 require(False,'closing_reference_changed')
                             # Only the last plotted column determines significant regions.
                             # Equal samples on the same translated scale avoid a second
@@ -400,6 +497,8 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                                     emit('stage',dict(name='basic_compare_regions',status='failed',
                                         expected=dict(chart_regions=regions,native_bins_inspected=native_bins),
                                         received=dict(chart_regions=final_regions,native_bins_inspected=final_bins)))
+                                    if base_only:
+                                        changed_observation('closing_significant_regions_changed', column_time=iso(column))
                                     require(False,'closing_significant_regions_changed')
                             require(ui.chart_box(page)==closing_box,'closing_geometry_changed_at_pointer')
                     end_range=record('basic_identity_end',lambda:identity(page,symbol,model,timeframe))
@@ -409,15 +508,15 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                              raw_last_price=end_scale[0],same_document=True,settings_verified=True,same_market_labels=True,
                              symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin',range_control=end_range)
                     emit('stage',dict(name=prefix+'basic_end_observation',status='ok',**end))
-                    return dict(symbol=symbol,model=model,timeframe=timeframe,source_url=page.url,
+                    return verified_side, dict(symbol=symbol,model=model,timeframe=timeframe,source_url=page.url,
                               source_time_after=after['source_time'],column_time=iso(column),column_time_after=end['column_time'],
                               cursor_proof=(dict(schema='coinglass.cursor.v1',opening=opening_pointer['sample'],
                                                  closing=closing_pointer['sample']) if base_only else None),
                               raw_last_price=raw_ref,source_sha256=digest,chart_regions=regions,provenance='live',
                               native_bins_inspected=native_bins,captured_at=iso(datetime.now(timezone.utc)),end_observation={**after,**end})
 
-                basic_args=closing_arguments()
-                base=stage('build_basic_result',lambda:build_basic_snapshot(side,**basic_args,require_fresh_evidence=base_only))
+                verified_side,basic_args=closing_arguments()
+                base=stage('build_basic_result',lambda:build_basic_snapshot(verified_side,**basic_args,require_fresh_evidence=base_only))
                 if emit('verified_basic',base) is False:
                     raise StageFailure('state_store_failed')
                 if base_only:
@@ -439,7 +538,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                     if enrichment and not novel:
                         emit('stage',dict(name='optional_overlap_only',status='completed',count=len(enrichment)))
                     if novel:
-                        args=closing_arguments('enrichment_')
+                        _,args=closing_arguments('enrichment_')
                         return stage('validate_enriched_result',lambda:build_basic_snapshot(side,enrichment=enrichment,**args))
                 except StageFailure as error:
                     if error.code not in ('source_not_readable','source_timeout'):
@@ -449,8 +548,16 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                 except BrowserError:
                     emit('stage',dict(name='enrichment_discarded',status='skipped',condition='browser_unavailable'))
                 return base
-    except Exception:
-        if observe:after_read_failure(page,same_document,emit)
+    except Exception as error:
+        if getattr(error, 'verified_change', None) and not restarted:
+            # Keep the handoff on the very same authenticated document. A source
+            # redirect or a contradictory selection must retain its own failure.
+            same_document()
+            stage('verify_changed_map_identity',lambda:identity(page,symbol,model,timeframe))
+            if 'digest' in locals():
+                error.verified_change['discarded_image_sha256'] = digest
+        if observe and not (base_only and not restarted and getattr(error, 'verified_change', None)):
+            after_read_failure(page,same_document,emit)
         raise
     finally:
         try:doc.dispose()
