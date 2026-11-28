@@ -67,7 +67,7 @@
     },
     "modern_map_axis_ocr.py": {
       "path": "numeric_inputs/modern_map_axis_ocr.py",
-      "sha256": "950dee300f7ebc48689e6a55c96ed9bcb903812fcdd13a1f263ad672e915ed33"
+      "sha256": "77f3dcf11dbee5597ffba4945d1c883e57473333d68098ecb8d01818cd20c18c"
     },
     "modern_map_basic.py": {
       "path": "numeric_inputs/modern_map_basic.py",
@@ -83,7 +83,7 @@
     },
     "modern_map_checkpoint.py": {
       "path": "numeric_inputs/modern_map_checkpoint.py",
-      "sha256": "c3621129070f7614f0d5303dc8e86e86903c2ac07ccf06f839b2116d8efbe97d"
+      "sha256": "99d80a93930eb891bb84c994672faf0fba7af8546e073261e3f17b0de2e144cd"
     },
     "modern_map_cursor.py": {
       "path": "numeric_inputs/modern_map_cursor.py",
@@ -124,6 +124,10 @@
     "price_detail_input.py": {
       "path": "runtime/price_detail_input.py",
       "sha256": "03d0577f996aa05bfade8f61c8cf3b8cf83a3dd40de3442d3cb13f58fed88655"
+    },
+    "scoped_dispatch.py": {
+      "path": "numeric_inputs/scoped_dispatch.py",
+      "sha256": "87a8ddc564aafc552d1229db13c9d987aa2acac4b94387231488e941e9394b21"
     },
     "session_capture.py": {
       "path": "numeric_inputs/session_capture.py",

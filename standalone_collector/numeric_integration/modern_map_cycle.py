@@ -14,6 +14,7 @@ from time import monotonic, time
 from model1_execution import CODES, StageFailure
 from modern_map_checkpoint import CheckpointStore
 from session_runtime import ManagedSession
+from scoped_dispatch import SCOPE_OPEN, not_stopped
 from symbol_jobs import finish_claim, valid_result
 
 MAX_JOBS = 96
@@ -60,26 +61,31 @@ def next_claim(conn, guard, *, symbols=None, model=None, timeframe=None, cycle_i
         require_owner(conn)
         if cycle_id is None and not include_heads:
             raise RuntimeError('fixed_cycle_required')
-        return conn.execute("""UPDATE public.ai_collection_bridge_jobs SET status='running',started_at=clock_timestamp()
+        return conn.execute(f"""UPDATE public.ai_collection_bridge_jobs SET status='running',started_at=clock_timestamp()
             WHERE id=(SELECT q.id FROM public.ai_collection_bridge_jobs q WHERE q.status='queued'
             AND q.fixed_cycle_id IS NOT NULL
             AND q.symbol=ANY(%s) AND q.heatmap_model BETWEEN %s AND %s AND q.timeframe=ANY(%s)
-            AND (q.fixed_cycle_id=%s::uuid OR %s
-                AND (q.symbol='BTC' AND q.heatmap_model=1 AND q.timeframe='12H' OR EXISTS (
+            AND (%s::uuid IS NULL OR q.fixed_cycle_id=%s::uuid)
+            AND (NOT %s OR {SCOPE_OPEN} AND (q.symbol='BTC' AND q.heatmap_model=1 AND q.timeframe='12H' OR EXISTS (
                     SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=q.id
                     AND e.image_png IS NOT NULL AND e.diagnostic ? 'measured_btc_v1')))
             AND (NOT %s OR NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs legacy
                 WHERE legacy.fixed_cycle_id IS NULL AND legacy.status='queued'
                 AND (legacy.created_at,legacy.id)<(q.created_at,q.id)))
             AND NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs r WHERE r.status='running'
+                AND (r.fixed_cycle_id IS NULL OR {not_stopped('r')})
                 AND (r.symbol,r.heatmap_model,r.timeframe)=(q.symbol,q.heatmap_model,q.timeframe))
             ORDER BY q.created_at,q.id FOR UPDATE OF q SKIP LOCKED LIMIT 1) RETURNING *""",
             (active_basic_symbols() if symbols is None else list(symbols),
              model or 1, model or 3, [timeframe] if timeframe else list(BASIC_RANGES),
-             cycle_id,include_heads,include_heads)).fetchone()
+             cycle_id,cycle_id,include_heads,include_heads)).fetchone()
 
 
-def first_claim(store, fixed_symbols=()):
+class DispatchBusy(Exception):
+    pass
+
+
+def first_claim(store, fixed_symbols=(), *, cycle_id=None, token=None, report_busy=False, report=None):
     """Use the existing advisory owner and stale-job policy for the numerical maps."""
     from collection_bridge import WORK_LOCK
     from contextlib import nullcontext
@@ -88,25 +94,34 @@ def first_claim(store, fixed_symbols=()):
     try:
         with conn.transaction():
             held = conn.execute("SELECT pg_try_advisory_lock(%s) AS held",(WORK_LOCK,)).fetchone()['held']
+        if report:
+            report('owner_acquired' if held else 'ownership_checked')
         if not held:
+            if report_busy:
+                raise DispatchBusy()
             conn.close()
             return None
         with conn.transaction():
             require_owner(conn)
+            if token is not None and not conn.execute("""SELECT 1 FROM public.ai_collection_bridge_jobs
+                    WHERE fixed_cycle_id=%s AND fixed_worker_guard->>'state'='running'
+                    AND fixed_worker_guard->>'token'=%s""",(cycle_id,token)).fetchone():
+                raise DispatchBusy()
             # An exclusive WORK_LOCK means the preceding session owner has gone.
             # Reopen a committed source without spending a network retry. The
             # old start timestamp stops being publishable in this transaction.
-            scope = active_basic_symbols(),list(BASIC_RANGES)
-            conn.execute("""UPDATE public.ai_collection_bridge_jobs j SET status='queued',started_at=NULL
-                WHERE j.fixed_cycle_id IS NOT NULL AND j.status='running' AND j.symbol=ANY(%s) AND j.heatmap_model BETWEEN 1 AND 3
-                AND j.timeframe=ANY(%s) AND EXISTS (
-                    SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=j.id
+            scope = active_basic_symbols(),list(BASIC_RANGES),cycle_id,cycle_id
+            conn.execute(f"""UPDATE public.ai_collection_bridge_jobs q SET status='queued',started_at=NULL
+                WHERE q.fixed_cycle_id IS NOT NULL AND q.status='running' AND q.symbol=ANY(%s) AND q.heatmap_model BETWEEN 1 AND 3
+                AND q.timeframe=ANY(%s) AND (%s::uuid IS NULL OR q.fixed_cycle_id=%s::uuid) AND {SCOPE_OPEN} AND EXISTS (
+                    SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=q.id
                     AND e.image_png IS NOT NULL AND e.diagnostic ? 'measured_btc_v1')""", scope)
             # An absent owner cannot resume a fixed browser run. Preserve complete source receipts
             # recovered above. Close abandoned work so it never falls through to an ordinary lane.
-            conn.execute("""UPDATE public.ai_collection_bridge_jobs q SET status='failed',
+            conn.execute(f"""UPDATE public.ai_collection_bridge_jobs q SET status='failed',
                 error_code='interrupted',finished_at=clock_timestamp()
                 WHERE fixed_cycle_id IS NOT NULL AND status IN ('running','queued')
+                AND (%s::uuid IS NULL OR q.fixed_cycle_id=%s::uuid) AND {SCOPE_OPEN}
                 AND NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=q.id
                     AND e.image_png IS NOT NULL AND e.diagnostic ? 'measured_btc_v1')
                 AND (q.status='running' OR EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs h
@@ -114,13 +129,20 @@ def first_claim(store, fixed_symbols=()):
                     AND h.timeframe='12H' AND (h.status IN ('ready','failed') OR h.started_at IS NOT NULL))
                     OR q.created_at < clock_timestamp()-%s*interval '1 second' AND NOT EXISTS (
                     SELECT 1 FROM public.ai_collection_bridge_jobs h WHERE h.fixed_cycle_id=q.fixed_cycle_id
-                    AND h.symbol='BTC' AND h.heatmap_model=1 AND h.timeframe='12H'))""", (JOB_DEADLINE,))
-        row = next_claim(conn,nullcontext(),include_heads=True)
+                    AND h.symbol='BTC' AND h.heatmap_model=1 AND h.timeframe='12H'))""", (cycle_id,cycle_id,JOB_DEADLINE))
+        if report:
+            report('orphan_review_complete')
+        row = next_claim(conn,nullcontext(),cycle_id=cycle_id,include_heads=True)
+        if report and row:
+            report('job_claimed',row['id'])
         if row:
             if row.get('fixed_cycle_id'):
                 with conn.transaction():
                     # Identify this already-fenced owner for the authenticated capability read during a run.
                     conn.execute("SELECT set_config('application_name',%s,false)",('coinglass-fixed-'+str(row['id']),))
+                    guard=conn.execute("""SELECT fixed_worker_guard AS value FROM public.ai_collection_bridge_jobs
+                        WHERE fixed_cycle_id=%s ORDER BY created_at,id LIMIT 1""",(row['fixed_cycle_id'],)).fetchone()
+                    row['paused_seconds']=float((guard['value'] or {}).get('paused_seconds',0)) if guard else 0
                     row['receipt_recovery'] = bool(conn.execute("""SELECT 1 FROM public.ai_collection_bridge_evidence
                         WHERE job_id=%s AND image_png IS NOT NULL AND diagnostic ? 'measured_btc_v1'""",
                         (row['id'],)).fetchone())
@@ -219,7 +241,8 @@ def attach_blocked_job(owner, row, code):
 
 
 class QueueDrain:
-    def __init__(self, store, held, row, root, width, fixed_symbols=()):
+    def __init__(self, store, held, row, root, width, fixed_symbols=(), report=None):
+        self.report=report
         self.store, self.held, self.root = store, held, root
         self.first, self.width, self.count = row, width, 0
         self.cycle_id = row.get('fixed_cycle_id')
@@ -229,7 +252,7 @@ class QueueDrain:
         if self.fixed_symbols:
             # Leave thirty seconds for owned page, process and database cleanup.
             opened = row.get('created_at')
-            elapsed = max(0,time()-opened.timestamp()) if opened else 0
+            elapsed = max(0,time()-opened.timestamp()-row.get('paused_seconds',0)) if opened else 0
             self.run_timeout = max(0,FIXED_RUN_SECONDS-30-elapsed)
         self.owner = ManagedSession.from_environment(held,str(row['id']))
         self.trace_source = bool(self.fixed_symbols)
@@ -275,6 +298,8 @@ class QueueDrain:
             else:
                 row = await asyncio.to_thread(next_claim, self.held, self.owner.connection_guard)
             if row:
+                if self.report:
+                    self.report('job_claimed',row['id'])
                 self.count += 1
             return row
 
@@ -336,6 +361,8 @@ class QueueDrain:
         # Restore a committed source even when no browser or account is available.
         retained = await self.result(record,root,job,dims)
         if retained:
+            if self.report:
+                self.report('source_receipt_verified',job)
             return retained
         if self.receipt_recovery:
             raise StageFailure('evidence_store_failed')
@@ -371,6 +398,8 @@ class QueueDrain:
                     writer.write(b'"failed"\n')
                     await writer.drain()
                     continue
+            if self.report:
+                self.report('source_receipt_committed' if value=='S' else 'partial_receipt_committed',job)
             writer.write(b'"committed"\n')
             await writer.drain()
         result = json.loads((root/'result.json').read_text())
@@ -383,10 +412,14 @@ class QueueDrain:
         from collection_metrics import logged_phase
         with logged_phase(str(row['id']), 'collector_db_save_ms'):
             try:
-                return await self.sql(self.fenced,finish_claim,self.store,row,result,image,error)
+                applied = await self.sql(self.fenced,finish_claim,self.store,row,result,image,error)
             except Exception:
                 # A new claim has a different start time, including after a restart.
-                return await self.sql(self.fenced,finish_claim,self.store,row,result,image,error)
+                applied = await self.sql(self.fenced,finish_claim,self.store,row,result,image,error)
+
+        if applied and self.report:
+            self.report('terminal_saved',row['id'])
+        return applied
 
     async def slot(self,index):
         from collection_metrics import queue_wait
@@ -462,15 +495,18 @@ class QueueDrain:
                 await self.child.__aexit__(None,None,None)
 
 
-async def run_scoped_cycle(store):
+async def run_scoped_cycle(store, cycle_id=None, token=None, report=None):
     """One owned worksheet run or one retained receipt; this process has no unscoped queue mode."""
     width = tab_limit()
     fixed_symbols = fixed_tab_symbols(width)
     if fixed_symbols != ('BTC','ETH'):
         raise RuntimeError('fixed_tabs_missing')
-    claimed = await asyncio.to_thread(first_claim,store,fixed_symbols)
+    try:
+        claimed = await asyncio.to_thread(first_claim,store,fixed_symbols,cycle_id=cycle_id,token=token,report_busy=True,report=report)
+    except DispatchBusy:
+        return 'owner_busy'
     if not claimed:
-        return
+        return 'no_work'
     held,row = claimed
     try:
         if not row.get('receipt_recovery'):
@@ -479,8 +515,9 @@ async def run_scoped_cycle(store):
             if state['code'] != 'ready':
                 code = state['code'] if state['code'] in ('source_login_required','source_rate_limited') else 'interrupted'
                 await asyncio.to_thread(finish_claim,store,row,None,None,code)
-                return
+                return code
         with tempfile.TemporaryDirectory(prefix='coinglass-cycle-') as tmp:
-            await QueueDrain(store,held,row,Path(tmp),width,fixed_symbols).run()
+            await QueueDrain(store,held,row,Path(tmp),width,fixed_symbols,report=report).run()
+        return 'completed'
     finally:
         await asyncio.to_thread(held.close)

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 from uuid import UUID, uuid4
@@ -57,7 +58,7 @@ def canonical_status(connection, cycle_id=None):
     return {'code':'source_login_required'}
 
 
-async def main(args):
+async def main(args, report=None):
     from collection_bridge import JobStore
     store = JobStore(os.environ['DATABASE_URL'])
     if args and args[0]=='status' and len(args) <= 2:
@@ -68,19 +69,51 @@ async def main(args):
                 status = canonical_status(connection,group)
         print(json.dumps(status,separators=(',',':')),flush=True)
         return
-    if args != ['run']:
+    if not args or args[0]!='run' or len(args)>3:
         raise ValueError('invalid_operation')
     from modern_map_cycle import run_scoped_cycle
     task = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-    await run_scoped_cycle(store)
+    group = str(UUID(args[1])) if len(args)>1 else None
+    token = str(UUID(args[2])) if len(args)>2 else None
+    return await run_scoped_cycle(store,group,token,report=report)
 
 
 if __name__ == '__main__':
+    # A bounded private acknowledgement, independent of inherited market log streams.
+    # Never forward exception text, SQL, credentials, credentials headers, or provider responses.
+    report_fd = os.environ.pop('COINGLASS_FIXED_REPORT_FD',None)
+    if report_fd is not None:
+        report_fd=int(report_fd)
+        os.set_inheritable(report_fd,False)
+    last={'last_completed_stage':'worker_started'}
+
+    def report(stage, job_id=None):
+        last['last_completed_stage']=stage
+        if job_id is not None:
+            last['last_job_id']=str(job_id)
+        if report_fd is not None:
+            # Replacing one bounded record preserves the last meaningful stage even on SIGKILL.
+            try:
+                os.pwrite(report_fd,json.dumps(last,separators=(',',':')).encode().ljust(256,b' '),0)
+            except OSError:
+                pass  # Diagnostics alone must not block source or queue progress.
+
+    status=0
     try:
-        asyncio.run(main(sys.argv[1:]))
+        report('worker_started')
+        last['reason']=asyncio.run(main(sys.argv[1:],report)) or 'completed'
     except (KeyboardInterrupt,asyncio.CancelledError):
-        pass
-    except Exception:
-        # Connection strings, raw provider replies and account details are never printed.
-        sys.exit(1)
+        last['reason']='cancelled'
+    except Exception as error:
+        status=1
+        sqlstate=getattr(error,'sqlstate',None)
+        if isinstance(sqlstate,str) and re.fullmatch(r'[A-Z0-9]{5}',sqlstate):
+            last.update(reason='database_error',sqlstate=sqlstate)
+        else:
+            last['reason']='worker_error'
+    finally:
+        if report_fd is not None:
+            report(last['last_completed_stage'])
+            os.close(report_fd)
+    sys.exit(status)

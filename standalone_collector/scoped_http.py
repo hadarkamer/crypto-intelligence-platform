@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from aiohttp import web
 
+from numeric_inputs.scoped_dispatch import SCOPE_OPEN, evidence_available, not_stopped
+
 SYMBOLS = ('BTC', 'ETH')
 MODELS = (1, 2, 3)
 TIMEFRAMES = ('12H', '24H', '48H', '1W')
@@ -41,7 +43,8 @@ def initialize(c):
         ADD COLUMN IF NOT EXISTS symbol text NOT NULL DEFAULT 'BTC',
         ADD COLUMN IF NOT EXISTS attempt integer NOT NULL DEFAULT 1 CHECK(attempt BETWEEN 1 AND 3),
         ADD COLUMN IF NOT EXISTS logical_request_id uuid,
-        ADD COLUMN IF NOT EXISTS fixed_cycle_id uuid""")
+        ADD COLUMN IF NOT EXISTS fixed_cycle_id uuid,
+        ADD COLUMN IF NOT EXISTS fixed_worker_guard jsonb""")
     c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ai_collection_bridge_legacy_active_model_tf
         ON public.ai_collection_bridge_jobs(heatmap_model,timeframe)
         WHERE fixed_cycle_id IS NULL AND status IN ('queued','running')""")
@@ -55,12 +58,13 @@ def earlier_fixed_head(c):
     import scoped_worker
     if not scoped_worker.available():
         return False
-    row = c.execute("""SELECT fixed_cycle_id IS NOT NULL AS paired
+    # A held cycle (or an unavailable evidence table) cannot monopolize the legacy scheduler.
+    has_source = """OR EXISTS (SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=q.id
+                    AND e.image_png IS NOT NULL AND e.diagnostic ? 'measured_btc_v1')""" if evidence_available(c) else ''
+    row = c.execute(f"""SELECT fixed_cycle_id IS NOT NULL AS paired
         FROM public.ai_collection_bridge_jobs q
-        WHERE q.status='queued' AND (q.fixed_cycle_id IS NULL
-            OR (q.symbol='BTC' AND q.heatmap_model=1 AND q.timeframe='12H')
-            OR EXISTS (SELECT 1 FROM public.ai_collection_bridge_evidence e WHERE e.job_id=q.id
-                AND e.image_png IS NOT NULL AND e.diagnostic ? 'measured_btc_v1'))
+        WHERE q.status='queued' AND (q.fixed_cycle_id IS NULL OR ({SCOPE_OPEN} AND (
+            (q.symbol='BTC' AND q.heatmap_model=1 AND q.timeframe='12H') {has_source})))
         ORDER BY created_at,id LIMIT 1""").fetchone()
     return bool(row and row['paired'])
 
@@ -119,8 +123,9 @@ def insert(store, identity):
             raise BridgeError('idempotency_conflict','Map already belongs to a request in this cycle',409)
         # The requested cycle is isolated from automatic cache/reuse. Another
         # active fixed cycle cannot reserve this same target a second time.
-        if c.execute("""SELECT 1 FROM public.ai_collection_bridge_jobs WHERE fixed_cycle_id IS NOT NULL
-                AND symbol=%s AND heatmap_model=%s AND timeframe=%s AND status IN ('queued','running')""",
+        if c.execute(f"""SELECT 1 FROM public.ai_collection_bridge_jobs q WHERE fixed_cycle_id IS NOT NULL
+                AND {not_stopped('q')} AND symbol=%s AND heatmap_model=%s AND timeframe=%s
+                AND status IN ('queued','running')""",
                 (symbol,store.heatmap_model,tf)).fetchone():
             raise BridgeError('map_in_progress','This map already has an active cycle',409)
         if (symbol,store.heatmap_model,tf) == ('BTC',1,'12H'):
@@ -133,8 +138,10 @@ def insert(store, identity):
             c.execute("""UPDATE public.ai_collection_bridge_jobs SET image_png=NULL
                 WHERE fixed_cycle_id IS NOT NULL AND status IN ('ready','failed')
                 AND finished_at<now()-interval '6 hours' AND image_png IS NOT NULL""")
-            c.execute("""DELETE FROM public.ai_collection_bridge_jobs WHERE fixed_cycle_id IS NOT NULL
-                AND status IN ('ready','failed') AND finished_at<now()-interval '7 days'""")
+            c.execute("""DELETE FROM public.ai_collection_bridge_jobs expired WHERE fixed_cycle_id IS NOT NULL
+                AND status IN ('ready','failed') AND finished_at<now()-interval '7 days'
+                AND (fixed_worker_guard IS NULL OR NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs live
+                    WHERE live.fixed_cycle_id=expired.fixed_cycle_id AND live.status IN ('queued','running')))""")
         row = c.execute("""INSERT INTO public.ai_collection_bridge_jobs
             (id,logical_request_id,fixed_cycle_id,symbol,heatmap_model,timeframe,attempt,status)
             VALUES(%s,%s,%s,%s,%s,%s,1,'queued')

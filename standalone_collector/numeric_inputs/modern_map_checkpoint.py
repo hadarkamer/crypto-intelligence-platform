@@ -44,11 +44,27 @@ def _numeric_price_receipt(step):
     for key in ('reference','raw_direct_reference','opening_reference','closing_reference'):
         if key in step and (step[key] is None or price(step[key])):
             receipt[key]=step[key]
-    for key in ('ticks','direct_marks','ocr_marks'):
+    for key in ('ticks','direct_marks','ocr_marks','occluded_ticks'):
         if isinstance(step.get(key),list):
             receipt[key]=[{axis:m[axis] for axis in ('text','x','y') if axis in m}
                           for m in step[key][:1600] if isinstance(m,dict) and price(m.get('text'))
                           and coordinate(m.get('y')) and ('x' not in m or coordinate(m['x']))]
+    if isinstance(step.get('pointer_evidence'),list):
+        allowed={'absent_on_pointer_off_axis','at_reference_tag','fixed_label_on_pointer_off_axis',
+                 'different_label_on_pointer_off_axis','ambiguous_pointer_off_axis','blank_pointer_row_adjacent_to_tick'}
+        receipt['pointer_evidence']=[{'text':v['text'],'x':v['x'],'y':v['y'],'reason':v['reason'],
+                                      **({'printed':v['printed']} if price(v.get('printed')) else {})}
+            for v in step['pointer_evidence'][:32] if isinstance(v,dict) and v.get('reason') in allowed
+            and price(v.get('text')) and coordinate(v.get('x')) and coordinate(v.get('y'))]
+    refinement=step.get('tag_refinement')
+    if isinstance(refinement,dict) and price(refinement.get('partial')) and refinement.get('status') in {
+            'read','unconfirmed','ink_touches_crop','tag_shape_unconfirmed','budget_exhausted','ocr_timed_out','ocr_runtime_unavailable','ocr_process_failed'}:
+        item={'partial':refinement['partial'],'status':refinement['status']}
+        if type(refinement.get('cache_hit')) is bool:
+            item['cache_hit']=refinement['cache_hit']
+        if price(refinement.get('text')) and type(refinement.get('confidence')) in (float,int) and 0<=refinement['confidence']<=100:
+            item.update(text=refinement['text'],confidence=refinement['confidence'])
+        receipt['tag_refinement']=item
     if isinstance(step.get('reference_candidates'),list):
         receipt['reference_candidates']=[value for value in step['reference_candidates'][:1600] if price(value)]
     if type(step.get('ocr_cache_hit')) is bool:
@@ -69,7 +85,7 @@ def _numeric_price_receipt(step):
         if (type(value) in (int,float) and -255<=value<=3600000) or (key=='exit_code' and key in step and value is None):
             receipt[key]=value
     if step.get('condition') in ('verified','axis_geometry_invalid','tag_missing_or_ambiguous','reference_conflict',
-            'reference_missing','tick_position_conflict','ticks_insufficient','tick_span_insufficient',
+            'reference_missing','reference_tag_incomplete','pointer_price_unverified','tick_position_conflict','ticks_insufficient','tick_span_insufficient',
             'axis_position_conflict','axis_crop_outside_budget','reference_line_missing','ocr_process_failed','ocr_timed_out','ocr_runtime_unavailable'):
         receipt['condition']=step['condition']
     return receipt

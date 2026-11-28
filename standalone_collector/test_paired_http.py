@@ -117,6 +117,57 @@ class ProtocolHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(self.url+'/latest?timeframe=12H',headers=self.auth)).status,404)
         self.assertEqual((await self.client.get(self.url+'/latest?timeframe=12H&symbol=ETH',headers=self.auth)).status,404)
 
+    async def test_missing_receipt_table_does_not_erase_the_two_launch_budget(self):
+        from numeric_inputs import scoped_dispatch as dispatch
+        head=await self.post(self.fixed('BTC','12H'))
+        first=dispatch.reserve(self.store)
+        self.assertEqual(first[:2],(head['job_id'],self.cycle))
+        # PostgreSQL is still able to persist scope and job state while the evidence relation is unavailable.
+        with self.store.connect() as c:
+            c.execute('ALTER TABLE public.ai_collection_bridge_evidence RENAME TO fixture_hidden_evidence')
+        reason={'returncode':1,'reason':'database_error','sqlstate':'42P01','last_completed_stage':'owner_acquired'}
+        dispatch.settle(self.store,first,reason)
+        self.assertIsNone(dispatch.reserve(self.store))
+        await self.post(self.fixed('ETH','24H'))
+        with self.store.connect() as c:
+            c.execute("UPDATE public.ai_collection_bridge_jobs SET fixed_worker_guard=fixed_worker_guard||'{\"due\":0}'::jsonb WHERE id=%s",(head['job_id'],))
+        second=dispatch.reserve(self.store)
+        self.assertEqual(first[:2],second[:2])
+        self.assertNotEqual(first[2],second[2])
+        dispatch.settle(self.store,second,reason)
+        self.assertFalse(scoped_worker.pending(self.store))
+        with self.store.connect() as c:
+            g=c.execute("SELECT fixed_worker_guard AS g FROM public.ai_collection_bridge_jobs WHERE id=%s",(head['job_id'],)).fetchone()['g']
+            self.assertEqual((g['state'],g['attempts'],g['last']),('stopped',2,reason))
+            self.assertFalse(dispatch.resume(c,str(uuid4())))
+            c.execute("""UPDATE public.ai_collection_bridge_jobs SET fixed_worker_guard=jsonb_set(fixed_worker_guard,
+                '{stopped_at}',to_jsonb(extract(epoch FROM clock_timestamp())-4000)) WHERE id=%s""",(head['job_id'],))
+            self.assertTrue(dispatch.resume(c,self.cycle))
+            self.assertFalse(dispatch.resume(c,self.cycle))
+            credit=c.execute("SELECT (fixed_worker_guard->>'paused_seconds')::numeric AS v FROM public.ai_collection_bridge_jobs WHERE id=%s",(head['job_id'],)).fetchone()['v']
+            self.assertGreaterEqual(credit,4000)
+        self.assertTrue(scoped_worker.pending(self.store))
+        with self.store.connect() as c:
+            c.execute('ALTER TABLE public.fixture_hidden_evidence RENAME TO ai_collection_bridge_evidence')
+
+    async def test_stopped_scope_keeps_target_idempotence_and_releases_independent_heads(self):
+        import json
+        from numeric_inputs import scoped_dispatch as dispatch
+        first_body=self.fixed('BTC','12H')
+        old=await self.post(first_body)
+        with self.store.connect() as c:
+            c.execute("UPDATE public.ai_collection_bridge_jobs SET fixed_worker_guard=%s::jsonb WHERE id=%s",
+                      (json.dumps({'state':'stopped','attempts':2,'stopped_at':1}),old['job_id']))
+        self.assertEqual((await self.post(first_body))['job_id'],old['job_id'])
+        self.assertEqual((await self.post(self.fixed('BTC','12H'),409))['error']['code'],'idempotency_conflict')
+        self.cycle=str(uuid4())
+        allowed=await self.post(self.fixed('BTC','12H'))
+        self.assertNotEqual(old['job_id'],allowed['job_id'])
+        eligible=dispatch.reserve(self.store)
+        self.assertEqual(eligible[:2],(allowed['job_id'],self.cycle))
+        self.cycle=str(uuid4())
+        self.assertEqual((await self.post(self.fixed('BTC','12H'),409))['error']['code'],'map_in_progress')
+
     async def test_admission_requires_auth_and_canonical_ready(self):
         body=self.fixed('BTC','12H')
         response=await self.client.post(self.url,json=body)

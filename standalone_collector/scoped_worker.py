@@ -3,8 +3,12 @@ import asyncio
 from contextlib import suppress
 import json
 import os
+import re
+import sys
+import tempfile
 from pathlib import Path
 import signal
+from numeric_inputs import scoped_dispatch as dispatch
 from time import monotonic
 from uuid import UUID
 
@@ -40,18 +44,54 @@ def child_env():
 
 
 async def launch(*args, capture=False):
-    process = await asyncio.create_subprocess_exec(str(ROOT/'venv/bin/python'),'-B',
-        str(ROOT/'runtime/scoped_entry.py'),*args,cwd=ROOT/'runtime',env=child_env(),
-        stdin=asyncio.subprocess.DEVNULL,stdout=asyncio.subprocess.PIPE if capture else None,
-        stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+    control = tempfile.TemporaryFile() if not capture else None
+    try:
+        env=child_env()
+        fds=()
+        if control:
+            env['COINGLASS_FIXED_REPORT_FD']=str(control.fileno())
+            fds=(control.fileno(),)
+        process = await asyncio.create_subprocess_exec(str(ROOT/'venv/bin/python'),'-B',
+            str(ROOT/'runtime/scoped_entry.py'),*args,cwd=ROOT/'runtime',env=env,pass_fds=fds,
+            stdin=asyncio.subprocess.DEVNULL,stdout=asyncio.subprocess.PIPE if capture else None,
+            stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+    except BaseException:
+        if control:
+            control.close()
+        raise
     try:
         if capture:
             output,_ = await asyncio.wait_for(process.communicate(),12)
             if process.returncode or len(output)>256:
                 raise RuntimeError('collector_unavailable')
             return json.loads(output)
-        await process.wait()
+        code = await process.wait()
+        control.seek(0)
+        raw=control.read(257)
+        try:
+            ack=json.loads(raw) if len(raw)<=256 else {}
+        except (ValueError,UnicodeError):
+            ack={}
+        known={'completed','no_work','owner_busy','cancelled','worker_error','database_error',
+               'source_login_required','source_rate_limited','interrupted'}
+        reason=ack.get('reason') if isinstance(ack,dict) else None
+        result={'reason':'signal_exit' if code<0 else reason if reason in known else 'exit_without_receipt',
+                'returncode':code}
+        phases={'worker_started','ownership_checked','owner_acquired','orphan_review_complete','job_claimed',
+                'partial_receipt_committed','source_receipt_committed','source_receipt_verified','terminal_saved'}
+        completed=ack.get('last_completed_stage') if isinstance(ack,dict) else None
+        result['last_completed_stage']=completed if completed in phases else 'dispatch_reserved'
+        if isinstance(ack,dict) and isinstance(ack.get('last_job_id'),str):
+            try:
+                result['last_job_id']=str(UUID(ack['last_job_id']))
+            except ValueError:
+                pass
+        if result['reason']=='database_error' and isinstance(ack.get('sqlstate'),str) and re.fullmatch(r'[A-Z0-9]{5}',ack['sqlstate']):
+            result['sqlstate']=ack['sqlstate']
+        return result
     finally:
+        if control:
+            control.close()
         if process.returncode is None:
             # The numerical parent handles SIGTERM and closes its independently owned browser tree.
             with suppress(ProcessLookupError):
@@ -112,22 +152,19 @@ async def account_status(fixed_cycle_id=None):
 
 def pending(store):
     with store.connect() as connection:
-        row = connection.execute("""
-            SELECT EXISTS(SELECT 1 FROM public.ai_collection_bridge_jobs q
-                WHERE q.fixed_cycle_id IS NOT NULL AND q.status IN ('queued','running')
-                AND (q.status='running' OR q.symbol='BTC' AND q.heatmap_model=1 AND q.timeframe='12H'
-                    OR q.created_at<clock_timestamp()-interval '350 seconds'
-                    OR EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs h
-                        WHERE h.fixed_cycle_id=q.fixed_cycle_id AND h.symbol='BTC' AND h.heatmap_model=1
-                        AND h.timeframe='12H' AND h.status IN ('ready','failed')))
-                AND NOT EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs legacy
-                    WHERE legacy.fixed_cycle_id IS NULL AND legacy.status='queued'
-                    AND (legacy.created_at,legacy.id)<(q.created_at,q.id)))
-            AND NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted
-                AND mode='ExclusiveLock' AND classid=0 AND objid=%s AND objsubid=1
-                AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS pending""",
-            (WORK_LOCK,)).fetchone()
-        return bool(row and row['pending'])
+        return bool(connection.execute(dispatch.PICK,(WORK_LOCK,)).fetchone())
+
+
+async def dispatch_one(store):
+    reservation=await asyncio.to_thread(dispatch.reserve,store)
+    if not reservation:
+        return
+    _,cycle,token=reservation
+    try:
+        receipt=await launch('run',cycle,token)
+    except OSError:
+        receipt={'reason':'spawn_failed','last_completed_stage':'dispatch_reserved'}
+    await asyncio.to_thread(dispatch.settle,store,reservation,receipt)
 
 
 def wake():
@@ -135,22 +172,70 @@ def wake():
         _wakeup.set()
 
 
+def safe_db_failure(error):
+    state=getattr(error,'sqlstate',None)
+    if isinstance(state,str) and re.fullmatch(r'[A-Z0-9]{5}',state):
+        return {'reason':'database_error','sqlstate':state}
+    return {'reason':'dispatch_unavailable'}
+
+
 async def run(store):
     global _wakeup
+    last_failure=None
     _wakeup = asyncio.Event()
     try:
         while True:
             _wakeup.clear()
             try:
-                if available() and await asyncio.to_thread(pending,store):
-                    await launch('run')
-            except (OSError,RuntimeError):
-                pass
-            except Exception:
-                print('COINGLASS_FIXED pending work will be checked again',flush=True)
+                if available():
+                    await dispatch_one(store)
+                last_failure=None
+            except Exception as error:
+                failure=safe_db_failure(error)
+                if failure!=last_failure:
+                    print('COINGLASS_FIXED_DISPATCH '+json.dumps(dict(state='check_failed',**failure)),flush=True)
+                last_failure=failure
             try:
                 await asyncio.wait_for(_wakeup.wait(),10)
             except asyncio.TimeoutError:
                 pass
     finally:
         _wakeup = None
+
+
+def operator(args):
+    usage = ("Usage: python standalone_collector/scoped_worker.py {status|resume} CYCLE_UUID\n"
+             "Inspect status and correct the reported cause before resuming. Resume releases only a stopped "
+             "cycle, keeps its saved receipts, and leaves provider and account holds in force.")
+    if args in (['--help'],['-h']):
+        print(usage)
+        return
+    if len(args)!=2 or args[0] not in ('resume','status'):
+        raise SystemExit(usage)
+    from psycopg import connect
+    from psycopg.rows import dict_row
+    group=str(UUID(args[1]))
+    # The operator must also be able to repair a hold when the generated worker or receipt table is unavailable.
+    with connect(os.environ['DATABASE_URL'],row_factory=dict_row,connect_timeout=5,
+                 options='-c statement_timeout=8000 -c lock_timeout=3000') as connection:
+        if args[0]=='resume':
+            result={'cycle_id':group,'resumed':dispatch.resume(connection,group)}
+        else:
+            row=connection.execute("""SELECT id,fixed_worker_guard AS guard,
+                EXISTS (SELECT 1 FROM public.ai_collection_bridge_jobs q WHERE q.fixed_cycle_id=a.fixed_cycle_id
+                    AND q.status IN ('queued','running')) AS active
+                FROM public.ai_collection_bridge_jobs a WHERE a.fixed_cycle_id=%s ORDER BY a.created_at,a.id LIMIT 1""",
+                (group,)).fetchone()
+            guard=row['guard'] if row and row['guard'] else {}
+            fallback=('eligible' if row['active'] else 'finished') if row else 'missing'
+            result={'cycle_id':group,'anchor_job_id':str(row['id']) if row else None,'found':bool(row),'state':guard.get('state',fallback),
+                    'attempts':guard.get('attempts',0),'last':guard.get('last')}
+    print(json.dumps(result,separators=(',',':')))
+
+
+if __name__=='__main__':
+    try:
+        operator(sys.argv[1:])
+    except Exception as error:
+        print(json.dumps(safe_db_failure(error),separators=(',',':')),file=sys.stderr)
+        sys.exit(1)
