@@ -71,6 +71,55 @@ class ClippedAxisTests(TestCase):
         for a,b in [(106,110),(115,118),(124,127)]:
             self.paint.rectangle((a,82,b,88),fill=(25,25,25))
 
+    def test_adjacent_tick_antialias_connects_to_the_tick_without_crossing_the_pointer(self):
+        words=[*self.ticks,self.word('10.5',85)]
+        self.paint.line((107,136,107,139),fill=(140,150,160))
+        price,receipt=self.read(words,[('5.6',106,135)],135)
+        self.assertEqual(price,'10.5')
+        self.assertEqual(receipt['pointer_evidence'][0]['printed'],'5')
+        self.paint.point((110,136),fill=(100,110,120))
+        self.assertIsNone(self.read(words,[('5.6',106,135)],135)[0])
+        self.paint.point((110,136),fill=(18,21,27))
+        self.paint.point((107,135),fill=(100,110,120))
+        self.assertIsNone(self.read(words,[('5.6',106,135)],135)[0])
+
+    def test_only_a_continuous_tag_rim_explains_nearby_ink(self):
+        words=[*self.ticks,self.word('10.5',85)]
+        self.paint.line((105,77,174,77),fill=(75,77,79))
+        result,receipt=self.read(words,[('11.5',106,75)],75)
+        self.assertEqual(result,'10.5')
+        clean=_numeric_price_receipt(receipt|{'status':'ok'})
+        self.assertEqual(clean['pointer_evidence'][0]['reason'],'blank_pointer_row_adjacent_to_tag')
+        self.paint.point((136,77),fill=(18,21,27))
+        self.assertIsNone(self.read(words,[('11.5',106,75)],75)[0])
+        self.paint.point((136,77),fill=(75,77,79))
+        self.paint.point((106,74),fill=(75,77,79))
+        self.assertIsNone(self.read(words,[('11.5',106,75)],75)[0])
+
+    def test_isolate_a_contaminating_outer_glyph_only_after_axis_rejection(self):
+        self.render_ink()
+        border=self.word('90.5',85,left=0,width=31,height=17,confidence=0)
+        suspect=[*self.ticks,border]
+        cache={}
+        for reads in (2,0):
+            price,receipt=self.read(suspect,cache=cache)
+            self.assertEqual((price,receipt['ocr_calls']),('10.5',reads))
+            self.assertEqual(receipt['tag_refinement']['reason'],'tag_border_in_word_box')
+        for isolated in ('90.5','10.6','10','110.5'):
+            with self.subTest(isolated=isolated):
+                self.assertIsNone(self.read(suspect,tag=isolated)[0])
+        self.assertIsNone(self.read(suspect,reference='10.3')[0])
+        for changed in (border._replace(confidence=95),border._replace(left=4,width=26,top=80,height=11)):
+            result,receipt=self.read([*self.ticks,changed])
+            self.assertIsNone(result)
+            self.assertEqual(receipt['ocr_calls'],1)
+        # Do not spend another OCR call on a chart which already verifies.
+        self.assertEqual(self.read([*self.ticks,border._replace(text='10.5')])[1]['ocr_calls'],1)
+
+    def test_a_tight_crop_cannot_set_an_outer_digit_the_scale_cannot_distinguish(self):
+        self.assertFalse(axis._outer_digit_is_unique('10.9','10.5',lambda px:190-10*px,85))
+        self.assertTrue(axis._outer_digit_is_unique('90.5','10.5',lambda px:190-10*px,85))
+
     def test_local_word_covers_complete_ink_and_failed_reads_are_also_cached(self):
         self.render_ink()
         words=[*self.ticks,self.word('10',85)]

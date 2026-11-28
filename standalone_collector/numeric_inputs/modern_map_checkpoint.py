@@ -51,7 +51,8 @@ def _numeric_price_receipt(step):
                           and coordinate(m.get('y')) and ('x' not in m or coordinate(m['x']))]
     if isinstance(step.get('pointer_evidence'),list):
         allowed={'absent_on_pointer_off_axis','at_reference_tag','fixed_label_on_pointer_off_axis',
-                 'different_label_on_pointer_off_axis','ambiguous_pointer_off_axis','blank_pointer_row_adjacent_to_tick'}
+                 'different_label_on_pointer_off_axis','ambiguous_pointer_off_axis','blank_pointer_row_adjacent_to_tick',
+                 'blank_pointer_row_adjacent_to_tag'}
         receipt['pointer_evidence']=[{'text':v['text'],'x':v['x'],'y':v['y'],'reason':v['reason'],
                                       **({'printed':v['printed']} if price(v.get('printed')) else {})}
             for v in step['pointer_evidence'][:32] if isinstance(v,dict) and v.get('reason') in allowed
@@ -60,6 +61,8 @@ def _numeric_price_receipt(step):
     if isinstance(refinement,dict) and price(refinement.get('partial')) and refinement.get('status') in {
             'read','unconfirmed','ink_touches_crop','tag_shape_unconfirmed','budget_exhausted','ocr_timed_out','ocr_runtime_unavailable','ocr_process_failed'}:
         item={'partial':refinement['partial'],'status':refinement['status']}
+        if refinement.get('reason')=='tag_border_in_word_box':
+            item['reason']='tag_border_in_word_box'
         if type(refinement.get('cache_hit')) is bool:
             item['cache_hit']=refinement['cache_hit']
         if price(refinement.get('text')) and type(refinement.get('confidence')) in (float,int) and 0<=refinement['confidence']<=100:
@@ -85,7 +88,7 @@ def _numeric_price_receipt(step):
         if (type(value) in (int,float) and -255<=value<=3600000) or (key=='exit_code' and key in step and value is None):
             receipt[key]=value
     if step.get('condition') in ('verified','axis_geometry_invalid','tag_missing_or_ambiguous','reference_conflict',
-            'reference_missing','reference_tag_incomplete','pointer_price_unverified','tick_position_conflict','ticks_insufficient','tick_span_insufficient',
+            'reference_missing','reference_tag_incomplete','reference_tag_ambiguous','pointer_price_unverified','tick_position_conflict','ticks_insufficient','tick_span_insufficient',
             'axis_position_conflict','axis_crop_outside_budget','reference_line_missing','ocr_process_failed','ocr_timed_out','ocr_runtime_unavailable'):
         receipt['condition']=step['condition']
     return receipt

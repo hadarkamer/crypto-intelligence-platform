@@ -1,4 +1,5 @@
 """Prove the selected time from the visible CoinGlass tooltip and bottom crosshair."""
+from contextlib import nullcontext
 from datetime import timedelta
 from math import isfinite
 import re
@@ -223,6 +224,16 @@ def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_c
     y=round((top+bottom)/2)
     off=(max(0,box[0]-2),max(0,box[1]-2))
     watch=page.evaluate_handle(ui.PAINT,[*box,True])
+    restored=False
+    def restore():
+        nonlocal restored
+        if not restored:
+            restored=True
+            try:watch.evaluate('w=>w.restore()')
+            finally:watch.dispose()
+    def finish_probe():
+        try:restore()
+        finally:page.mouse.move(*off)
     try:
         watch.evaluate(_INSTALL,[box,bounds])
         def outside():
@@ -265,8 +276,26 @@ def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_c
                 if observe:observe('latest' if latest else 'prior','failed',last)
                 _fail('latest_cursor_time_unconfirmed' if latest else 'prior_cursor_time_unconfirmed')
 
-        prior=at(prior_x,False)
-        current=at(right,True)
+        # The off-frame and both consistent polls must refer to the same pointer.
+        # Synchronous standalone readers already own their browser's only page.
+        pointer_scope = getattr(page, 'pointer_scope', nullcontext)
+        def probe(x, latest):
+            with pointer_scope():
+                try:
+                    observed = at(x, latest)
+                except BaseException:
+                    # Release while this reader still owns the pointer. Preserve
+                    # the original source failure if a closed/blocked tab cannot move.
+                    try:
+                        finish_probe()
+                    except Exception:
+                        pass
+                    raise
+                if latest:
+                    finish_probe()
+                return observed
+        prior=probe(prior_x,False)
+        current=probe(right,True)
         # Even an identical midnight/axis text can be a valid cursor label
         # if its moving rendering has its own witness. A stationary repaint
         # shared by the two locations can never be that witness.
@@ -285,11 +314,12 @@ def read_cursor_pair(page, box, bounds, anchor, timeframe, period, *, expected_c
                       latest_axis_sources=sorted({m[3] for m in current['proof']-prior['all_axis']}),
                       prior_tooltip=prior['caption'],latest_tooltip=current['caption'])
         return prior,current,sample
-    finally:
-        try:watch.evaluate('w=>w.restore()')
-        finally:
-            try:watch.dispose()
-            finally:page.mouse.move(*off)
+    except BaseException:
+        # If acquisition or installation failed, restore just the observer. No
+        # pointer move is needed, and cleanup must not mask the first failure.
+        try:restore()
+        except Exception:pass
+        raise
 
 
 

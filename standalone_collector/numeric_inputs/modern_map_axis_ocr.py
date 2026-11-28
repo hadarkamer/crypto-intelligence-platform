@@ -15,8 +15,8 @@ import time
 
 from PIL import Image, ImageOps
 
-from modern_map_axis import axis_scale
-from modern_map_evidence import PRICE
+from modern_map_axis import MAX_TAG_RESIDUAL, axis_scale
+from modern_map_evidence import PRICE, number
 
 BINARY = Path(__file__).resolve().parent / 'ocr_runtime' / 'tesseract'
 TIMEOUT = 10.0
@@ -145,22 +145,33 @@ def _light(rgb):
     return min(rgb)>178 and max(rgb)-min(rgb)<12
 
 
-def _adjacent_tick_only(image,right,end,mark,words,height,band):
-    """Prove the pointer line is empty; every other pixel in its five-pixel strip belongs to one fixed tick."""
+def _adjacent_axis_ink(image,right,end,mark,words,height,band):
+    """Classify an empty pointer line only when its neighbouring ink belongs to a tick or tag rim."""
     if height is None:
         return None
     _,x,y=mark
     row=round(y)
-    if row-2<0 or row+2>=image.height or band[0]-3 <= y <= band[1]+3:
+    if row-2<0 or row+2>=image.height:
         return None
     background=image.getpixel((right+1,row))
     if max(background)>=128:
         return None
     deviations=[(cx,cy) for cy in range(row-2,row+3) for cx in range(right+1,end)
                 if image.getpixel((cx,cy)) != background]
-    if not deviations or any(abs(cy-row)<2 for _,cy in deviations):
+    if not deviations or any(cy==row for _,cy in deviations):
         return None
-    if len({cy for _,cy in deviations}) != 1:
+    ys={cy for _,cy in deviations}
+    if min(ys)<row<max(ys):
+        return None
+    # The outside antialias row of the opaque tag can enter the pointer strip.
+    # Require one continuous rim backed across its width by the light tag.
+    if ys in ({band[0]-1},{band[1]+1}):
+        inner=band[0]+2 if band[0]-1 in ys else band[1]-2
+        xs=[cx for cx,_ in deviations]
+        if len(xs)>(end-right)*.35 and len(xs)==xs[-1]-xs[0]+1 and all(
+                _light(image.getpixel((cx,inner))) for cx in xs):
+            return 'blank_pointer_row_adjacent_to_tag',None
+    if band[0]-3 <= y <= band[1]+3:
         return None
     close=[w for w in words if w.top-2<=y<=w.top+w.height+2 and w.left-2<=x<=w.left+w.width+2]
     if len(close)!=1:
@@ -171,7 +182,14 @@ def _adjacent_tick_only(image,right,end,mark,words,height,band):
     if not all(floor(w.left)-1<=cx<=ceil(w.left+w.width) and floor(w.top)<=cy<=ceil(w.top+w.height)
                for cx,cy in deviations):
         return None
-    return w
+    # If ink approaches to one pixel, it must continue into the recognised word.
+    side=1 if min(ys)>row else -1
+    if row+side in ys:
+        for cx,cy in deviations:
+            if not any(floor(w.left)<=nx<=ceil(w.left+w.width) and
+                       image.getpixel((nx,cy+side))!=background for nx in (cx-1,cx,cx+1)):
+                return None
+    return 'blank_pointer_row_adjacent_to_tick',w.text
 
 
 def _tag_ink(image,right,end,band):
@@ -193,6 +211,34 @@ def _tag_ink(image,right,end,band):
     if not ink:
         return None
     return rect,crop,ink,rectangular
+
+
+def _read_tag_word(crop,deadline,audit,cache,tag_key):
+    if cache is not None and tag_key in cache:
+        return cache[tag_key]
+    bordered=ImageOps.expand(crop,border=4,fill=255)
+    enlarged=bordered.resize((bordered.width*4,bordered.height*4),Image.Resampling.LANCZOS)
+    with BytesIO() as buf:
+        enlarged.save(buf,format='PNG')
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            return None,'budget_exhausted'
+        text,error=_tsv(buf.getvalue(),remaining,audit,segmentation=7)
+    w=None
+    if not error:
+        # Do not discard unrecognized or extra words from the single-line read.
+        rows=[v for v in csv.DictReader(StringIO(text),delimiter='\t',quoting=csv.QUOTE_NONE) if v.get('level')=='5']
+        boxes=_word_boxes(text,crop.size)
+        if len(rows)==1 and len(boxes)==1:
+            w=boxes[0]
+    if cache is not None:
+        cache[tag_key]=(w,error)
+    return w,error
+
+
+def _covers_ink(word,ink):
+    return word.confidence>=90 and all(abs(a-b)<=1.5 for a,b in
+        zip((word.left,word.top,word.left+word.width,word.top+word.height),ink))
 
 
 def _refine_partial_tag(image,right,end,band,printed,deadline,audit,cache,key):
@@ -223,36 +269,66 @@ def _refine_partial_tag(image,right,end,band,printed,deadline,audit,cache,key):
         return None
     if missing_left==missing_right or partial.left+partial.width<x+left or partial.left>x+stop:
         return None
-    if cached:
-        w,error=cache[tag_key]
-    else:
-        bordered=ImageOps.expand(crop,border=4,fill=255)
-        enlarged=bordered.resize((bordered.width*4,bordered.height*4),Image.Resampling.LANCZOS)
-        with BytesIO() as buf:
-            enlarged.save(buf,format='PNG')
-            remaining=deadline-time.monotonic()
-            if remaining<=0:
-                receipt['status']='budget_exhausted'
-                return None
-            text,error=_tsv(buf.getvalue(),remaining,audit,segmentation=7)
-        w=None
-        if not error:
-            # Do not discard unrecognized or extra words from the single-line read.
-            rows=[v for v in csv.DictReader(StringIO(text),delimiter='\t',quoting=csv.QUOTE_NONE) if v.get('level')=='5']
-            boxes=_word_boxes(text,crop.size)
-            if len(rows)==1 and len(boxes)==1:
-                w=boxes[0]
-        if cache is not None:
-            cache[tag_key]=(w,error)
+    w,error=_read_tag_word(crop,deadline,audit,cache,tag_key)
     if error or w is None:
         receipt['status']=error or 'unconfirmed'
         return None
-    if (w.confidence<90 or not (w.text.startswith(partial.text) if missing_right else w.text.endswith(partial.text))
-            or len(w.text)<=len(partial.text)
-            or any(abs(a-b)>1.5 for a,b in zip((w.left,w.top,w.left+w.width,w.top+w.height),ink))):
+    if (not _covers_ink(w,ink)
+            or not (w.text.startswith(partial.text) if missing_right else w.text.endswith(partial.text))
+            or len(w.text)<=len(partial.text)):
         return None
     receipt.update(status='read',text=w.text,confidence=w.confidence)
     return partial,w._replace(left=x+w.left,top=y+w.top)
+
+
+def _tag_border_correction(image,right,end,band,words,deadline,audit,cache,key):
+    """Resolve a rejected outer glyph only when the whole-strip box included the tag rim."""
+    tags=[w for w in words if band[0]-1<=w.mark[2]<=band[1]+1]
+    ticks=[number(t['text'])[0] for t in audit.get('ticks',())]
+    if len(tags)!=1 or len(ticks)<4 or tags[0].confidence>=50:
+        return None
+    word=tags[0]
+    value=number(word.text)[0]
+    if min(ticks)<=value<=max(ticks):
+        return None
+    source=_tag_ink(image,right,end,band)
+    if not source:
+        return None
+    (x,y,_,_),crop,ink,rectangular=source
+    left,top,stop,bottom=ink
+    if not rectangular or left==0 or top==0 or stop==crop.width or bottom==crop.height:
+        return None
+    # The suspect word spans an outside corner and extends over the full printed digits.
+    includes_left=word.left<x and word.left+word.width>=x+stop-1.5
+    includes_right=word.left+word.width>x+crop.width and word.left<=x+left+1.5
+    if includes_left==includes_right or (word.top>=y and word.top+word.height<=y+crop.height):
+        return None
+    tag_key=(key,'tag')
+    receipt=dict(partial=word.text,status='unconfirmed',reason='tag_border_in_word_box',
+                 cache_hit=cache is not None and tag_key in cache)
+    audit['tag_refinement']=receipt
+    isolated,error=_read_tag_word(crop,deadline,audit,cache,tag_key)
+    if error or isolated is None:
+        receipt['status']=error or 'unconfirmed'
+        return None
+    text=isolated.text
+    damaged=0 if includes_left else -1
+    intact=slice(1,None) if includes_left else slice(None,-1)
+    if (not _covers_ink(isolated,ink) or len(text)!=len(word.text) or text[intact]!=word.text[intact]
+            or not word.text[damaged].isdigit() or not text[damaged].isdigit() or text==word.text):
+        return None
+    receipt.update(status='read',text=text,confidence=isolated.confidence)
+    return word,isolated._replace(left=x+isolated.left,top=y+isolated.top)
+
+
+def _outer_digit_is_unique(old,new,where,tag_y):
+    # The isolated OCR supplies the price. The scale can veto a substitution,
+    # never choose between a pair of plausible readings.
+    for digit in '0123456789':
+        alternate=digit+new[1:] if old[0]!=new[0] else new[:-1]+digit
+        if alternate!=new and abs(where(float(number(alternate)[0]))-tag_y)<=MAX_TAG_RESIDUAL:
+            return False
+    return True
 
 
 def _pointer_off_blank(image, right, end, y, bounds):
@@ -354,9 +430,13 @@ def axis_scale_live(image,box,bounds,marks,*,reference=None,observe=None,timeout
                 if regular_height is None or word.height < regular_height / 2 or word.confidence < 90:
                     same_row = []
             if not same_row:
-                neighbour=_adjacent_tick_only(image,r,end,mark,printed,regular_height,band)
+                neighbour=_adjacent_axis_ink(image,r,end,mark,printed,regular_height,band)
                 if neighbour is not None:
-                    pointer_evidence.append(dict(_record_mark(mark,'blank_pointer_row_adjacent_to_tick'),printed=neighbour.text))
+                    reason,label=neighbour
+                    evidence=_record_mark(mark,reason)
+                    if label is not None:
+                        evidence['printed']=label
+                    pointer_evidence.append(evidence)
                     continue
             if len(same_row) != 1:
                 pointer_evidence.append(_record_mark(mark, 'ambiguous_pointer_off_axis'))
@@ -382,6 +462,16 @@ def axis_scale_live(image,box,bounds,marks,*,reference=None,observe=None,timeout
                 audit['occluded_ticks']=[dict(zip(('text','x','y'),omitted.mark))]
                 retained=[w.mark for w in printed if w is not omitted]
                 scale=axis_scale(image,box,bounds,[*fixed,*retained],reference=reference,audit=audit)
+        if scale is None and audit['condition']=='tick_span_insufficient' and 'tag_refinement' not in audit:
+            corrected=_tag_border_correction(image,r,end,band,printed,deadline,audit,cache,key)
+            if corrected is not None:
+                before,after=corrected
+                corrected_marks=[(after if w is before else w).mark for w in printed]
+                scale=axis_scale(image,box,bounds,[*fixed,*corrected_marks],reference=reference,audit=audit)
+                if scale is not None and not _outer_digit_is_unique(before.text,after.text,scale[1],audit['tag_y']):
+                    audit['tag_refinement']['status']='unconfirmed'
+                    audit['condition']='reference_tag_ambiguous'
+                    return None
         return scale
     finally:
         if observe:

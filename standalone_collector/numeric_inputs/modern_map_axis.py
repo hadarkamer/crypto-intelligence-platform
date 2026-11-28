@@ -5,6 +5,8 @@ import re
 from modern_map_evidence import PRICE, number, sample_groups, verified_member
 from model1_execution import StageFailure
 
+MAX_TAG_RESIDUAL = 2.2
+
 
 def axis_marks(page,box,prior,current):
     from modern_map_tooltip import _DOM
@@ -68,7 +70,7 @@ def axis_scale(image,box,bounds,marks,*,reference=None,audit=None):
     tag_error=abs(where(last)-center)
     if audit is not None:
         audit.update(tick_residual=tick_error,tag_residual=tag_error)
-    if tick_error>1.6 or tag_error>2.2:return fail('axis_position_conflict')
+    if tick_error>1.6 or tag_error>MAX_TAG_RESIDUAL:return fail('axis_position_conflict')
     # A dashed line must pass through the clean tag's centre. Contrast is
     # measured against its neighbouring rows rather than a hard-coded colour.
     def dashed(y):

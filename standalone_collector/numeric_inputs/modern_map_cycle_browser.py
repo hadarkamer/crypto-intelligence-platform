@@ -43,12 +43,61 @@ def unwrap(value):
     return value
 
 
+# Firefox has one physical pointer per browser context. Only native pointer input
+# and the short crosshair proof need ownership; all other Playwright calls can overlap.
+_POINTER_INPUT = frozenset({'move', 'down', 'up', 'wheel', 'click', 'dblclick', 'hover', 'tap'})
+
+
+class SharedPointer:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.owner = None
+
+    @contextmanager
+    def hold(self):
+        owner = getcurrent()
+        if self.owner is owner:
+            yield
+            return
+        # The enclosing job deadline still applies if a peer is waiting on Firefox.
+        # Each probe already allows 3 s for pointer-off and 3 s for the label.
+        from modern_map_reader import limited_timeout
+        access = _ACCESS.get()
+        if access:
+            access()
+        # Both ContextVars belong to the reader greenlet, not the asyncio task
+        # executing the awaitable. Snapshot the remaining budget before yielding.
+        timeout = limited_timeout(6000) / 1000
+        async def acquire():
+            async with asyncio.timeout(timeout):
+                await self.lock.acquire()
+        try:
+            wait(acquire())
+        except TimeoutError as exc:
+            if access:
+                access()
+            raise StageFailure('source_timeout') from exc
+        self.owner = owner
+        try:
+            if access:
+                access()
+            limited_timeout(6000)
+            yield
+        finally:
+            self.owner = None
+            self.lock.release()
+
+
 class ReaderPageAPI:
     """Convert public async handles, including nested handles passed to evaluate()."""
 
-    def __init__(self, raw, cache):
+    def __init__(self, raw, cache, pointer=None):
         self.raw, self.cache = raw, cache
+        self.pointer = pointer if pointer is not None else SharedPointer()
         self.listeners = {}
+
+    def pointer_scope(self):
+        return self.pointer.hold()
 
     def wrap(self, value):
         if isinstance(value, dict):
@@ -57,7 +106,7 @@ class ReaderPageAPI:
             return type(value)(self.wrap(item) for item in value)
         if type(value).__module__.startswith('playwright.async_api.'):
             if value not in self.cache:
-                proxy = ReaderPageAPI(value, self.cache)
+                proxy = ReaderPageAPI(value, self.cache, self.pointer)
                 self.cache[value] = proxy
                 return proxy
             return self.cache[value]
@@ -74,7 +123,12 @@ class ReaderPageAPI:
             if access and name not in ('dispose', 'close', 'remove_listener', 'is_closed'):
                 access()
             return self.wrap(wait(member(*unwrap(args), **unwrap(kwargs))))
-        return call
+        if name not in _POINTER_INPUT:
+            return call
+        def pointer_call(*args, **kwargs):
+            with self.pointer_scope():
+                return call(*args, **kwargs)
+        return pointer_call
 
     def on(self, event, callback):
         async def listener(*values):
