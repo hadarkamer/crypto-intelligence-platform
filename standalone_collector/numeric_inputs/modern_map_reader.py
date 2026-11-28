@@ -85,7 +85,65 @@ def label(page, text):
     return one(page.get_by_text(text, exact=True))
 
 
+# The currency picker also has accessible name "Coin". Bind this proof to a
+# single visible set of sibling mode controls, using their actual printed labels.
+_MODE_SELECTOR = r"""target => {
+  const selector='li,[role=tab],button';
+  const shown=e=>e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) &&
+    !e.closest('[aria-hidden="true"],[inert]') && e.getClientRects().length>0;
+  // CoinGlass can render two copies of the same label inside a single option
+  // for its sizing animation. Distinct controls are still counted separately.
+  function label(e){
+    const text=e.innerText.replace(/\s+/g,'');
+    if(/^(Coin)+$/.test(text))return 'Coin';
+    if(/^(Pair)+$/.test(text))return 'Pair';
+    return null;
+  }
+  const groupMember=e=>e.matches(selector)&&shown(e)&&
+    (['Coin','Pair'].includes(label(e))||!e.matches('[disabled],[aria-disabled="true"]'));
+  const controls=[...document.querySelectorAll(selector)].filter(e=>
+    /Coin|Pair/.test(e.textContent) && shown(e) && ['Coin','Pair'].includes(label(e)));
+  const groups=[...new Set(controls.map(e=>e.parentElement))].filter(group=>
+    controls.some(e=>e.parentElement===group && label(e)==='Coin') &&
+    controls.some(e=>e.parentElement===group && label(e)==='Pair'));
+  if(groups.length!==1)return null;
+  const members=[...groups[0].children].filter(groupMember);
+  if(members.length!==2)return null;
+  const coin=members.find(e=>label(e)==='Coin'),pair=members.find(e=>label(e)==='Pair');
+  if(!coin||!pair)return null;
+  function state(e){
+    const votes=new Set();
+    const parts=[e,...e.querySelectorAll('[aria-pressed],[aria-selected],[data-state],button,[role=tab]')];
+    for(const part of parts){
+      if(part!==e&&!shown(part))continue;
+      for(const attr of ['aria-pressed','aria-selected','data-state']){
+        if(!part.hasAttribute(attr))continue;
+        const v=part.getAttribute(attr).trim().toLowerCase();
+        if((attr==='data-state'?['active','on','selected']:['true']).includes(v))votes.add(true);
+        else if((attr==='data-state'?['inactive','off','unselected']:['false']).includes(v))votes.add(false);
+        else return null;
+      }
+      for(const token of part.classList){
+        if(/(?:^|_)(?:on|active|selected)(?:__|$)/i.test(token))votes.add(true);
+        if(/(?:^|_)(?:off|inactive|unselected)(?:__|$)/i.test(token))votes.add(false);
+      }
+    }
+    return votes.size>1?null:votes.has(true);
+  }
+  const a=state(coin),b=state(pair);
+  if(a===null||b===null||a===b)return null;
+  return target?coin:(a?'Coin':'Pair');
+}"""
+
+
 def choice_target(page, wanted):
+    if wanted=='Coin':
+        handle=page.evaluate_handle(_MODE_SELECTOR,True)
+        control=handle.as_element()
+        if control is None:
+            handle.dispose()
+            raise StageFailure('source_not_readable')
+        return control
     # The source paints a second copy of every label for sizing/animation.
     # Only the LI in the actual segmented control owns its selected state.
     scoped = page.locator('li,[role=tab],button').filter(has=page.get_by_text(wanted,exact=True))
@@ -95,6 +153,8 @@ def choice_target(page, wanted):
 
 
 def choice(page,wanted):
+    if wanted=='Coin':
+        return page.evaluate(_MODE_SELECTOR,False)=='Coin'
     return choice_target(page,wanted).evaluate("""n => {
       const active=e=>e.getAttribute('aria-pressed')==='true' || e.getAttribute('aria-selected')==='true' ||
           e.getAttribute('data-state')==='active' || [...e.classList].some(c=>/(?:^|_)(?:on|active|selected)(?:__|$)/i.test(c));
@@ -111,6 +171,19 @@ def symbol_control(page,symbol):
 
 
 def select_choice(page,wanted,*,requested=True):
+    if wanted=='Coin':
+        selected=page.evaluate(_MODE_SELECTOR,False)
+        if selected is None:
+            selected=wait_for(page,lambda:page.evaluate(_MODE_SELECTOR,False),
+                              timeout=limited_timeout(2500)/1000,requested=requested)
+        if selected=='Pair':
+            target=choice_target(page,wanted)
+            try:target.click(timeout=limited_timeout(2500))
+            finally:target.dispose()
+            wait_for(page,lambda:choice(page,wanted),requested=requested)
+        elif requested:
+            gate(page)
+        return
     if choice(page,wanted):
         if requested:
             gate(page)
@@ -687,9 +760,13 @@ def display_ready(page):
 
 
 def evidence_controls(page,symbol,model):
-    controls=[choice_target(page,f'Model {model}'),choice_target(page,'Coin'),symbol_control(page,symbol)]
-    controls.extend(option_control(page,key) for key in ('Range','Layout','Lens','Colours'))
-    return [control.bounding_box() for control in controls]
+    coin=choice_target(page,'Coin')
+    try:
+        controls=[choice_target(page,f'Model {model}'),coin,symbol_control(page,symbol)]
+        controls.extend(option_control(page,key) for key in ('Range','Layout','Lens','Colours'))
+        return [control.bounding_box() for control in controls]
+    finally:
+        coin.dispose()
 
 
 def save_evidence(screen,box,controls,output):
