@@ -146,6 +146,42 @@ class ClippedAxisTests(TestCase):
         self.assertEqual(receipt['ocr_calls'],1)
         self.assertIn(receipt['tag_refinement']['status'],('ink_touches_crop','tag_shape_unconfirmed'))
 
+    def test_split_tag_must_account_for_all_digits_in_spatial_order(self):
+        self.render_ink()
+        ticks=[w._replace(text=str(10*int(w.text))) for w in self.ticks]
+        left=self.word('10',85,width=12,left=6)
+        right=self.word('5',85,width=5,left=23)
+        result,receipt=self.read([*ticks,right,left],tag='105')
+        self.assertEqual((result,receipt['ocr_calls']),('105',2))
+        self.assertEqual(receipt['tag_refinement']['reason'],'tag_words_split')
+        for parts in ([left,right._replace(text='6')], [left._replace(text='1'),right],
+                      [left._replace(left=20),right], [left._replace(left=50),right]):
+            with self.subTest(parts=parts):
+                self.assertIsNone(self.read([*ticks,*parts],tag='105')[0])
+        self.assertIsNone(self.read([*ticks,right,left],tag='105',reference='106')[0])
+
+    def test_missing_tag_needs_independent_glyphs_when_an_adjacent_price_fits(self):
+        self.render_ink()
+        # The line fits both 10.5 and 10.4. A reliable word box alone is insufficient
+        # here: no independent printed tick glyphs are present in this fake image.
+        price,receipt=self.read(self.ticks)
+        self.assertIsNone(price)
+        self.assertEqual(receipt['condition'],'reference_tag_ambiguous')
+        public=_numeric_price_receipt(receipt|{'status':'failed'})
+        self.assertEqual(public['tag_refinement']['reason'],'tag_word_missing')
+        self.assertNotIn('partial',public['tag_refinement'])
+
+    def test_obscured_integer_tick_requires_actual_clipped_strokes(self):
+        words=[*self.ticks,self.word('1',76,width=27,height=8,confidence=1),self.word('10.5',85)]
+        self.assertIsNone(self.read(words)[0])
+        for x in (107,116,127):
+            self.paint.rectangle((x,75,x+1,77),fill=(140,150,160))
+        result,receipt=self.read(words)
+        self.assertEqual((result,receipt['ocr_calls']),('10.5',1))
+        self.assertEqual([a['text'] for a in receipt['occluded_ticks']],['1'])
+        self.paint.line((101,77,177,77),fill=(18,21,27))
+        self.assertIsNone(self.read(words)[0])
+
     def test_public_receipt_keeps_only_typed_market_provenance(self):
         receipt=_numeric_price_receipt(dict(status='failed',condition='pointer_price_unverified',
             pointer_evidence=[{'text':'1,661','x':5,'y':8,'reason':'blank_pointer_row_adjacent_to_tick','printed':'1,660'},

@@ -243,3 +243,64 @@ class NavigationTests(TestCase):
         self.assertEqual(sequence.count(['save','P']),2)
         self.assertEqual(sequence.count(['done','source_not_readable']),2)
         self.assertEqual([r['page_number'] for r in reports],[1,2])
+
+    def test_lane_reuses_only_a_guarded_responsive_page_after_local_rejection(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from uuid import uuid4
+        import modern_map_cycle_child as child
+
+        # The first job fails after reading the source; the next is a different
+        # target in the same lane. Observe page identity through the lane protocol.
+        async def trial(stage, *, witness=True, redirect=False, closed=False,
+                        secondary=None, code='source_not_readable'):
+            jobs=[str(uuid4()),str(uuid4())]
+            messages=[[jobs[0],'ETH',1,'48H'], 'committed',
+                      [jobs[1],'ETH',2,'1W'], 'committed', None]
+            url=reader.map_url('ETH',1)
+            pages=[Mock(url=url,is_closed=Mock(return_value=False),close=AsyncMock()) for _ in jobs]
+            context=Mock()
+            context.raw.browser.is_connected.return_value=True
+            context.raw.new_page=AsyncMock(side_effect=pages)
+            context.wrap.side_effect=lambda raw: Mock(raw=raw)
+            seen=[]
+            async def source(page,target,image,emit):
+                seen.append((page.raw,target.model,target.timeframe))
+                if len(seen)==1:
+                    emit('stage',dict(name=stage,status='failed'))
+                    if witness:
+                        emit('stage',dict(name='post_failure_market_observation',status='observed'))
+                    page.raw.url=reader.map_url('ETH',2) if redirect else url
+                    page.raw.is_closed.return_value=closed
+                    failure=StageFailure(code)
+                    if secondary:
+                        failure.secondary_guard_code=secondary
+                    raise failure
+
+            def process(root,job,ack,*,base_only,target,capture_fn):
+                try:
+                    capture_fn(*target,root/'image.png',observe=lambda *_:None,base_only=base_only)
+                except StageFailure:
+                    ack(b'P')
+                    raise
+                ack(b'S')
+
+            with patch.object(child,'_process_basic_btc',process), \
+                 patch.object(child,'read',AsyncMock(side_effect=messages)), \
+                 patch.object(child,'write',AsyncMock()) as write:
+                await child.lane(Mock(),Mock(),context,Mock(read=source),Path('.'))
+            self.assertEqual([call.args[-1] for call in write.await_args_list],
+                             [['save','P'],['done',code],['save','S'],['done',None]])
+            self.assertEqual([entry[1:] for entry in seen],[(1,'48H'),(2,'1W')])
+            return seen[0][0] is seen[1][0]
+
+        price='basic_verified_price_axis'
+        close='basic_verify_closing_market'
+        for stage in (price,close):
+            with self.subTest(stage=stage):
+                self.assertTrue(asyncio.run(trial(stage)))
+        for stage,opts in (('map_navigation',{}),(price,{'witness':False}),(price,{'closed':True}),
+                           (close,{'redirect':True}),(price,{'secondary':'source_navigation_changed'}),
+                           (close,{'code':'source_rate_limited'}),(close,{'code':'evidence_store_failed'})):
+            with self.subTest(stage=stage,opts=opts):
+                self.assertFalse(asyncio.run(trial(stage,**opts)))

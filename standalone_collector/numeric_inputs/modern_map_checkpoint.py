@@ -58,11 +58,14 @@ def _numeric_price_receipt(step):
             for v in step['pointer_evidence'][:32] if isinstance(v,dict) and v.get('reason') in allowed
             and price(v.get('text')) and coordinate(v.get('x')) and coordinate(v.get('y'))]
     refinement=step.get('tag_refinement')
-    if isinstance(refinement,dict) and price(refinement.get('partial')) and refinement.get('status') in {
+    if isinstance(refinement,dict) and (price(refinement.get('partial')) or (
+            refinement.get('reason')=='tag_word_missing' and 'partial' not in refinement)) and refinement.get('status') in {
             'read','unconfirmed','ink_touches_crop','tag_shape_unconfirmed','budget_exhausted','ocr_timed_out','ocr_runtime_unavailable','ocr_process_failed'}:
-        item={'partial':refinement['partial'],'status':refinement['status']}
-        if refinement.get('reason')=='tag_border_in_word_box':
-            item['reason']='tag_border_in_word_box'
+        item={'status':refinement['status']}
+        if 'partial' in refinement:
+            item['partial']=refinement['partial']
+        if refinement.get('reason') in ('tag_border_in_word_box','tag_word_missing','tag_words_split'):
+            item['reason']=refinement['reason']
         if type(refinement.get('cache_hit')) is bool:
             item['cache_hit']=refinement['cache_hit']
         if price(refinement.get('text')) and type(refinement.get('confidence')) in (float,int) and 0<=refinement['confidence']<=100:

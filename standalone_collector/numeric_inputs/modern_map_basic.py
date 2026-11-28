@@ -18,7 +18,8 @@ from modern_map_axis import axis_marks
 from modern_map_axis_ocr import axis_scale_live
 from modern_map_cursor import read_cursor_pair
 from modern_map_cells import _agree, merge_cells
-from modern_map_basic_numbers import HORIZON_SECONDS, basic_target, market_amounts, period_seconds
+from modern_map_basic_numbers import (HORIZON_SECONDS, REALIZED_24H, basic_target, closing_realized_update,
+                                      market_amounts, period_seconds)
 from modern_map_evidence import box_member, equivalent, iso, number, sample_groups, source_clock, verified_member
 from modern_map_overview import _FIELDS, after_read_failure, overview
 from modern_map_surface import prepare_surface
@@ -46,17 +47,21 @@ def identity(page, symbol, model, timeframe):
     return selection
 
 
-def prove_observations(before, after, emit=None):
+def prove_observations(before, after, emit=None, *, base_only=False):
     # Compare dates and numerical source fields, including the entire visible
     # rail. Unlike a number-only total, this also detects changed row content.
     for key in (*_FIELDS,'source_time','sidebar_levels','raw_sidebar_rows','unreadable_sidebar_containers',
                 'ambiguous_fields','duplicate_sidebar_levels'):
         if before.get(key)!=after.get(key):
+            if base_only and key in REALIZED_24H:
+                continue
             if emit:
                 emit('stage',dict(name='basic_compare_market',status='failed',
                     expected={key:before.get(key)},received={key:after.get(key)}))
             require(False,'source_epoch_or_values_changed')
     ui.core_observation(after)
+    if base_only:
+        closing_realized_update(before, after)
 
 
 def right_edge_regions(image, bounds, side, scale, model):
@@ -368,7 +373,7 @@ def capture_basic(page,symbol,model,timeframe,output,*,guard=None,observe=None,b
                             # Collect a fresh overview after the closing image and cursor
                             # observation. Its explicitly labeled price can supply the tag.
                             after=record('recheck_market_update',lambda:overview(page))
-                            record('basic_verify_closing_market',lambda:prove_observations(side,after,emit))
+                            record('basic_verify_closing_market',lambda:prove_observations(side,after,emit,base_only=base_only))
                             end_scale,_=record('basic_closing_price_axis',lambda:read_axis(
                                 'closing',final,closing_box,closing_bounds,end_marks,after.get('raw_last_price'),closing_pointer))
                             if number(end_scale[0])[0]!=number(raw_ref)[0]:

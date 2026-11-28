@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from modern_map_axis import MAX_TAG_RESIDUAL, axis_scale
 from modern_map_evidence import PRICE, number
@@ -139,6 +139,36 @@ def _covered_punctuation(word, band, image, words):
     y = min(top+2, bottom) if above else max(top, bottom-2)
     xs = range(ceil(word.left+2),floor(word.left+word.width-2))
     return len(xs)>=4 and xs[0]>=0 and xs[-1]<image.width and all(_light(image.getpixel((x,y))) for x in xs)
+
+
+def _cut_tick(word, band, image, height):
+    """Require visible glyph strokes terminating against an opaque tag edge."""
+    if not height or word.confidence >= 50:
+        return False
+    upper = word.mark[2] < band[0] - 1 and word.top + word.height >= band[0]
+    lower = word.mark[2] > band[1] + 1 and word.top <= band[1] + 1
+    if not (upper or lower):
+        return False
+    edge, step = (band[0], -1) if upper else (band[1], 1)
+    xs = range(max(0, ceil(word.left)), min(image.width, floor(word.left + word.width)))
+    # Only strokes directly backed by the tag at its boundary can be hidden.
+    covered = [x for x in xs if _light(image.getpixel((x, edge))) and
+               _light(image.getpixel((x, edge - step)))]
+    if not covered or not 0 <= edge + step * ceil(height) < image.height:
+        return False
+    background = image.getpixel((min(covered), edge + step * ceil(height)))
+    if max(background) >= 64:
+        return False
+    def strokes(offset):
+        y = edge + step * offset
+        return [x for x in covered if max(image.getpixel((x, y))) - max(background) >= 48]
+    touching = set(strokes(1)).intersection(strokes(2))
+    # Ink from multiple characters runs into the tag, and the entire visible
+    # portion is shorter than the regular printed ticks. A complete short tick
+    # and an OCR box that merely overlaps the tag border do not suffice.
+    if not touching or max(touching) - min(touching) <= height:
+        return False
+    return any(not strokes(offset) for offset in range(3, floor(height)))
 
 
 def _light(rgb):
@@ -281,54 +311,115 @@ def _refine_partial_tag(image,right,end,band,printed,deadline,audit,cache,key):
     return partial,w._replace(left=x+w.left,top=y+w.top)
 
 
-def _tag_border_correction(image,right,end,band,words,deadline,audit,cache,key):
-    """Resolve a rejected outer glyph only when the whole-strip box included the tag rim."""
-    tags=[w for w in words if band[0]-1<=w.mark[2]<=band[1]+1]
-    ticks=[number(t['text'])[0] for t in audit.get('ticks',())]
-    if len(tags)!=1 or len(ticks)<4 or tags[0].confidence>=50:
+def _rejected_tag(image, right, end, band, words, deadline, audit, cache, key):
+    """Read the intact interior once if the primary tag is missing, fragmented or crosses its rim."""
+    tags = sorted((w for w in words if band[0]-1 <= w.mark[2] <= band[1]+1), key=lambda w: w.left)
+    if (len(audit.get('ticks', ())) < 4 or (len(tags) == 1 and tags[0].confidence >= 50)
+            or (len(tags) > 1 and any(a.left + a.width > b.left for a,b in zip(tags,tags[1:])))):
         return None
-    word=tags[0]
-    value=number(word.text)[0]
-    if min(ticks)<=value<=max(ticks):
-        return None
-    source=_tag_ink(image,right,end,band)
+    source = _tag_ink(image, right, end, band)
     if not source:
         return None
-    (x,y,_,_),crop,ink,rectangular=source
-    left,top,stop,bottom=ink
+    (x,y,rx,by), crop, ink, rectangular = source
+    left,top,stop,bottom = ink
     if not rectangular or left==0 or top==0 or stop==crop.width or bottom==crop.height:
         return None
-    # The suspect word spans an outside corner and extends over the full printed digits.
-    includes_left=word.left<x and word.left+word.width>=x+stop-1.5
-    includes_right=word.left+word.width>x+crop.width and word.left<=x+left+1.5
-    if includes_left==includes_right or (word.top>=y and word.top+word.height<=y+crop.height):
+    reason = 'tag_words_split' if tags else 'tag_word_missing'
+    if len(tags)==1:
+        word = tags[0]
+        includes_left = word.left < x and word.left + word.width >= x + stop - 1.5
+        includes_right = word.left + word.width > rx and word.left <= x + left + 1.5
+        if includes_left==includes_right or (word.top>=y and word.top+word.height<=by):
+            return None
+        reason = 'tag_border_in_word_box'
+    tag_key = (key,'tag')
+    receipt = dict(reason=reason, status='unconfirmed', cache_hit=cache is not None and tag_key in cache)
+    if tags:
+        receipt['partial'] = tags[0].text
+    audit['tag_refinement'] = receipt
+    isolated,error = _read_tag_word(crop,deadline,audit,cache,tag_key)
+    if error or isolated is None or not _covers_ink(isolated,ink):
+        receipt['status'] = error or 'unconfirmed'
         return None
-    tag_key=(key,'tag')
-    receipt=dict(partial=word.text,status='unconfirmed',reason='tag_border_in_word_box',
-                 cache_hit=cache is not None and tag_key in cache)
-    audit['tag_refinement']=receipt
-    isolated,error=_read_tag_word(crop,deadline,audit,cache,tag_key)
-    if error or isolated is None:
-        receipt['status']=error or 'unconfirmed'
-        return None
-    text=isolated.text
-    damaged=0 if includes_left else -1
-    intact=slice(1,None) if includes_left else slice(None,-1)
-    if (not _covers_ink(isolated,ink) or len(text)!=len(word.text) or text[intact]!=word.text[intact]
-            or not word.text[damaged].isdigit() or not text[damaged].isdigit() or text==word.text):
-        return None
+    text = isolated.text
+    if len(tags)==1:
+        old = tags[0].text
+        changed = [i for i,(a,b) in enumerate(zip(old,text)) if a!=b]
+        if len(old)!=len(text) or len(changed)!=1:
+            return None
+        i = changed[0]
+        if not (old[i].isdigit() and text[i].isdigit()):
+            return None
+        # For an out-of-range primary value only the glyph on the contaminated
+        # outside corner is suspect. All the other original characters must agree.
+        ticks = [number(t['text'])[0] for t in audit['ticks']]
+        if not min(ticks) <= number(old)[0] <= max(ticks) and i!=(0 if includes_left else len(old)-1):
+            return None
+    elif tags:
+        pieces = ''.join(w.text for w in tags)
+        if pieces not in (text, text.replace(',','')) or any(
+                w.left + w.width < x + left or w.left > x + stop for w in tags):
+            return None
     receipt.update(status='read',text=text,confidence=isolated.confidence)
-    return word,isolated._replace(left=x+isolated.left,top=y+isolated.top)
+    return tags, isolated._replace(left=x+isolated.left,top=y+isolated.top), crop
 
 
 def _outer_digit_is_unique(old,new,where,tag_y):
-    # The isolated OCR supplies the price. The scale can veto a substitution,
-    # never choose between a pair of plausible readings.
-    for digit in '0123456789':
-        alternate=digit+new[1:] if old[0]!=new[0] else new[:-1]+digit
-        if alternate!=new and abs(where(float(number(alternate)[0]))-tag_y)<=MAX_TAG_RESIDUAL:
-            return False
-    return True
+    # The intact crop supplies the price. Calibration only vetoes other
+    # plausible readings of the single digit that differs from the primary.
+    i = next(i for i,(a,b) in enumerate(zip(old,new)) if a!=b)
+    return not any(d != new[i] and abs(where(float(number(new[:i]+d+new[i+1:])[0]))-tag_y)<=MAX_TAG_RESIDUAL
+                   for d in '0123456789')
+
+
+def _glyph_holes(gray, text, dark_ink):
+    """Inspect each separated printed glyph with foreground/background polarities normalized."""
+    low, high = gray.getextrema()
+    if high - low < 32:
+        return {}
+    mask = gray.point(lambda p: 255 if (p < (low+high)/2) == dark_ink else 0)
+    runs = [list(xs) for ink,xs in groupby(range(mask.width),
+            key=lambda x: mask.crop((x,0,x+1,mask.height)).getbbox() is not None) if ink]
+    if len(runs) != len(text):
+        return {}
+    counts = {}
+    for i, xs in enumerate(runs):
+        glyph = ImageOps.expand(mask.crop((xs[0],0,xs[-1]+1,mask.height)),border=1,fill=0)
+        ImageDraw.floodfill(glyph,(0,0),255)
+        holes = 0
+        while (hole := glyph.tobytes().find(b'\x00')) >= 0:
+            ImageDraw.floodfill(glyph,(hole % glyph.width, hole // glyph.width),255)
+            holes += 1
+        counts[i] = holes
+    return counts
+
+
+def _missing_tag_agrees(image, crop, isolated, ticks, where, tag_y):
+    # Without primary glyphs, a neighbouring value can also fit the tag line.
+    # Distinguish its last digit using independently labelled glyphs on intact
+    # ticks of this same axis. Missing, touching or contradictory shapes fail.
+    raw = isolated.text
+    value, error = number(raw)
+    unit = 2 * error
+    if abs(where(float(value + 10*unit))-where(float(value))) <= 2*MAX_TAG_RESIDUAL:
+        return False
+    neighbours = {str((int(raw[-1])+d) % 10) for d in range(-9,10) if d and
+                  value + d*unit >= 0 and abs(where(float(value+d*unit))-tag_y)<=MAX_TAG_RESIDUAL}
+    if not neighbours:
+        return True
+    holes = _glyph_holes(crop,raw,True).get(len(raw)-1)
+    if holes is None:
+        return False
+    witnesses = {digit:set() for digit in neighbours | {raw[-1]}}
+    for word in ticks:
+        if word.confidence < 90:
+            continue
+        rect=(floor(word.left)-1,floor(word.top)-1,ceil(word.left+word.width)+1,ceil(word.top+word.height)+1)
+        shapes = _glyph_holes(image.crop(rect).convert('L'),word.text,False)
+        for i, count in shapes.items():
+            if word.text[i] in witnesses:
+                witnesses[word.text[i]].add(count)
+    return witnesses[raw[-1]] == {holes} and all(witnesses[d] and holes not in witnesses[d] for d in neighbours)
 
 
 def _pointer_off_blank(image, right, end, y, bounds):
@@ -455,23 +546,34 @@ def axis_scale_live(image,box,bounds,marks,*,reference=None,observe=None,timeout
             audit['condition']='reference_tag_incomplete'
             return None
         scale=axis_scale(image,box,bounds,[*fixed,*(w.mark for w in printed)],reference=reference,audit=audit)
+        adjusted = None
+        if (scale is None and 'tag_refinement' not in audit and
+                audit['condition'] in ('reference_missing','reference_conflict','axis_position_conflict','tick_span_insufficient')
+                and reference is None and not any(band[0]-1 <= y <= band[1]+1 for _,_,y in fixed)):
+            adjusted = _rejected_tag(image,r,end,band,printed,deadline,audit,cache,key)
+            if adjusted:
+                tags, full, crop = adjusted
+                printed = [w for w in printed if w not in tags] + [full]
+                scale = axis_scale(image,box,bounds,[*fixed,*(w.mark for w in printed)],reference=reference,audit=audit)
         if scale is None and audit['condition'] in ('tick_span_insufficient','axis_position_conflict'):
-            covered=[w for w in printed if _covered_punctuation(w,band,image,printed)]
+            covered = [w for w in printed if _covered_punctuation(w,band,image,printed)
+                       or _cut_tick(w,band,image,regular_height)]
             if len(covered)==1:
                 omitted=covered[0]
                 audit['occluded_ticks']=[dict(zip(('text','x','y'),omitted.mark))]
-                retained=[w.mark for w in printed if w is not omitted]
-                scale=axis_scale(image,box,bounds,[*fixed,*retained],reference=reference,audit=audit)
-        if scale is None and audit['condition']=='tick_span_insufficient' and 'tag_refinement' not in audit:
-            corrected=_tag_border_correction(image,r,end,band,printed,deadline,audit,cache,key)
-            if corrected is not None:
-                before,after=corrected
-                corrected_marks=[(after if w is before else w).mark for w in printed]
-                scale=axis_scale(image,box,bounds,[*fixed,*corrected_marks],reference=reference,audit=audit)
-                if scale is not None and not _outer_digit_is_unique(before.text,after.text,scale[1],audit['tag_y']):
-                    audit['tag_refinement']['status']='unconfirmed'
-                    audit['condition']='reference_tag_ambiguous'
-                    return None
+                printed = [w for w in printed if w is not omitted]
+                scale=axis_scale(image,box,bounds,[*fixed,*(w.mark for w in printed)],reference=reference,audit=audit)
+        if scale is not None and adjusted:
+            tags, full, crop = adjusted
+            if not tags:
+                supported = _missing_tag_agrees(image,crop,full, [w for w in printed if w is not full],
+                                                scale[1],audit['tag_y'])
+            else:
+                supported = len(tags)>1 or _outer_digit_is_unique(tags[0].text,full.text,scale[1],audit['tag_y'])
+            if not supported:
+                audit['tag_refinement']['status']='unconfirmed'
+                audit['condition']='reference_tag_ambiguous'
+                return None
         return scale
     finally:
         if observe:

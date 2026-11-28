@@ -63,6 +63,7 @@ def valid_range_selection(timeframe, selection):
 SOURCE_URL = basic_source_url('BTC')
 AMOUNTS = ('raw_total', 'raw_above_total', 'raw_below_total', 'raw_realized_total',
            'raw_realized_longs', 'raw_realized_shorts', 'raw_largest_value')
+REALIZED_24H = ('raw_realized_total', 'raw_realized_longs', 'raw_realized_shorts')
 PERCENTAGES = ('raw_above_pct','raw_below_pct')
 REFERENCE = ('raw_price_step','raw_column_period','raw_largest_price')
 SAME_MAP = ('raw_total','raw_above_total','raw_below_total','raw_price_step','raw_column_period',
@@ -120,6 +121,18 @@ def market_amounts(overview):
         # this result shape requires. Retain the source without inventing 0%.
         reject_observation('printed_zero_total_percent_undefined')
     return {name:values[name] if name in values else read(name) for name in AMOUNTS}
+
+
+def closing_realized_update(opening, closing):
+    """Keep the full second 24h readout when the independent panel updates."""
+    if all(opening.get(k) == closing.get(k) for k in REALIZED_24H):
+        return {}
+    try:
+        equivalent(closing.get('raw_realized_total'),
+                   [closing.get('raw_realized_longs'), closing.get('raw_realized_shorts')])
+    except StageFailure:
+        reject_observation('closing_realized_24h_incomplete_or_inconsistent')
+    return {k: closing[k] for k in REALIZED_24H}
 
 
 def verified_number(raw, amount=False, *, positive=False):
@@ -324,13 +337,20 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
     end_ref=number(raw_last_price_after) if raw_last_price_after is not None else None
     if end_ref is not None:
         require(end_ref[0]==ref[0], 'hover_snapshot_changed')
+    rolling_update = {}
     if provenance=='live':
         require(column_time_after==column_time and end_ref is not None,'hover_snapshot_changed')
         expected=dict(symbol=symbol,heatmap_model=model,timeframe=timeframe,mode='Coin',column_time=column_time_after,
                       same_document=True,settings_verified=True,same_market_labels=True)
         require(all(_same_json(v,end_observation.get(k)) for k,v in expected.items()),'hover_snapshot_changed')
+        # Fresh Coin reads carry the independently checked opening/closing cursor.
+        # Compact older receipts have no closing 24h fields. New receipts only
+        # retain the second complete triplet when it differs from the first.
+        if 'sidebar_levels' in end_observation or any(k in end_observation for k in REALIZED_24H):
+            rolling_update = closing_realized_update(overview, end_observation)
+            require(not rolling_update or (cursor_proof is not None and not enrichment), 'hover_snapshot_changed')
         if 'sidebar_levels' in end_observation:
-            require(all(end_observation.get(k)==overview.get(k) for k in SAME_MAP) and
+            require(all(end_observation.get(k)==overview.get(k) for k in SAME_MAP if k not in REALIZED_24H) and
                     fact_rows(end_observation)==fact_rows(overview),'hover_snapshot_changed')
         require(end_observation.get('sidebar_rows')==len({number(r['raw_price'])[0] for r in fact_rows(overview)}),
                 'hover_snapshot_changed')
@@ -389,6 +409,7 @@ def build_basic_snapshot(overview, *, symbol, model, timeframe, source_url, sour
                   native_bins_inspected=native_bins_inspected,full_map_amounts_verified=False,duplicates_removed=duplicates)
     fields=raw_display(overview)
     source_rows={k:end_observation.get(k) for k in required_close}
+    source_rows.update(rolling_update)
     source_rows.update(source_time=source_time_after,raw_last_price=raw_last_price_after)
     if provenance=='live':
         source_rows.update({k:end_observation[k] for k in ('symbol','heatmap_model','timeframe','mode','column_time',

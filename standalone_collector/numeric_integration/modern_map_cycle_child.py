@@ -32,7 +32,7 @@ async def read(stream):
 async def lane(reader, writer, context, account, directory, index=0, first_observation=None):
     """A tab is reused only after its own job is closed and independently acknowledged."""
     from dedicated_map_flow import MapTarget
-    from modern_map_basic_numbers import basic_target
+    from modern_map_basic_numbers import basic_target, coin_map_url
     page = None
     page_number = 0
     try:
@@ -44,6 +44,7 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
             root = directory / job
             reading = False
             failure_stage = None
+            same_document_after_failure = False
             def source_event(event):
                 if not trace_source:
                     return
@@ -58,9 +59,13 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
             def capture(s, m, t, image, *, observe, base_only):
                 assert base_only
                 def market_event(kind, data):
-                    nonlocal reading, failure_stage
+                    nonlocal reading, failure_stage, same_document_after_failure
                     if kind == 'stage' and data.get('status') == 'failed':
                         failure_stage = data.get('name')
+                        same_document_after_failure = False
+                    if kind == 'stage' and data.get('name') == 'post_failure_market_observation':
+                        # Emitted only after checking the original document and reading its market clock.
+                        same_document_after_failure = data.get('status') == 'observed'
                     if kind == 'range_selection':
                         from modern_map_basic_numbers import range_matches
                         import re
@@ -109,7 +114,6 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
                     try:
                         from model1_execution import CODES
                         from modern_map_reader import _route_observed
-                        from modern_map_basic_numbers import coin_map_url
                         first = getattr(failure, 'first_failure_code', error)
                         secondary = getattr(failure, 'secondary_guard_code', None)
                         details = dict(job_id=job, symbol=symbol, model=model, timeframe=timeframe, tab_index=index,
@@ -124,7 +128,18 @@ async def lane(reader, writer, context, account, directory, index=0, first_obser
                         print('COINGLASS_CYCLE_FAILURE '+json.dumps(details,separators=(',',':')),flush=True)
                     except Exception:
                         pass  # Supplemental diagnostics must not mask the original failure or block tab cleanup.
-                if page is not None:
+                # Partial receipt handling has finished. Keep a responsive source tab for
+                # the next job, whose selection and opening identity are independently proved.
+                keep_page = (
+                    isinstance(failure, StageFailure) and error == 'source_not_readable'
+                    and failure_stage in ('basic_verified_price_axis', 'basic_verify_closing_market')
+                    and same_document_after_failure
+                    and not getattr(failure, 'secondary_guard_code', None)
+                    and not getattr(failure, 'first_failure_code', None)
+                    and page is not None and context.raw.browser.is_connected()
+                    and not page.raw.is_closed() and page.raw.url == coin_map_url(symbol, model)
+                )
+                if page is not None and not keep_page:
                     try:
                         async with asyncio.timeout(4):
                             await page.raw.close()
